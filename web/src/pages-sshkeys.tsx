@@ -1,20 +1,16 @@
 import { useState, type FormEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "./api";
-
-interface SSHKey {
-  id: number;
-  name: string;
-  public_key: string;
-  fingerprint: string;
-  created_at: string;
-}
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type SSHKey } from "./api";
+import { formatDate } from "./format";
+import { useSSHKeys } from "./hooks";
+import { Button, Card, ConfirmDialog, Empty, ErrorText, Field, Input, Loading, PageHeader, inputClass } from "./ui";
 
 export function SSHKeys() {
   const qc = useQueryClient();
-  const keys = useQuery({ queryKey: ["ssh-keys"], queryFn: () => api<SSHKey[]>("/ssh-keys") });
+  const keys = useSSHKeys();
   const [name, setName] = useState("");
   const [publicKey, setPublicKey] = useState("");
+  const [toDelete, setToDelete] = useState<SSHKey | null>(null);
 
   const add = useMutation({
     mutationFn: () => api<SSHKey>("/ssh-keys", { json: { name, public_key: publicKey } }),
@@ -26,7 +22,10 @@ export function SSHKeys() {
   });
   const remove = useMutation({
     mutationFn: (id: number) => api(`/ssh-keys/${id}`, { method: "DELETE" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["ssh-keys"] }),
+    onSuccess: () => {
+      setToDelete(null);
+      qc.invalidateQueries({ queryKey: ["ssh-keys"] });
+    },
   });
 
   const submit = (e: FormEvent) => {
@@ -36,44 +35,59 @@ export function SSHKeys() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold">SSH keys</h1>
+      <PageHeader title="SSH keys" subtitle="Keys are installed on a VM when you create it. Password login is disabled." />
 
-      <form onSubmit={submit} className="space-y-3 rounded-lg border p-4">
-        <input className="w-full rounded border px-3 py-2" placeholder="Name (e.g. work laptop)" maxLength={64} required value={name} onChange={(e) => setName(e.target.value)} />
-        <textarea
-          className="h-24 w-full rounded border px-3 py-2 font-mono text-xs"
-          placeholder="Paste your public key (ssh-ed25519 AAAA… or ssh-rsa AAAA…)"
-          required
-          value={publicKey}
-          onChange={(e) => setPublicKey(e.target.value)}
-        />
-        {add.error && <p className="text-sm text-red-600">{(add.error as Error).message}</p>}
-        <button className="rounded bg-black px-4 py-2 text-white disabled:opacity-50" disabled={add.isPending}>
-          Add key
-        </button>
-      </form>
+      <Card>
+        <form onSubmit={submit} className="space-y-3">
+          <Field label="Name">
+            <Input placeholder="e.g. work laptop" maxLength={64} required value={name} onChange={(e) => setName(e.target.value)} />
+          </Field>
+          <Field label="Public key" hint="Paste the contents of your .pub file (ssh-ed25519 …). RSA keys need at least 2048 bits.">
+            <textarea
+              className={`${inputClass} h-24 font-mono text-xs`}
+              placeholder="ssh-ed25519 AAAA…"
+              required
+              value={publicKey}
+              onChange={(e) => setPublicKey(e.target.value)}
+            />
+          </Field>
+          <ErrorText error={add.error} />
+          <Button disabled={add.isPending}>{add.isPending ? "Adding…" : "Add key"}</Button>
+        </form>
+      </Card>
 
-      {keys.isLoading && <p>Loading…</p>}
-      {keys.error && <p className="text-red-600">{(keys.error as Error).message}</p>}
-      {keys.data && keys.data.length === 0 && <p className="text-gray-600">No keys yet. Add one before creating a VM.</p>}
+      {keys.isLoading && <Loading />}
+      <ErrorText error={keys.error} />
+      {keys.data && keys.data.length === 0 && <Empty title="No keys yet">Add one above before creating a VM.</Empty>}
       <ul className="space-y-2">
         {keys.data?.map((k) => (
-          <li key={k.id} className="flex items-center justify-between gap-3 rounded border p-3">
-            <div className="min-w-0">
-              <p className="font-medium">{k.name}</p>
-              <p className="truncate font-mono text-xs text-gray-600">{k.fingerprint}</p>
-            </div>
-            <button
-              className="shrink-0 text-sm text-red-600 underline disabled:opacity-50"
-              disabled={remove.isPending}
-              onClick={() => confirm(`Delete key "${k.name}"? Existing VMs keep it until rebuilt.`) && remove.mutate(k.id)}
-            >
-              Delete
-            </button>
+          <li key={k.id}>
+            <Card className="flex items-center justify-between gap-3 !p-3 sm:!p-4">
+              <div className="min-w-0">
+                <p className="font-medium text-slate-900 dark:text-slate-50">{k.name}</p>
+                <p className="truncate font-mono text-xs text-slate-500 dark:text-slate-400">{k.fingerprint}</p>
+                <p className="text-xs text-slate-400">Added {formatDate(k.created_at)}</p>
+              </div>
+              <Button variant="secondary" className="shrink-0 !text-red-600 dark:!text-red-400" onClick={() => setToDelete(k)}>
+                Delete
+              </Button>
+            </Card>
           </li>
         ))}
       </ul>
-      {remove.error && <p className="text-sm text-red-600">{(remove.error as Error).message}</p>}
+
+      {toDelete && (
+        <ConfirmDialog
+          title={`Delete "${toDelete.name}"?`}
+          confirmLabel="Delete key"
+          busy={remove.isPending}
+          error={remove.error}
+          onConfirm={() => remove.mutate(toDelete.id)}
+          onCancel={() => setToDelete(null)}
+        >
+          <p>VMs that already have this key keep it until they are rebuilt. Deleting it here only stops it being offered for new VMs.</p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }

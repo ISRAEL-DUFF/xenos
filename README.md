@@ -20,13 +20,14 @@ Spec: [VPS V1 Weekend Build Plan.md](<VPS V1 Weekend Build Plan.md>).
 | `internal/monitor` | Operator checks: failed jobs, disk pool, RAM, IPs, stuck billing, webhook probing, CPU abuse watch |
 | `internal/alert` | Telegram/email alerts with per-key cooldown |
 | `internal/firewall` | Renders the nftables rule that blocks outbound SMTP |
+| `internal/accounts` | Account actions shared by the admin API and `xenosctl` (ban) |
 | `internal/worker` | Assembles the job handlers and metering loop |
 | `internal/vm` | Worker-side VM lifecycle: provision, power, delete (the only code that changes VM state) |
 | `internal/sshkey` | SSH public key validation |
 | `internal/testutil` | Per-test Postgres schemas for integration tests |
 | `cmd/xenosctl` | Operator CLI: IP pool, admin grants, VM limits |
 | `internal/billing` | `ISpend` interface, in-memory `Fake`, metering helpers |
-| `web/` | React + Vite + TS + Tailwind dashboard, embedded via `go:embed` |
+| `web/` | React + Vite + TS + Tailwind dashboard, embedded via `go:embed`; `web/e2e` is the browser journey test |
 
 ## Develop
 
@@ -86,9 +87,18 @@ Plans are priced in USDT (int64 micro-USDT, never floats). Customers fund naira 
 - **Health:** `/healthz` is liveness; `/readyz` also needs Postgres and a worker heartbeat from the last 3 minutes. Point the uptime monitor at `/readyz`.
 - **Operations:** [deploy/README.md](deploy/README.md) (control-plane VM: systemd, Caddy, first setup, nightly `pg_dump` with off-host copy and restore test), [deploy/proxmox/README.md](deploy/proxmox/README.md) (SMTP block, nightly `vzdump`, API lockdown), [docs/launch-checklist.md](docs/launch-checklist.md) (the acceptance checklist mapped to tests and to the manual host steps).
 
+## Dashboard and admin
+
+Everything a customer does is in the browser, on desktop and phone: sign up, verify email, reset password, overview (wallet with naira equivalent, hours of runway, low-balance and grace banners), VM list, create flow (plan cards in USDT and naira, OS, SSH keys, hostname; the button is disabled with the reason when the wallet, VM limit or keys block it), VM detail (copyable `ssh` command, start/stop/reboot, delete with typed-name confirmation, cost this month), SSH keys, wallet (bank-transfer details, card top-up, auto-convert toggle, quote-and-confirm conversion, history) and account. VM pages poll every 5 seconds, so provisioning → running appears without a refresh.
+
+The admin area (`/admin`, admins only) has users (search, status, balances; suspend, ban, raise the VM limit, manual balance adjustment with a required note), all VMs (force stop, delete, port-25 exemption, CPU-flagged VMs), host capacity (vCPU/RAM committed vs physical, thin-pool use, free IPs), failed jobs with retry, and revenue and the iSpend rate (read-only). Every admin action is written to `admin_audit`. Admin accounts are created and protected from the command line: `xenosctl admin grant <email>`.
+
+Auth for the dashboard is the httpOnly session cookie with a CSRF header; bearer tokens remain for scripts. The server sets a strict Content-Security-Policy, so the UI uses no inline scripts or styles.
+
+**Browser test:** `cd web && npm run e2e` drives a real Chromium through the whole customer journey, the admin area and the phone layout (and fails on console errors such as CSP violations). It needs the stack running with the fakes; see [web/e2e/README.md](web/e2e/README.md).
+
 ## Status
 
-Phases 2, 3 and 4 are code-complete and tested against fakes. What is **not** verified: anything on a real Proxmox host (provisioning, cloud-init networking, the SMTP block, `vzdump`), the real iSpend service (client not written; webhook format assumed), and the real Telegram/email alert channel.
-Implemented: schema, config, job queue, Proxmox client, auth, SSH keys, VM lifecycle, `xenosctl`, wallet and conversions, deposit webhook, hourly metering, suspension/grace, low-balance emails, abuse guardrails, alerting and monitoring, backup scripts, deployment files.
-Not built: the real iSpend client, admin endpoints and manual balance adjustments, the VM/wallet dashboard pages (Phase 5).
-Plan prices in the seed migration are placeholders. Emails are logged, not sent, until a provider is chosen.
+All five phases are code-complete and tested against fakes. What is **not** verified: anything on a real Proxmox host (provisioning, cloud-init networking, the SMTP block, `vzdump`), the real iSpend service (client not written; webhook, adjustment and card-top-up calls are assumed), and the real Telegram/email alert channel.
+Not built: the real iSpend client, email delivery (emails are logged), and the browser console and other backlog items from the plan.
+Plan prices in the seed migration are placeholders.

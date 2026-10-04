@@ -33,11 +33,12 @@ Run with the iSpend sandbox and test keys first. Switch to live only when every 
 ## Safety
 
 - [ ] **auto** User A cannot see or act on user B's VMs, keys or quotes: `TestVMIsolationAndActions`, `TestSSHKeys`, `TestAutoConvertOffAndManualConversion`
-- [ ] **manual** Non-admin users get 403 on every `/admin` route (admin endpoints arrive with Phase 5; `requireAdmin` exists and is applied to each one as it is added)
+- [ ] **auto** Non-admin users get 403 (and anonymous callers 401) on every `/admin` route; the test walks the router so a new route cannot be left unguarded: `TestEveryAdminRouteRejectsNonAdmins`
 - [ ] **host** Outbound port 25 is blocked from VMs and port 587 still works (see `deploy/proxmox/README.md`)
 - [ ] **auto** Signup and login are rate limited: `TestRateLimits`
 - [ ] **auto** Sustained 90%+ CPU for 6 hours flags a VM: `TestCPUWatchFlagsSustainedMining`
-- [ ] **manual** `xenosctl user ban`, `flagged`, `port25 allow` work on a real database
+- [ ] **auto** Admin: ban, suspend, vm_limit, balance adjustment with note, force stop/delete, port 25 exemption, audited: `TestAdminSuspendBanAndLimit`, `TestAdminBalanceAdjustment`, `TestAdminVMActionsAndPort25`
+- [ ] **manual** `xenosctl user ban`, `flagged`, `port25 allow` work on the production database
 
 ## Backups and monitoring
 
@@ -47,9 +48,10 @@ Run with the iSpend sandbox and test keys first. Switch to live only when every 
 - [ ] **manual** The real Telegram/email channel receives a test alert (see `deploy/README.md` §8)
 - [ ] **manual** The uptime monitor alerts when `/readyz` goes red (stop the worker for 4 minutes)
 
-## Dashboard (Phase 5)
+## Dashboard
 
-- [ ] **manual** The full customer journey works in the dashboard on desktop and phone
+- [ ] **auto** The full customer journey (signup, verify, key, create, provision, stop/start, delete, wallet, account) and the admin area work in a real browser on desktop, and every page fits a phone screen without sideways scrolling: `cd web && npm run e2e`
+- [ ] **manual** One pass through the same journey on a real phone, against the real services (the browser test uses the fakes)
 
 ## Go live
 

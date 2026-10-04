@@ -1,31 +1,31 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "./api";
 import { useAuth } from "./auth";
+import { Button, Card, ErrorText, Field, Input } from "./ui";
 
-const input = "w-full rounded border px-3 py-2";
-const button = "w-full rounded bg-black px-3 py-2 text-white disabled:opacity-50";
-
-function Card({ title, children }: { title: string; children: ReactNode }) {
+function AuthCard({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="mx-auto mt-10 max-w-sm space-y-4">
-      <h1 className="text-xl font-semibold">{title}</h1>
-      {children}
+    <div className="mx-auto mt-4 max-w-sm sm:mt-10">
+      <Card className="space-y-4">
+        <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-50">{title}</h1>
+        {children}
+      </Card>
     </div>
   );
 }
 
 function useSubmit(fn: () => Promise<void>) {
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    setError("");
+    setError(null);
     setBusy(true);
     try {
       await fn();
     } catch (err) {
-      setError((err as Error).message);
+      setError(err);
     } finally {
       setBusy(false);
     }
@@ -33,30 +33,44 @@ function useSubmit(fn: () => Promise<void>) {
   return { error, busy, onSubmit };
 }
 
-const Err = ({ msg }: { msg: string }) => (msg ? <p className="text-sm text-red-600">{msg}</p> : null);
+const linkClass = "font-medium text-indigo-600 underline-offset-2 hover:underline dark:text-indigo-400";
 
 export function Login() {
   const { user, login } = useAuth();
   const nav = useNavigate();
+  const location = useLocation();
+  const from = (location.state as { from?: string } | null)?.from ?? "/";
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const f = useSubmit(async () => {
     await login(email, password);
-    nav("/vms");
+    nav(from, { replace: true });
   });
-  if (user) return <Navigate to="/vms" replace />;
+  if (user) return <Navigate to={from} replace />;
   return (
-    <Card title="Log in">
+    <AuthCard title="Log in">
       <form onSubmit={f.onSubmit} className="space-y-3">
-        <input className={input} type="email" placeholder="Email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-        <input className={input} type="password" placeholder="Password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
-        <Err msg={f.error} />
-        <button className={button} disabled={f.busy}>Log in</button>
+        <Field label="Email">
+          <Input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+        </Field>
+        <Field label="Password">
+          <Input type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
+        </Field>
+        <ErrorText error={f.error} />
+        <Button className="w-full" disabled={f.busy}>
+          {f.busy ? "Logging in…" : "Log in"}
+        </Button>
       </form>
-      <p className="text-sm">
-        <Link to="/forgot-password" className="underline">Forgot password?</Link> · <Link to="/signup" className="underline">Create account</Link>
+      <p className="text-sm text-slate-600 dark:text-slate-300">
+        <Link to="/forgot-password" className={linkClass}>
+          Forgot password?
+        </Link>{" "}
+        ·{" "}
+        <Link to="/signup" className={linkClass}>
+          Create account
+        </Link>
       </p>
-    </Card>
+    </AuthCard>
   );
 }
 
@@ -69,26 +83,43 @@ export function Signup() {
   const [agree, setAgree] = useState(false);
   const f = useSubmit(async () => {
     await signup(email, password, phone);
-    nav("/vms");
+    nav("/");
   });
-  if (user) return <Navigate to="/vms" replace />;
+  if (user) return <Navigate to="/" replace />;
   return (
-    <Card title="Create account">
+    <AuthCard title="Create your account">
       <form onSubmit={f.onSubmit} className="space-y-3">
-        <input className={input} type="email" placeholder="Email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-        <input className={input} type="tel" placeholder="Phone (+234…)" autoComplete="tel" required value={phone} onChange={(e) => setPhone(e.target.value)} />
-        <input className={input} type="password" placeholder="Password (min 10 characters)" autoComplete="new-password" minLength={10} required value={password} onChange={(e) => setPassword(e.target.value)} />
-        <label className="flex gap-2 text-sm">
-          <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} required />
-          <span>I accept the acceptable-use policy: no spam, mining, scanning or attacks. Violations mean deletion without refund.</span>
+        <Field label="Email">
+          <Input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+        </Field>
+        <Field label="Phone" hint="International format, for account security and support.">
+          <Input type="tel" placeholder="+234…" autoComplete="tel" required value={phone} onChange={(e) => setPhone(e.target.value)} />
+        </Field>
+        <Field label="Password" hint="At least 10 characters.">
+          <Input type="password" autoComplete="new-password" minLength={10} required value={password} onChange={(e) => setPassword(e.target.value)} />
+        </Field>
+        <label className="flex gap-2 text-sm text-slate-600 dark:text-slate-300">
+          <input type="checkbox" className="mt-0.5 h-4 w-4 shrink-0" checked={agree} onChange={(e) => setAgree(e.target.checked)} required />
+          <span>
+            I accept the{" "}
+            <Link to="/aup" target="_blank" className={linkClass}>
+              acceptable use policy
+            </Link>
+            : no spam, mining, scanning or attacks. Violations mean deletion without refund.
+          </span>
         </label>
-        <Err msg={f.error} />
-        <button className={button} disabled={f.busy || !agree}>Sign up</button>
+        <ErrorText error={f.error} />
+        <Button className="w-full" disabled={f.busy || !agree}>
+          {f.busy ? "Creating account…" : "Sign up"}
+        </Button>
       </form>
-      <p className="text-sm">
-        Already registered? <Link to="/login" className="underline">Log in</Link>
+      <p className="text-sm text-slate-600 dark:text-slate-300">
+        Already registered?{" "}
+        <Link to="/login" className={linkClass}>
+          Log in
+        </Link>
       </p>
-    </Card>
+    </AuthCard>
   );
 }
 
@@ -101,7 +132,7 @@ export function VerifyEmail() {
     const token = params.get("token");
     if (!token) {
       setState("error");
-      setMsg("Missing token.");
+      setMsg("This link is missing its token.");
       return;
     }
     api("/auth/verify", { json: { token } })
@@ -115,11 +146,28 @@ export function VerifyEmail() {
       });
   }, []);
   return (
-    <Card title="Verify email">
-      {state === "working" && <p>Verifying…</p>}
-      {state === "ok" && <p>Your email is verified. <Link to="/vms" className="underline">Continue</Link></p>}
-      {state === "error" && <Err msg={msg} />}
-    </Card>
+    <AuthCard title="Verify email">
+      {state === "working" && <p className="text-sm">Verifying…</p>}
+      {state === "ok" && (
+        <p className="text-sm">
+          Your email is verified.{" "}
+          <Link to="/" className={linkClass}>
+            Continue
+          </Link>
+        </p>
+      )}
+      {state === "error" && (
+        <>
+          <p role="alert" className="text-sm text-red-600 dark:text-red-400">{msg}</p>
+          <p className="text-sm">
+            <Link to="/account" className={linkClass}>
+              Request a new link
+            </Link>{" "}
+            from your account page.
+          </p>
+        </>
+      )}
+    </AuthCard>
   );
 }
 
@@ -131,17 +179,21 @@ export function ForgotPassword() {
     setSent(true);
   });
   return (
-    <Card title="Reset password">
+    <AuthCard title="Reset password">
       {sent ? (
-        <p>If an account exists for that email, a reset link is on its way.</p>
+        <p className="text-sm">If an account exists for that email, a reset link is on its way.</p>
       ) : (
         <form onSubmit={f.onSubmit} className="space-y-3">
-          <input className={input} type="email" placeholder="Email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-          <Err msg={f.error} />
-          <button className={button} disabled={f.busy}>Send reset link</button>
+          <Field label="Email">
+            <Input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+          </Field>
+          <ErrorText error={f.error} />
+          <Button className="w-full" disabled={f.busy}>
+            Send reset link
+          </Button>
         </form>
       )}
-    </Card>
+    </AuthCard>
   );
 }
 
@@ -154,12 +206,16 @@ export function ResetPassword() {
     nav("/login");
   });
   return (
-    <Card title="Choose a new password">
+    <AuthCard title="Choose a new password">
       <form onSubmit={f.onSubmit} className="space-y-3">
-        <input className={input} type="password" placeholder="New password (min 10 characters)" autoComplete="new-password" minLength={10} required value={password} onChange={(e) => setPassword(e.target.value)} />
-        <Err msg={f.error} />
-        <button className={button} disabled={f.busy}>Update password</button>
+        <Field label="New password" hint="At least 10 characters.">
+          <Input type="password" autoComplete="new-password" minLength={10} required value={password} onChange={(e) => setPassword(e.target.value)} />
+        </Field>
+        <ErrorText error={f.error} />
+        <Button className="w-full" disabled={f.busy}>
+          Update password
+        </Button>
       </form>
-    </Card>
+    </AuthCard>
   );
 }

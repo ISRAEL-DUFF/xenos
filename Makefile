@@ -1,4 +1,4 @@
-.PHONY: web build run test lint db sqlc release
+.PHONY: web build run test lint db sqlc release e2e
 web:
 	cd web && npm install && npm run build
 build: web
@@ -21,3 +21,6 @@ db:
 	docker compose up -d postgres
 sqlc:
 	sqlc generate
+# Browser journey test; needs the stack running with the fakes (see web/e2e/README.md).
+e2e:
+	cd web && npm run e2e
