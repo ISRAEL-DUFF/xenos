@@ -2,6 +2,7 @@ import { Link, Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, formatUSDT, type Plan } from "./api";
 import { useAuth } from "./auth";
+import { SSHKeys } from "./pages-sshkeys";
 import { ForgotPassword, Login, ResetPassword, Signup, VerifyEmail } from "./pages-auth";
 
 function Plans() {
@@ -80,7 +81,7 @@ export default function App() {
         <Route path="/reset-password" element={<ResetPassword />} />
         <Route element={<RequireAuth />}>
           <Route path="/vms" element={<Soon name="VMs" />} />
-          <Route path="/ssh-keys" element={<Soon name="SSH keys" />} />
+          <Route path="/ssh-keys" element={<SSHKeys />} />
           <Route path="/wallet" element={<Soon name="Wallet" />} />
           <Route path="/account" element={<Soon name="Account" />} />
         </Route>

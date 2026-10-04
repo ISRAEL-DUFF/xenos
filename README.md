@@ -46,6 +46,6 @@ Rate limits are in-memory (single instance): signup 3/hour/IP, login 30/15min/IP
 
 ## Status
 
-Implemented: schema, config, job queue, Proxmox client, fake iSpend, auth (backend + dashboard pages), `GET /v1/plans`, `GET /v1/templates`.
-Everything else under `/v1` returns 501 until built (SSH keys, VMs, wallet, webhooks, worker handlers, metering, admin).
+Implemented: schema, config, job queue, Proxmox client, fake iSpend, auth, SSH keys (backend + dashboard pages), `GET /v1/plans`, `GET /v1/templates`.
+Everything else under `/v1` returns 501 until built (VMs, wallet, webhooks, worker handlers, metering, admin).
 Plan prices in the seed migration are placeholders. Emails are logged, not sent, until a provider is chosen.

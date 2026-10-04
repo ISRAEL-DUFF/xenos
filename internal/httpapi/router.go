@@ -70,9 +70,12 @@ func (s *Server) Router() http.Handler {
 			r.Post("/auth/resend-verification", s.resendVerification)
 			r.Post("/auth/change-password", s.changePassword)
 
+			r.Get("/ssh-keys", s.listSSHKeys)
+			r.Post("/ssh-keys", s.createSSHKey)
+			r.Delete("/ssh-keys/{id}", s.deleteSSHKey)
+
 			// Not yet implemented; see "VPS V1 Weekend Build Plan.md" Phase 2/3.
 			for _, route := range []struct{ method, path string }{
-				{"GET", "/ssh-keys"}, {"POST", "/ssh-keys"}, {"DELETE", "/ssh-keys/{id}"},
 				{"POST", "/vms"}, {"GET", "/vms"}, {"GET", "/vms/{id}"}, {"DELETE", "/vms/{id}"},
 				{"POST", "/vms/{id}/reboot"}, {"POST", "/vms/{id}/stop"}, {"POST", "/vms/{id}/start"},
 				{"GET", "/wallet"}, {"POST", "/wallet/convert"},
