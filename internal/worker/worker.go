@@ -31,13 +31,7 @@ const (
 
 // Run blocks until ctx is cancelled.
 func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger) error {
-	var pve proxmox.API
-	if cfg.PVEURL == "" {
-		log.Warn("XENOS_PVE_URL unset: using in-memory fake Proxmox, no real VMs will be created")
-		pve = proxmox.NewFake()
-	} else {
-		pve = proxmox.New(cfg.PVEURL, cfg.PVENode, cfg.PVETokenID, cfg.PVETokenSecret, cfg.PVEInsecureTLS)
-	}
+	pve := NewProxmox(cfg, log)
 
 	var v6 netip.Prefix
 	if cfg.IPv6Prefix != "" {
@@ -92,4 +86,13 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISp
 	}()
 	q.Run(ctx, cfg.WorkerConcurrency, handlers, func(err error) { log.Error("job", "err", err) })
 	return nil
+}
+
+// NewProxmox returns the real Proxmox client, or an in-memory fake when XENOS_PVE_URL is unset.
+func NewProxmox(cfg config.Config, log *slog.Logger) proxmox.API {
+	if cfg.PVEURL == "" {
+		log.Warn("XENOS_PVE_URL unset: using in-memory fake Proxmox, no real VMs will be created")
+		return proxmox.NewFake()
+	}
+	return proxmox.New(cfg.PVEURL, cfg.PVENode, cfg.PVETokenID, cfg.PVETokenSecret, cfg.PVEInsecureTLS)
 }

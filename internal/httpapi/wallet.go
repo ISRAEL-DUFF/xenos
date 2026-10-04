@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/israel-duff/xenos/internal/auth"
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/store/db"
 	"github.com/israel-duff/xenos/internal/wallet"
@@ -246,3 +247,38 @@ func (s *Server) ispendWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
+
+// cardTopUp starts a card payment at iSpend and returns the hosted checkout URL.
+// The deposit then arrives through the same webhook as a bank transfer.
+func (s *Server) cardTopUp(w http.ResponseWriter, r *http.Request) {
+	u := principalFrom(r.Context()).User
+	var in struct {
+		AmountKobo int64 `json:"amount_ngn_kobo"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.AmountKobo < wallet.MinConversionKobo || in.AmountKobo > maxCardTopUpKobo {
+		writeErr(w, http.StatusBadRequest, "amount must be between ₦100 and ₦1,000,000")
+		return
+	}
+	if !u.IspendCustomerID.Valid {
+		writeErr(w, http.StatusServiceUnavailable, "wallet is not available yet, try again shortly")
+		return
+	}
+	// A fresh key per attempt: each click is a new payment the customer chooses to complete or abandon.
+	tok, _, err := auth.NewToken()
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	url, err := s.ISpend.CardTopUp(r.Context(), "card:"+tok, u.IspendCustomerID.String, in.AmountKobo)
+	if err != nil {
+		s.Log.Warn("card top-up failed", "user_id", u.ID, "err", err)
+		writeErr(w, http.StatusServiceUnavailable, "card payments are unavailable right now, try a bank transfer or try again later")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"checkout_url": url})
+}
+
+const maxCardTopUpKobo = 1_000_000 * 100

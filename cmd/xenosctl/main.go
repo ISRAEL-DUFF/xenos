@@ -19,12 +19,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/israel-duff/xenos/internal/accounts"
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/firewall"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
-	"github.com/israel-duff/xenos/internal/vm"
 )
 
 func main() {
@@ -103,32 +103,22 @@ func withVMID(arg string, fn func(int64) error) error {
 
 func setBan(ctx context.Context, st *store.Store, email string, ban bool) error {
 	email = strings.ToLower(email)
-	status := "active"
-	if ban {
-		status = "banned"
-	}
 	var uid int64
-	if err := st.Pool.QueryRow(ctx, `UPDATE users SET status = $2 WHERE email = $1 RETURNING id`, email, status).Scan(&uid); err != nil {
+	if err := st.Pool.QueryRow(ctx, `SELECT id FROM users WHERE email = $1`, email).Scan(&uid); err != nil {
 		return fmt.Errorf("no user with email %s", email)
 	}
 	if !ban {
+		if _, err := st.Q.SetUserStatusByID(ctx, db.SetUserStatusByIDParams{ID: uid, Status: "active"}); err != nil {
+			return err
+		}
 		fmt.Println("ok")
 		return nil
 	}
-	if err := st.Q.DeleteUserSessions(ctx, uid); err != nil {
-		return err
-	}
-	ids, err := st.Q.ListUserLiveVMIDs(ctx, uid)
+	n, err := accounts.Ban(ctx, st, jobs.New(st.Pool), uid)
 	if err != nil {
 		return err
 	}
-	q := jobs.New(st.Pool)
-	for _, id := range ids {
-		if err := q.Enqueue(ctx, vm.JobSuspend, vm.Payload{VMID: id}); err != nil {
-			return err
-		}
-	}
-	fmt.Printf("banned; sessions revoked; suspending %d VM(s). Deleting them is a separate decision.\n", len(ids))
+	fmt.Printf("banned; sessions revoked; suspending %d VM(s). Deleting them is a separate decision.\n", n)
 	return nil
 }
 

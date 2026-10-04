@@ -11,6 +11,27 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Adjustment struct {
+	ID               int64       `json:"id"`
+	AdminID          int64       `json:"admin_id"`
+	UserID           int64       `json:"user_id"`
+	AmountUusdt      int64       `json:"amount_uusdt"`
+	Note             string      `json:"note"`
+	IspendMovementID pgtype.Text `json:"ispend_movement_id"`
+	Status           string      `json:"status"`
+	LastError        pgtype.Text `json:"last_error"`
+	CreatedAt        time.Time   `json:"created_at"`
+}
+
+type AdminAudit struct {
+	ID      int64     `json:"id"`
+	AdminID int64     `json:"admin_id"`
+	Action  string    `json:"action"`
+	Target  string    `json:"target"`
+	Detail  []byte    `json:"detail"`
+	At      time.Time `json:"at"`
+}
+
 type AlertsSent struct {
 	Key        string    `json:"key"`
 	LastSentAt time.Time `json:"last_sent_at"`

@@ -125,7 +125,7 @@ func TestMonitoringEndpoints(t *testing.T) {
 		case strings.Contains(r.path, "/storage/"):
 			return `{"used":850,"total":1000,"avail":150}`
 		default:
-			return `{"memory":{"total":68719476736,"used":1,"free":2}}`
+			return `{"cpuinfo":{"cpus":32},"memory":{"total":68719476736,"used":1,"free":2}}`
 		}
 	})
 	ctx := context.Background()
@@ -141,9 +141,9 @@ func TestMonitoringEndpoints(t *testing.T) {
 	if (*got)[1].path != "/api2/json/nodes/pve1/storage/vmdata/status" {
 		t.Fatalf("storage path: %s", (*got)[1].path)
 	}
-	mem, err := c.NodeMemoryTotal(ctx)
-	if err != nil || mem != 68719476736 {
-		t.Fatalf("memory: %d %v", mem, err)
+	node, err := c.NodeInfo(ctx)
+	if err != nil || node.MemTotal != 68719476736 || node.CPUs != 32 {
+		t.Fatalf("node: %+v %v", node, err)
 	}
 	if (Usage{}).Fraction() != 0 {
 		t.Fatal("empty usage must not divide by zero")

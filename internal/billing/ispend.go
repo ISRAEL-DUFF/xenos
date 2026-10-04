@@ -53,6 +53,13 @@ type ISpend interface {
 	// Charge moves USDT from the customer's wallet to the VPS merchant wallet.
 	// Returns ErrInsufficientFunds when the wallet cannot cover amount.
 	Charge(ctx context.Context, key, customerID string, amountUUSDT int64) (Movement, error)
+	// Adjust moves USDT between the merchant wallet and a customer's wallet on an
+	// admin's instruction. Positive credits the customer, negative debits them
+	// (ErrInsufficientFunds if they lack it). note is recorded on the movement.
+	Adjust(ctx context.Context, key, customerID string, amountUUSDT int64, note string) (Movement, error)
+	// CardTopUp starts a card payment into the customer's NGN wallet (Paystack inside
+	// iSpend) and returns the hosted checkout URL to send the customer to.
+	CardTopUp(ctx context.Context, key, customerID string, amountKobo int64) (checkoutURL string, err error)
 	// Reverse undoes a prior movement (refunds), keyed by its own idempotency key.
 	Reverse(ctx context.Context, key, movementID string) (Movement, error)
 }

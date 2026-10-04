@@ -210,3 +210,38 @@ func (f *Fake) ExpireQuote(id string) {
 	defer f.mu.Unlock()
 	f.expired[id] = true
 }
+
+func (f *Fake) Adjust(_ context.Context, key, id string, amt int64, _ string) (Movement, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Down {
+		return Movement{}, errDown
+	}
+	if m, ok := f.seen[key]; ok {
+		return m, nil
+	}
+	c, ok := f.customers[id]
+	if !ok {
+		return Movement{}, fmt.Errorf("billing: unknown customer %s", id)
+	}
+	if c.usdt+amt < 0 {
+		return Movement{}, ErrInsufficientFunds
+	}
+	c.usdt += amt
+	f.Merchant -= amt
+	m := Movement{ID: f.next("mv")}
+	f.seen[key] = m
+	return m, nil
+}
+
+func (f *Fake) CardTopUp(_ context.Context, key, id string, amountKobo int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Down {
+		return "", errDown
+	}
+	if _, ok := f.customers[id]; !ok {
+		return "", fmt.Errorf("billing: unknown customer %s", id)
+	}
+	return fmt.Sprintf("https://pay.example.test/checkout/%s?amount=%d", key, amountKobo), nil
+}

@@ -37,6 +37,8 @@ type vmJSON struct {
 	SSHCommand  string    `json:"ssh_command,omitempty"`
 	HourlyUUSDT int64     `json:"price_uusdt_hourly"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Detail view only: what this VM has cost so far this UTC month.
+	MonthCostUUSDT *int64 `json:"month_cost_uusdt,omitempty"`
 }
 
 func newVMJSON(id int64, hostname, region, plan, tpl, state, ipv4 string, ipv6 pgtype.Text, user string, hourly int64, created time.Time) vmJSON {
@@ -53,6 +55,10 @@ func newVMJSON(id int64, hostname, region, plan, tpl, state, ipv4 string, ipv6 p
 
 func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 	p := principalFrom(r.Context())
+	if p.User.Status != "active" {
+		writeErr(w, http.StatusForbidden, "your account is suspended; contact support")
+		return
+	}
 	var in struct {
 		Plan      string  `json:"plan"`
 		Template  string  `json:"template"`
@@ -203,7 +209,25 @@ func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.respondVM(w, r, id, principalFrom(r.Context()).User.ID, http.StatusOK)
+	userID := principalFrom(r.Context()).User.ID
+	v, err := s.Store.Q.GetUserVM(r.Context(), db.GetUserVMParams{ID: id, UserID: userID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt)
+	now := time.Now().UTC()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	cost, err := s.Store.Q.MonthChargedForVM(r.Context(), db.MonthChargedForVMParams{VmID: id, Hour: monthStart, Hour_2: monthStart.AddDate(0, 1, 0)})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	out.MonthCostUUSDT = &cost
+	writeJSON(w, http.StatusOK, out)
 }
 
 // respondVM always filters by owner, so a VM id from another account is a 404.

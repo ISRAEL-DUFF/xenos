@@ -181,15 +181,18 @@ func (c *Client) StoragePool(ctx context.Context, storage string) (Usage, error)
 	return Usage{Used: st.Used, Total: st.Total}, err
 }
 
-// NodeMemoryTotal is the host's physical RAM in bytes.
-func (c *Client) NodeMemoryTotal(ctx context.Context) (int64, error) {
+// NodeInfo reports the host's logical CPU count and physical RAM.
+func (c *Client) NodeInfo(ctx context.Context) (NodeInfo, error) {
 	var st struct {
+		CPUInfo struct {
+			CPUs int `json:"cpus"`
+		} `json:"cpuinfo"`
 		Memory struct {
 			Total int64 `json:"total"`
 		} `json:"memory"`
 	}
 	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/status", c.node), nil, &st)
-	return st.Memory.Total, err
+	return NodeInfo{CPUs: st.CPUInfo.CPUs, MemTotal: st.Memory.Total}, err
 }
 
 func (c *Client) Destroy(ctx context.Context, vmid int) (string, error) {

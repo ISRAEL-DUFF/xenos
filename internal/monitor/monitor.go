@@ -121,7 +121,8 @@ func (m *Monitor) hostCapacity(ctx context.Context) error {
 				m.Cfg.Storage, f*100, pool.Used>>30, pool.Total>>30))
 	}
 
-	total, err := m.PVE.NodeMemoryTotal(ctx)
+	node, err := m.PVE.NodeInfo(ctx)
+	total := node.MemTotal
 	if err != nil {
 		m.Notify.Notify(ctx, "proxmox-unreachable", 30*time.Minute, "Proxmox API is not answering: "+truncate(err.Error(), 200))
 		return nil

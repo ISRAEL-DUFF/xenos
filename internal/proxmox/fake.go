@@ -19,6 +19,7 @@ type Fake struct {
 	CPU      map[int]float64 // vmid -> CPU fraction reported by Guests
 	Pool     Usage
 	MemTotal int64
+	CPUs     int
 	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
 	BeforeOp func(op string, vmid int)
 }
@@ -33,7 +34,7 @@ type FakeVM struct {
 }
 
 func NewFake() *Fake {
-	return &Fake{VMs: map[int]*FakeVM{}, Fail: map[string]error{}, CPU: map[int]float64{}, MemTotal: 64 << 30, Pool: Usage{Total: 1 << 40}}
+	return &Fake{VMs: map[int]*FakeVM{}, Fail: map[string]error{}, CPU: map[int]float64{}, MemTotal: 64 << 30, CPUs: 16, Pool: Usage{Total: 1 << 40}}
 }
 
 var ErrFakeNotFound = errors.New("proxmox fake: no such vm")
@@ -183,8 +184,8 @@ func (f *Fake) StoragePool(context.Context, string) (Usage, error) {
 	return f.Pool, f.Fail["pool"]
 }
 
-func (f *Fake) NodeMemoryTotal(context.Context) (int64, error) {
+func (f *Fake) NodeInfo(context.Context) (NodeInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.MemTotal, f.Fail["memory"]
+	return NodeInfo{CPUs: f.CPUs, MemTotal: f.MemTotal}, f.Fail["memory"]
 }

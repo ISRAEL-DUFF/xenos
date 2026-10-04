@@ -17,6 +17,7 @@ import (
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
+	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/wallet"
 )
@@ -31,6 +32,7 @@ type Server struct {
 	Mailer  mail.Mailer
 	Wallet  *wallet.Service
 	Cache   *billing.BalanceCache
+	PVE     proxmox.API // optional; the admin capacity view reports the host as unreachable without it
 
 	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit *auth.Limiter
 }
@@ -91,9 +93,27 @@ func (s *Server) Router() http.Handler {
 			r.Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
 
 			r.Get("/wallet", s.getWallet)
+			r.With(s.requireVerified).Post("/wallet/topup/card", s.cardTopUp)
 			r.Patch("/wallet/settings", s.walletSettings)
 			// Starting a top-up or conversion needs a verified email.
 			r.With(s.requireVerified).Post("/wallet/convert", s.convert)
+		})
+
+		// Operator area: every route requires an admin account.
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(s.requireAuth, s.requireAdmin)
+			r.Get("/users", s.adminListUsers)
+			r.Get("/users/{id}", s.adminGetUser)
+			r.Patch("/users/{id}", s.adminUpdateUser)
+			r.Post("/users/{id}/adjustments", s.adminAdjust)
+			r.Get("/vms", s.adminListVMs)
+			r.Post("/vms/{id}/stop", s.adminVMAction("stop"))
+			r.Delete("/vms/{id}", s.adminVMAction("delete"))
+			r.Post("/vms/{id}/port25", s.adminPort25)
+			r.Get("/capacity", s.adminCapacity)
+			r.Get("/jobs", s.adminListJobs)
+			r.Post("/jobs/{id}/retry", s.adminRetryJob)
+			r.Get("/revenue", s.adminRevenue)
 		})
 
 		// Authenticated by webhook signature instead of a session (Phase 3).

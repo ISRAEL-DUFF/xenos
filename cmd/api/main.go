@@ -52,6 +52,9 @@ func run(log *slog.Logger) error {
 	mailer := mail.LogMailer{Log: log}
 
 	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mailer, log, web.Dist())
+	if cfg.PVEURL != "" { // the admin capacity view reads host usage; without a host it reports it unreachable
+		srv.PVE = worker.NewProxmox(cfg, log)
+	}
 	hs := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Router(), ReadHeaderTimeout: 10 * time.Second}
 
 	if cfg.RunWorker {

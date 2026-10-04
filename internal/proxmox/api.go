@@ -18,7 +18,7 @@ type API interface {
 	// Monitoring.
 	Guests(ctx context.Context) ([]Guest, error)
 	StoragePool(ctx context.Context, storage string) (Usage, error)
-	NodeMemoryTotal(ctx context.Context) (bytes int64, err error)
+	NodeInfo(ctx context.Context) (NodeInfo, error)
 }
 
 // VMStatus is a guest's presence and power state on the node.
@@ -32,6 +32,12 @@ type Guest struct {
 	VMID    int
 	Running bool
 	CPU     float64 // fraction of the guest's allotted CPU in use, 0..1
+}
+
+// NodeInfo is the host's physical capacity.
+type NodeInfo struct {
+	CPUs     int   // logical CPUs
+	MemTotal int64 // bytes
 }
 
 // Usage is used and total bytes of a storage pool.
