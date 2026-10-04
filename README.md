@@ -77,7 +77,7 @@ Plans are priced in USDT (int64 micro-USDT, never floats). Customers fund naira 
 - **Out of funds:** first failed charge → `unpaid`, 72-hour grace starts, email sent, VMs suspended (stopped, disk kept, billing paused). Wallet covering 24h of the suspended VMs after the debt is paid → VMs return to `stopped`. Grace expiry → VMs deleted.
 - **Low balance:** under 24h of runway → one email a day with the naira needed at today's rate.
 
-**Assumed, to confirm against the real iSpend API:** the webhook signature scheme and payload (`internal/billing/webhook.go`), and the `ISpend` interface in `internal/billing/ispend.go` (customer, balances, rate, quote, convert, charge, reverse). The real client is not written yet; the in-memory fake is used.
+**Assumed, to confirm against the real iSpend API** (the full list of what we need from iSpend is in [docs/ispend-requirements.md](docs/ispend-requirements.md)): the webhook signature scheme and payload (`internal/billing/webhook.go`), and the `ISpend` interface in `internal/billing/ispend.go` (customer, balances, rate, quote, convert, charge, reverse). The real client is not written yet; the in-memory fake is used.
 
 ## Guardrails and operations
 
