@@ -18,7 +18,7 @@ func newPubKey(t *testing.T) string {
 
 func signupClient(t *testing.T, base, email string) *client {
 	c := newClient(t, base)
-	if code, out := c.do("POST", "/v1/auth/signup", map[string]any{"email": email, "password": "long-enough-pw", "phone": "+2348012345678"}, nil); code != 201 {
+	if code, out := c.do("POST", "/v1/auth/signup", map[string]any{"email": email, "password": "long-enough-pw", "phone": "+2348012345678", "accept_aup": true}, nil); code != 201 {
 		t.Fatalf("signup %s = %d %v", email, code, out)
 	}
 	return c

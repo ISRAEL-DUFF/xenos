@@ -222,6 +222,9 @@ func (s *Server) ispendWebhook(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, billing.ErrBadSignature) {
 		// Alert-worthy: repeated failures mean a wrong secret or someone probing.
 		s.Log.Warn("webhook signature failure", "ip", s.clientIP(r))
+		if err := s.Store.Q.RecordWebhookFailure(r.Context(), s.clientIP(r)); err != nil {
+			s.Log.Error("record webhook failure", "err", err)
+		}
 		writeErr(w, http.StatusUnauthorized, "invalid signature")
 		return
 	} else if err != nil {

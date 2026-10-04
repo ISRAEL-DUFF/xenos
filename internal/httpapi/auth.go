@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/auth"
 	"github.com/israel-duff/xenos/internal/store/db"
@@ -101,6 +102,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Email, Password, Phone string
+		AcceptAUP              bool `json:"accept_aup"` // acceptable-use policy; required
 		Token                  bool // true: return a bearer token instead of setting a cookie
 	}
 	if !decode(w, r, &in) {
@@ -108,6 +110,9 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	email, ok := normalizeEmail(in.Email)
 	switch {
+	case !in.AcceptAUP:
+		writeErr(w, http.StatusBadRequest, "you must accept the acceptable-use policy")
+		return
 	case !ok:
 		writeErr(w, http.StatusBadRequest, "invalid email address")
 		return
@@ -134,6 +139,9 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.Store.Q.MarkAUP(r.Context(), db.MarkAUPParams{ID: u.ID, AupAcceptedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true}}); err != nil {
+		s.Log.Error("record aup acceptance", "user_id", u.ID, "err", err)
+	}
 	s.linkISpend(r.Context(), &u)
 	if err := s.sendVerification(r.Context(), u); err != nil {
 		s.Log.Error("send verification", "user_id", u.ID, "err", err)
@@ -252,6 +260,10 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.Q.MarkEmailVerified(r.Context(), uid); err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	// Naira that arrived before verification was held; convert it now.
+	if err := s.Wallet.ConvertHeldOnVerify(r.Context(), uid); err != nil {
+		s.Log.Error("convert held deposits", "user_id", uid, "err", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "verified"})
 }

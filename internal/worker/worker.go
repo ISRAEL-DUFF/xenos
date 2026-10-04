@@ -11,11 +11,13 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/israel-duff/xenos/internal/alert"
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/metering"
+	"github.com/israel-duff/xenos/internal/monitor"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/vm"
@@ -67,6 +69,13 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISp
 	}
 	log.Info("worker started", "concurrency", cfg.WorkerConcurrency)
 	go meter.Run(ctx, meterInterval)
+	notifier := &alert.Notifier{Store: st, Log: log, TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID,
+		Mailer: mailer, ToEmail: cfg.AlertEmail}
+	if !notifier.Configured() {
+		log.Warn("no alert channel configured (XENOS_TELEGRAM_* or XENOS_ALERT_EMAIL): alerts will only appear in the log")
+	}
+	mon := &monitor.Monitor{Store: st, PVE: pve, Notify: notifier, Log: log, Cfg: monitor.DefaultConfig(cfg.PVEStorage)}
+	go mon.Run(ctx, meterInterval)
 	go func() {
 		t := time.NewTicker(meterInterval)
 		defer t.Stop()

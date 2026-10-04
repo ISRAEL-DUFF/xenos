@@ -64,7 +64,7 @@ func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) error {
 }
 
 const getSessionUser = `-- name: GetSessionUser :one
-SELECT s.token_hash, s.kind, s.csrf_token, s.expires_at, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at
+SELECT s.token_hash, s.kind, s.csrf_token, s.expires_at, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at, u.aup_accepted_at
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1 AND s.expires_at > now()
@@ -88,6 +88,7 @@ type GetSessionUserRow struct {
 	CreatedAt            time.Time          `json:"created_at"`
 	GraceStartedAt       pgtype.Timestamptz `json:"grace_started_at"`
 	LowBalanceNotifiedAt pgtype.Timestamptz `json:"low_balance_notified_at"`
+	AupAcceptedAt        pgtype.Timestamptz `json:"aup_accepted_at"`
 }
 
 func (q *Queries) GetSessionUser(ctx context.Context, tokenHash []byte) (GetSessionUserRow, error) {
@@ -111,6 +112,7 @@ func (q *Queries) GetSessionUser(ctx context.Context, tokenHash []byte) (GetSess
 		&i.CreatedAt,
 		&i.GraceStartedAt,
 		&i.LowBalanceNotifiedAt,
+		&i.AupAcceptedAt,
 	)
 	return i, err
 }

@@ -4,6 +4,11 @@
 //	xenosctl ip list                                   show the pool and what uses each address
 //	xenosctl admin grant <email>                       make a user an admin
 //	xenosctl user limit <email> <n>                    set a user's VM limit
+//	xenosctl user ban|unban <email>                    ban revokes sessions and suspends their VMs
+//	xenosctl flagged                                   VMs flagged for sustained high CPU (possible mining)
+//	xenosctl flag clear <vm-id>                        dismiss a flag after review
+//	xenosctl port25 allow|block <vm-id>                exempt a reviewed VM from the outbound SMTP block
+//	xenosctl firewall nft [bridge]                     print the nftables ruleset to load on the Proxmox host
 package main
 
 import (
@@ -15,7 +20,11 @@ import (
 	"strings"
 
 	"github.com/israel-duff/xenos/internal/config"
+	"github.com/israel-duff/xenos/internal/firewall"
+	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/store"
+	"github.com/israel-duff/xenos/internal/store/db"
+	"github.com/israel-duff/xenos/internal/vm"
 )
 
 func main() {
@@ -27,7 +36,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: xenosctl ip add|list | admin grant <email> | user limit <email> <n>")
+		return fmt.Errorf("usage: xenosctl ip add|list | admin grant <email> | user limit|ban|unban ... | flagged | flag clear <id> | port25 allow|block <id> | firewall nft")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -57,8 +66,102 @@ func run(args []string) error {
 			return fmt.Errorf("limit must be a non-negative integer")
 		}
 		return setLimit(ctx, st, args[2], n)
+	case len(args) == 3 && args[0] == "user" && (args[1] == "ban" || args[1] == "unban"):
+		return setBan(ctx, st, args[2], args[1] == "ban")
+	case len(args) == 1 && args[0] == "flagged":
+		return listFlagged(ctx, st)
+	case len(args) == 3 && args[0] == "flag" && args[1] == "clear":
+		return withVMID(args[2], func(id int64) error { return st.Q.ClearVMFlag(ctx, id) })
+	case len(args) == 3 && args[0] == "port25" && (args[1] == "allow" || args[1] == "block"):
+		return withVMID(args[2], func(id int64) error {
+			n, err := st.Q.SetPort25(ctx, db.SetPort25Params{ID: id, Port25Unblocked: args[1] == "allow"})
+			if err == nil && n == 0 {
+				err = fmt.Errorf("no such vm")
+			}
+			if err == nil {
+				fmt.Println("ok; regenerate and load the firewall rules: xenosctl firewall nft")
+			}
+			return err
+		})
+	case len(args) >= 2 && args[0] == "firewall" && args[1] == "nft":
+		bridge := cfg.PVEBridge
+		if len(args) > 2 {
+			bridge = args[2]
+		}
+		return printNft(ctx, st, bridge)
 	}
 	return fmt.Errorf("unknown command %q", strings.Join(args, " "))
+}
+
+func withVMID(arg string, fn func(int64) error) error {
+	id, err := strconv.ParseInt(arg, 10, 64)
+	if err != nil {
+		return fmt.Errorf("vm id must be a number")
+	}
+	return fn(id)
+}
+
+func setBan(ctx context.Context, st *store.Store, email string, ban bool) error {
+	email = strings.ToLower(email)
+	status := "active"
+	if ban {
+		status = "banned"
+	}
+	var uid int64
+	if err := st.Pool.QueryRow(ctx, `UPDATE users SET status = $2 WHERE email = $1 RETURNING id`, email, status).Scan(&uid); err != nil {
+		return fmt.Errorf("no user with email %s", email)
+	}
+	if !ban {
+		fmt.Println("ok")
+		return nil
+	}
+	if err := st.Q.DeleteUserSessions(ctx, uid); err != nil {
+		return err
+	}
+	ids, err := st.Q.ListUserLiveVMIDs(ctx, uid)
+	if err != nil {
+		return err
+	}
+	q := jobs.New(st.Pool)
+	for _, id := range ids {
+		if err := q.Enqueue(ctx, vm.JobSuspend, vm.Payload{VMID: id}); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("banned; sessions revoked; suspending %d VM(s). Deleting them is a separate decision.\n", len(ids))
+	return nil
+}
+
+func listFlagged(ctx context.Context, st *store.Store) error {
+	rows, err := st.Q.ListFlaggedVMs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Println("no flagged VMs")
+	}
+	for _, r := range rows {
+		fmt.Printf("vm %-6d %-20s %-10s %s  %s\n    %s\n", r.ID, r.Hostname, r.State, r.FlaggedAt.Time.Format("2006-01-02 15:04"), r.Email, r.FlagReason)
+	}
+	return nil
+}
+
+func printNft(ctx context.Context, st *store.Store, bridge string) error {
+	rows, err := st.Q.ListPort25Unblocked(ctx)
+	if err != nil {
+		return err
+	}
+	var v4, v6 []string
+	for _, r := range rows {
+		v4 = append(v4, r.Ipv4)
+		v6 = append(v6, r.Ipv6)
+	}
+	out, err := firewall.Render(bridge, v4, v6)
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
+	return nil
 }
 
 func ipAdd(ctx context.Context, st *store.Store, rng, gateway, region string) error {

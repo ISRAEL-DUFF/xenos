@@ -11,6 +11,11 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AlertsSent struct {
+	Key        string    `json:"key"`
+	LastSentAt time.Time `json:"last_sent_at"`
+}
+
 type Conversion struct {
 	ID               int64          `json:"id"`
 	UserID           int64          `json:"user_id"`
@@ -41,6 +46,11 @@ type EmailVerification struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type Heartbeat struct {
+	Name string    `json:"name"`
+	At   time.Time `json:"at"`
+}
+
 type IpAddress struct {
 	ID      int64       `json:"id"`
 	Address netip.Addr  `json:"address"`
@@ -50,14 +60,15 @@ type IpAddress struct {
 }
 
 type Job struct {
-	ID        int64       `json:"id"`
-	Kind      string      `json:"kind"`
-	Payload   []byte      `json:"payload"`
-	Status    string      `json:"status"`
-	Attempts  int32       `json:"attempts"`
-	RunAfter  time.Time   `json:"run_after"`
-	LastError pgtype.Text `json:"last_error"`
-	CreatedAt time.Time   `json:"created_at"`
+	ID        int64              `json:"id"`
+	Kind      string             `json:"kind"`
+	Payload   []byte             `json:"payload"`
+	Status    string             `json:"status"`
+	Attempts  int32              `json:"attempts"`
+	RunAfter  time.Time          `json:"run_after"`
+	LastError pgtype.Text        `json:"last_error"`
+	CreatedAt time.Time          `json:"created_at"`
+	AlertedAt pgtype.Timestamptz `json:"alerted_at"`
 }
 
 type PasswordReset struct {
@@ -130,6 +141,7 @@ type User struct {
 	CreatedAt            time.Time          `json:"created_at"`
 	GraceStartedAt       pgtype.Timestamptz `json:"grace_started_at"`
 	LowBalanceNotifiedAt pgtype.Timestamptz `json:"low_balance_notified_at"`
+	AupAcceptedAt        pgtype.Timestamptz `json:"aup_accepted_at"`
 }
 
 type Vm struct {
@@ -150,9 +162,18 @@ type Vm struct {
 	AuthorizedKeys  string             `json:"authorized_keys"`
 	BillingFrom     pgtype.Timestamptz `json:"billing_from"`
 	BillingUntil    pgtype.Timestamptz `json:"billing_until"`
+	CpuHighSince    pgtype.Timestamptz `json:"cpu_high_since"`
+	FlaggedAt       pgtype.Timestamptz `json:"flagged_at"`
+	FlagReason      pgtype.Text        `json:"flag_reason"`
 }
 
 type WebhookEvent struct {
 	ID         string    `json:"id"`
 	ReceivedAt time.Time `json:"received_at"`
+}
+
+type WebhookFailure struct {
+	ID int64     `json:"id"`
+	At time.Time `json:"at"`
+	Ip string    `json:"ip"`
 }

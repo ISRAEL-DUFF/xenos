@@ -110,7 +110,7 @@ func (c *client) csrfHdr() map[string]string { return map[string]string{"X-CSRF-
 func TestAuthFlow(t *testing.T) {
 	ts, mailer := newTestServer(t)
 	c := newClient(t, ts.URL)
-	signup := map[string]any{"email": "Ada@Example.com", "password": "correct-horse-1", "phone": "+2348012345678"}
+	signup := map[string]any{"email": "Ada@Example.com", "password": "correct-horse-1", "phone": "+2348012345678", "accept_aup": true}
 
 	if code, _ := c.do("POST", "/v1/auth/signup", map[string]any{"email": "bad", "password": "x", "phone": "1"}, nil); code != 400 {
 		t.Fatalf("invalid signup = %d", code)
@@ -182,7 +182,7 @@ func TestAuthFlow(t *testing.T) {
 func TestPasswordResetAndChange(t *testing.T) {
 	ts, mailer := newTestServer(t)
 	c := newClient(t, ts.URL)
-	c.do("POST", "/v1/auth/signup", map[string]any{"email": "a@b.co", "password": "first-password-1", "phone": "+2348012345678"}, nil)
+	c.do("POST", "/v1/auth/signup", map[string]any{"email": "a@b.co", "password": "first-password-1", "phone": "+2348012345678", "accept_aup": true}, nil)
 
 	// Unknown email still gets 202 and sends nothing new.
 	if code, _ := c.do("POST", "/v1/auth/forgot-password", map[string]any{"email": "nobody@b.co"}, nil); code != 202 {
@@ -225,9 +225,9 @@ func TestRateLimits(t *testing.T) {
 	ts, _ := newTestServer(t)
 	c := newClient(t, ts.URL)
 	for i := 0; i < 3; i++ {
-		c.do("POST", "/v1/auth/signup", map[string]any{"email": "u" + string(rune('a'+i)) + "@b.co", "password": "long-enough-pw", "phone": "+2348012345678"}, nil)
+		c.do("POST", "/v1/auth/signup", map[string]any{"email": "u" + string(rune('a'+i)) + "@b.co", "password": "long-enough-pw", "phone": "+2348012345678", "accept_aup": true}, nil)
 	}
-	if code, _ := c.do("POST", "/v1/auth/signup", map[string]any{"email": "ud@b.co", "password": "long-enough-pw", "phone": "+2348012345678"}, nil); code != 429 {
+	if code, _ := c.do("POST", "/v1/auth/signup", map[string]any{"email": "ud@b.co", "password": "long-enough-pw", "phone": "+2348012345678", "accept_aup": true}, nil); code != 429 {
 		t.Fatalf("4th signup from one IP = %d", code)
 	}
 	for i := 0; i < 8; i++ {

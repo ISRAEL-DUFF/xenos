@@ -17,6 +17,9 @@ Spec: [VPS V1 Weekend Build Plan.md](<VPS V1 Weekend Build Plan.md>).
 | `internal/proxmox` | `API` interface, REST client (clone, configure, resize, power, status, task wait) and in-memory `Fake` |
 | `internal/wallet` | NGN→USDT conversions: deposit handling, manual quotes, retries |
 | `internal/metering` | Hourly VM charging, out-of-funds suspension/grace/deletion, low-balance emails |
+| `internal/monitor` | Operator checks: failed jobs, disk pool, RAM, IPs, stuck billing, webhook probing, CPU abuse watch |
+| `internal/alert` | Telegram/email alerts with per-key cooldown |
+| `internal/firewall` | Renders the nftables rule that blocks outbound SMTP |
 | `internal/worker` | Assembles the job handlers and metering loop |
 | `internal/vm` | Worker-side VM lifecycle: provision, power, delete (the only code that changes VM state) |
 | `internal/sshkey` | SSH public key validation |
@@ -75,9 +78,17 @@ Plans are priced in USDT (int64 micro-USDT, never floats). Customers fund naira 
 
 **Assumed, to confirm against the real iSpend API:** the webhook signature scheme and payload (`internal/billing/webhook.go`), and the `ISpend` interface in `internal/billing/ispend.go` (customer, balances, rate, quote, convert, charge, reverse). The real client is not written yet; the in-memory fake is used.
 
+## Guardrails and operations
+
+- **Signup:** the acceptable-use policy must be accepted (recorded as `aup_accepted_at`), a phone number is collected, signup is limited to 3 per hour per IP. Email verification gates the virtual account details, manual conversion, and the conversion of deposits: naira that arrives before verification waits in the NGN wallet and converts when the email is verified.
+- **Abuse:** `vm_limit` 2 per new user. The monitor flags a VM that holds 90%+ CPU for 6 hours (reset only when it drops under 50%, so a throttling miner is not missed); review with `xenosctl flagged`, act with `xenosctl user ban <email>` or by deleting the VM. Outbound port 25 is blocked on the host by an nftables rule generated from the database (`xenosctl firewall nft`, exemptions via `xenosctl port25 allow <vm-id>`).
+- **Alerts** (Telegram and/or email, one message per problem per cooldown): failed jobs, disk pool ≥ 80%, host RAM committed ≥ 90%, free IPs low, charges or conversions stuck (iSpend trouble), ≥ 5 rejected webhooks in 10 minutes, VMs flagged for CPU, and the Proxmox API not answering.
+- **Health:** `/healthz` is liveness; `/readyz` also needs Postgres and a worker heartbeat from the last 3 minutes. Point the uptime monitor at `/readyz`.
+- **Operations:** [deploy/README.md](deploy/README.md) (control-plane VM: systemd, Caddy, first setup, nightly `pg_dump` with off-host copy and restore test), [deploy/proxmox/README.md](deploy/proxmox/README.md) (SMTP block, nightly `vzdump`, API lockdown), [docs/launch-checklist.md](docs/launch-checklist.md) (the acceptance checklist mapped to tests and to the manual host steps).
+
 ## Status
 
-Phase 2 is code-complete but not yet verified on a real Proxmox host. Phase 3 is code-complete against the fake iSpend and is not yet exercised against the real service.
-Implemented: schema, config, job queue, Proxmox client, auth, SSH keys, VM lifecycle, `xenosctl`, wallet and conversions, deposit webhook, hourly metering, suspension/grace, low-balance emails.
-Not built: the real iSpend client, admin endpoints and manual adjustments, the VM/wallet dashboard pages (Phase 5), guardrails and backups (Phase 4).
+Phases 2, 3 and 4 are code-complete and tested against fakes. What is **not** verified: anything on a real Proxmox host (provisioning, cloud-init networking, the SMTP block, `vzdump`), the real iSpend service (client not written; webhook format assumed), and the real Telegram/email alert channel.
+Implemented: schema, config, job queue, Proxmox client, auth, SSH keys, VM lifecycle, `xenosctl`, wallet and conversions, deposit webhook, hourly metering, suspension/grace, low-balance emails, abuse guardrails, alerting and monitoring, backup scripts, deployment files.
+Not built: the real iSpend client, admin endpoints and manual balance adjustments, the VM/wallet dashboard pages (Phase 5).
 Plan prices in the seed migration are placeholders. Emails are logged, not sent, until a provider is chosen.

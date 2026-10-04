@@ -15,6 +15,10 @@ type Fake struct {
 	Fail map[string]error // key: "clone", "configure", "resize", "start", "agent", "destroy", ...
 	// Calls records operations in order, e.g. "clone:100", "start:100".
 	Calls []string
+	// Monitoring knobs.
+	CPU      map[int]float64 // vmid -> CPU fraction reported by Guests
+	Pool     Usage
+	MemTotal int64
 	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
 	BeforeOp func(op string, vmid int)
 }
@@ -29,7 +33,7 @@ type FakeVM struct {
 }
 
 func NewFake() *Fake {
-	return &Fake{VMs: map[int]*FakeVM{}, Fail: map[string]error{}}
+	return &Fake{VMs: map[int]*FakeVM{}, Fail: map[string]error{}, CPU: map[int]float64{}, MemTotal: 64 << 30, Pool: Usage{Total: 1 << 40}}
 }
 
 var ErrFakeNotFound = errors.New("proxmox fake: no such vm")
@@ -158,4 +162,29 @@ func (f *Fake) IDs() []int {
 		out = append(out, id)
 	}
 	return out
+}
+
+func (f *Fake) Guests(context.Context) ([]Guest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.Fail["guests"]; err != nil {
+		return nil, err
+	}
+	out := []Guest{}
+	for id, vm := range f.VMs {
+		out = append(out, Guest{VMID: id, Running: vm.Running, CPU: f.CPU[id]})
+	}
+	return out, nil
+}
+
+func (f *Fake) StoragePool(context.Context, string) (Usage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.Pool, f.Fail["pool"]
+}
+
+func (f *Fake) NodeMemoryTotal(context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.MemTotal, f.Fail["memory"]
 }

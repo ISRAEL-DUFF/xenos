@@ -51,9 +51,12 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.Recoverer)
-	r.Use(s.logRequests)
+	r.Use(s.logRequests, securityHeaders)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
+
+	// Liveness: the process is up. Readiness: it can reach Postgres and the worker is ticking.
+	r.Get("/readyz", s.readyz)
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.authenticate)
@@ -165,4 +168,34 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// workerStaleAfter is how long the worker may go without a heartbeat before /readyz fails.
+const workerStaleAfter = 3 * time.Minute
+
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if err := s.Store.Pool.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "database unreachable"})
+		return
+	}
+	at, err := s.Store.Q.GetHeartbeat(ctx, "worker")
+	if err != nil || time.Since(at) > workerStaleAfter {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "worker not running"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// securityHeaders sets conservative defaults. The dashboard is a same-origin
+// bundle with no inline scripts or styles, so a strict CSP fits.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		next.ServeHTTP(w, r)
+	})
 }

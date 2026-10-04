@@ -41,7 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     user,
     loading,
     refresh,
-    signup: async (email, password, phone) => apply(await api<SessionResponse>("/auth/signup", { json: { email, password, phone } })),
+    signup: async (email, password, phone) => apply(await api<SessionResponse>("/auth/signup", { json: { email, password, phone, accept_aup: true } })),
     login: async (email, password) => apply(await api<SessionResponse>("/auth/login", { json: { email, password } })),
     logout: async () => {
       await api("/auth/logout", { method: "POST" });

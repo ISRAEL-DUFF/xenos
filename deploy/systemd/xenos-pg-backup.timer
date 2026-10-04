@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Xenos database backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

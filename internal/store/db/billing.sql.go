@@ -124,7 +124,7 @@ func (q *Queries) GetConversionByKey(ctx context.Context, depositEventID pgtype.
 }
 
 const getUserByISpendCustomer = `-- name: GetUserByISpendCustomer :one
-SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at, grace_started_at, low_balance_notified_at FROM users WHERE ispend_customer_id = $1
+SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at, grace_started_at, low_balance_notified_at, aup_accepted_at FROM users WHERE ispend_customer_id = $1
 `
 
 func (q *Queries) GetUserByISpendCustomer(ctx context.Context, ispendCustomerID pgtype.Text) (User, error) {
@@ -144,6 +144,7 @@ func (q *Queries) GetUserByISpendCustomer(ctx context.Context, ispendCustomerID 
 		&i.CreatedAt,
 		&i.GraceStartedAt,
 		&i.LowBalanceNotifiedAt,
+		&i.AupAcceptedAt,
 	)
 	return i, err
 }

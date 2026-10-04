@@ -154,6 +154,44 @@ func (c *Client) Status(ctx context.Context, vmid int) (VMStatus, error) {
 	return VMStatus{}, nil
 }
 
+// Guests lists every QEMU guest on the node with its power state and current CPU use.
+func (c *Client) Guests(ctx context.Context) ([]Guest, error) {
+	var raw []struct {
+		VMID   int     `json:"vmid"`
+		Status string  `json:"status"`
+		CPU    float64 `json:"cpu"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu", c.node), nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]Guest, 0, len(raw))
+	for _, g := range raw {
+		out = append(out, Guest{VMID: g.VMID, Running: g.Status == "running", CPU: g.CPU})
+	}
+	return out, nil
+}
+
+// StoragePool reports a storage pool's usage (the thin pool VM disks live on).
+func (c *Client) StoragePool(ctx context.Context, storage string) (Usage, error) {
+	var st struct {
+		Used  int64 `json:"used"`
+		Total int64 `json:"total"`
+	}
+	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/storage/%s/status", c.node, url.PathEscape(storage)), nil, &st)
+	return Usage{Used: st.Used, Total: st.Total}, err
+}
+
+// NodeMemoryTotal is the host's physical RAM in bytes.
+func (c *Client) NodeMemoryTotal(ctx context.Context) (int64, error) {
+	var st struct {
+		Memory struct {
+			Total int64 `json:"total"`
+		} `json:"memory"`
+	}
+	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/status", c.node), nil, &st)
+	return st.Memory.Total, err
+}
+
 func (c *Client) Destroy(ctx context.Context, vmid int) (string, error) {
 	var upid string
 	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d?purge=1&destroy-unreferenced-disks=1", c.node, vmid), nil, &upid)

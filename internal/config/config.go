@@ -38,7 +38,10 @@ type Config struct {
 	ISpendTenantKey      string
 	ISpendWebhookSecret  string
 	ISpendMerchantWallet string
-	FakeISpendCredit     int64 // dev only: USDT (micro) given to each new customer of the fake iSpend
+	TelegramBotToken     string // operator alerts; both Telegram values or neither
+	TelegramChatID       string
+	AlertEmail           string // operator alerts by email in addition to / instead of Telegram
+	FakeISpendCredit     int64  // dev only: USDT (micro) given to each new customer of the fake iSpend
 }
 
 func Load() (Config, error) {
@@ -64,6 +67,10 @@ func Load() (Config, error) {
 		IPv6Gateway: os.Getenv("XENOS_IPV6_GATEWAY"),
 		Nameservers: get("XENOS_NAMESERVERS", "1.1.1.1 9.9.9.9"),
 		RunWorker:   get("XENOS_RUN_WORKER", "false") == "true",
+
+		TelegramBotToken: os.Getenv("XENOS_TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:   os.Getenv("XENOS_TELEGRAM_CHAT_ID"),
+		AlertEmail:       os.Getenv("XENOS_ALERT_EMAIL"),
 
 		ISpendURL:            os.Getenv("XENOS_ISPEND_URL"),
 		ISpendTenantKey:      os.Getenv("XENOS_ISPEND_TENANT_KEY"),

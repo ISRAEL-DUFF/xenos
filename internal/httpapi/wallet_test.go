@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,7 @@ func verifyEmail(t *testing.T, env *testEnv, c *client) {
 func TestDepositAutoConvertsOnceEvenIfReplayed(t *testing.T) {
 	env := newTestEnv(t)
 	c := signupClient(t, env.ts.URL, "a@x.co")
+	verifyEmail(t, env, c)
 	cust := customerOf(t, env, "a@x.co")
 	env.ispend.Deposit(cust, 500_000) // ₦5,000 arrives at iSpend
 
@@ -198,7 +200,7 @@ func TestExpiredQuoteFailsInsteadOfChangingTheRate(t *testing.T) {
 
 func TestAutoConversionRetriedAfterOutage(t *testing.T) {
 	env := newTestEnv(t)
-	signupClient(t, env.ts.URL, "a@x.co")
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
 	cust := customerOf(t, env, "a@x.co")
 	env.ispend.Deposit(cust, 500_000)
 
@@ -254,5 +256,102 @@ func TestWalletOverview(t *testing.T) {
 	anon := newClient(t, env.ts.URL)
 	if code, _ := anon.do("GET", "/v1/wallet", nil, nil); code != 401 {
 		t.Fatalf("anonymous wallet = %d", code)
+	}
+}
+
+func TestUnverifiedDepositIsHeldThenConvertedOnVerify(t *testing.T) {
+	env := newTestEnv(t)
+	c := signupClient(t, env.ts.URL, "a@x.co")
+	cust := customerOf(t, env, "a@x.co")
+	env.ispend.Deposit(cust, 500_000) // arrives before the email is verified
+
+	env.webhook(t, depositEvent("evt_u", cust, 500_000), time.Now(), testWebhookSecret)
+	if n := env.drainWallet(t); n != 0 {
+		t.Fatalf("unverified deposit must not convert (ran %d jobs)", n)
+	}
+	if bal, _ := env.ispend.Balances(context.Background(), cust); bal.NGNKobo != 500_000 || bal.USDTMicro != 0 {
+		t.Fatalf("naira must wait in the NGN wallet: %+v", bal)
+	}
+
+	verifyEmail(t, env, c)
+	env.drainWallet(t)
+	if bal, _ := env.ispend.Balances(context.Background(), cust); bal.NGNKobo != 0 || bal.USDTMicro != 3_333_333 {
+		t.Fatalf("verification should release the held naira: %+v", bal)
+	}
+	if n := count(t, env, `SELECT count(*) FROM conversions`); n != 1 {
+		t.Fatalf("conversions = %d", n)
+	}
+}
+
+func TestSignupRequiresAUP(t *testing.T) {
+	env := newTestEnv(t)
+	c := newClient(t, env.ts.URL)
+	body := map[string]any{"email": "a@x.co", "password": "long-enough-pw", "phone": "+2348012345678"}
+	if code, _ := c.do("POST", "/v1/auth/signup", body, nil); code != 400 {
+		t.Fatalf("signup without AUP = %d, want 400", code)
+	}
+	body["accept_aup"] = true
+	if code, _ := c.do("POST", "/v1/auth/signup", body, nil); code != 201 {
+		t.Fatalf("signup = %d", code)
+	}
+	if n := count(t, env, `SELECT count(*) FROM users WHERE aup_accepted_at IS NOT NULL`); n != 1 {
+		t.Fatal("acceptance must be recorded")
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	env := newTestEnv(t)
+	get := func() int {
+		resp, err := http.Get(env.ts.URL + "/readyz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if get() != 503 {
+		t.Fatal("no worker heartbeat yet: must not be ready")
+	}
+	exec := func(sql string, args ...any) {
+		if _, err := env.st.Pool.Exec(context.Background(), sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO heartbeats (name, at) VALUES ('worker', now())`)
+	if get() != 200 {
+		t.Fatal("fresh heartbeat: must be ready")
+	}
+	exec(`UPDATE heartbeats SET at = now() - interval '10 minutes'`)
+	if get() != 503 {
+		t.Fatal("stale heartbeat: must not be ready")
+	}
+	if resp, _ := http.Get(env.ts.URL + "/healthz"); resp.StatusCode != 200 {
+		t.Fatal("healthz is liveness only and must stay 200")
+	}
+}
+
+func TestWebhookFailuresAreRecorded(t *testing.T) {
+	env := newTestEnv(t)
+	env.webhook(t, depositEvent("x", "cus", 1), time.Now(), "wrong-secret")
+	env.webhook(t, depositEvent("y", "cus", 1), time.Now(), "")
+	if n := count(t, env, `SELECT count(*) FROM webhook_failures`); n != 2 {
+		t.Fatalf("recorded failures = %d, want 2", n)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	env := newTestEnv(t)
+	resp, err := http.Get(env.ts.URL + "/v1/plans")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	for h, want := range map[string]string{"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY"} {
+		if got := resp.Header.Get(h); got != want {
+			t.Errorf("%s = %q, want %q", h, got, want)
+		}
+	}
+	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'self'") {
+		t.Error("missing CSP")
 	}
 }

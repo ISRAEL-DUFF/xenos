@@ -88,12 +88,37 @@ func (s *Service) HandleDeposit(ctx context.Context, ev billing.Event) error {
 			return nil // replay
 		}
 		s.Cache.Invalidate(ev.CustomerID)
-		if !user.AutoConvert {
-			return nil // the naira stays in the NGN wallet until the customer converts
+		if !user.AutoConvert || !user.EmailVerifiedAt.Valid {
+			// The naira stays in the NGN wallet: the customer asked for it, or has not
+			// verified their email yet (it is converted when they do).
+			return nil
 		}
 		id, err := q.CreateConversion(ctx, db.CreateConversionParams{
 			UserID: user.ID, AmountNgnKobo: ev.AmountKobo, DepositEventID: textOf("deposit:" + ev.ID)})
 		if err != nil {
+			return err
+		}
+		return jobs.EnqueueTx(ctx, tx, JobConversion, convPayload{ConversionID: id})
+	})
+}
+
+// ConvertHeldOnVerify converts naira that arrived while the customer's email was
+// unverified, if they use auto-convert. It runs once, when verification succeeds.
+func (s *Service) ConvertHeldOnVerify(ctx context.Context, userID int64) error {
+	user, err := s.Store.Q.GetUserByID(ctx, userID)
+	if err != nil || !user.AutoConvert || !user.IspendCustomerID.Valid {
+		return err
+	}
+	bal, err := s.ISpend.Balances(ctx, user.IspendCustomerID.String)
+	if err != nil || bal.NGNKobo < MinConversionKobo {
+		return err
+	}
+	return s.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		id, err := q.CreateConversion(ctx, db.CreateConversionParams{
+			UserID: userID, AmountNgnKobo: bal.NGNKobo, DepositEventID: textOf("verify:" + strconv.FormatInt(userID, 10))})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		} else if err != nil {
 			return err
 		}
 		return jobs.EnqueueTx(ctx, tx, JobConversion, convPayload{ConversionID: id})

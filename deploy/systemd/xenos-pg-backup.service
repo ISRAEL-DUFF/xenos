@@ -1,0 +1,9 @@
+[Unit]
+Description=Xenos database backup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=xenos
+EnvironmentFile=/etc/xenos/backup.env
+ExecStart=/opt/xenos/deploy/backup/pg-backup.sh

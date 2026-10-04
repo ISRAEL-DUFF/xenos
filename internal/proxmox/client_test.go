@@ -116,3 +116,36 @@ func TestHTTPErrorSurfaces(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestMonitoringEndpoints(t *testing.T) {
+	c, got := testClient(t, func(r recorded) string {
+		switch {
+		case strings.HasSuffix(r.path, "/qemu"):
+			return `[{"vmid":101,"status":"running","cpu":0.97},{"vmid":102,"status":"stopped","cpu":0}]`
+		case strings.Contains(r.path, "/storage/"):
+			return `{"used":850,"total":1000,"avail":150}`
+		default:
+			return `{"memory":{"total":68719476736,"used":1,"free":2}}`
+		}
+	})
+	ctx := context.Background()
+
+	guests, err := c.Guests(ctx)
+	if err != nil || len(guests) != 2 || !guests[0].Running || guests[0].CPU != 0.97 || guests[1].Running {
+		t.Fatalf("guests: %+v %v", guests, err)
+	}
+	pool, err := c.StoragePool(ctx, "vmdata")
+	if err != nil || pool.Fraction() != 0.85 {
+		t.Fatalf("pool: %+v %v", pool, err)
+	}
+	if (*got)[1].path != "/api2/json/nodes/pve1/storage/vmdata/status" {
+		t.Fatalf("storage path: %s", (*got)[1].path)
+	}
+	mem, err := c.NodeMemoryTotal(ctx)
+	if err != nil || mem != 68719476736 {
+		t.Fatalf("memory: %d %v", mem, err)
+	}
+	if (Usage{}).Fraction() != 0 {
+		t.Fatal("empty usage must not divide by zero")
+	}
+}
