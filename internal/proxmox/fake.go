@@ -1,0 +1,161 @@
+package proxmox
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+)
+
+// Fake is an in-memory Proxmox for tests and local development. Tasks finish
+// instantly. Set Fail to inject an error for a named operation.
+type Fake struct {
+	mu   sync.Mutex
+	VMs  map[int]*FakeVM
+	Fail map[string]error // key: "clone", "configure", "resize", "start", "agent", "destroy", ...
+	// Calls records operations in order, e.g. "clone:100", "start:100".
+	Calls []string
+	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
+	BeforeOp func(op string, vmid int)
+}
+
+type FakeVM struct {
+	ID       int
+	Name     string
+	Running  bool
+	Config   ConfigParams
+	DiskGB   int
+	Template int
+}
+
+func NewFake() *Fake {
+	return &Fake{VMs: map[int]*FakeVM{}, Fail: map[string]error{}}
+}
+
+var ErrFakeNotFound = errors.New("proxmox fake: no such vm")
+
+func (f *Fake) op(name string, vmid int) error {
+	if f.BeforeOp != nil {
+		f.mu.Unlock()
+		func() {
+			defer f.mu.Lock() // re-lock even if BeforeOp panics to simulate a crash
+			f.BeforeOp(name, vmid)
+		}()
+	}
+	f.Calls = append(f.Calls, fmt.Sprintf("%s:%d", name, vmid))
+	return f.Fail[name]
+}
+
+func (f *Fake) Clone(_ context.Context, p CloneParams) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("clone", p.NewID); err != nil {
+		return "", err
+	}
+	if _, ok := f.VMs[p.NewID]; ok {
+		return "", fmt.Errorf("proxmox fake: vmid %d already exists", p.NewID)
+	}
+	f.VMs[p.NewID] = &FakeVM{ID: p.NewID, Name: p.Name, Template: p.TemplateID}
+	return "UPID:clone", nil
+}
+
+func (f *Fake) Configure(_ context.Context, vmid int, p ConfigParams) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("configure", vmid); err != nil {
+		return err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ErrFakeNotFound
+	}
+	vm.Config = p
+	return nil
+}
+
+func (f *Fake) ResizeDisk(_ context.Context, vmid int, _ string, sizeGB int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("resize", vmid); err != nil {
+		return err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ErrFakeNotFound
+	}
+	vm.DiskGB = sizeGB
+	return nil
+}
+
+func (f *Fake) Power(_ context.Context, vmid int, action string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op(action, vmid); err != nil {
+		return "", err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return "", ErrFakeNotFound
+	}
+	switch action {
+	case "start", "reboot":
+		vm.Running = true
+	case "stop", "shutdown":
+		vm.Running = false
+	default:
+		return "", fmt.Errorf("proxmox fake: unknown action %q", action)
+	}
+	return "UPID:" + action, nil
+}
+
+func (f *Fake) Destroy(_ context.Context, vmid int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("destroy", vmid); err != nil {
+		return "", err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return "", ErrFakeNotFound
+	}
+	if vm.Running {
+		return "", errors.New("proxmox fake: cannot destroy a running vm")
+	}
+	delete(f.VMs, vmid)
+	return "UPID:destroy", nil
+}
+
+func (f *Fake) AgentPing(_ context.Context, vmid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("agent", vmid); err != nil {
+		return err
+	}
+	if vm, ok := f.VMs[vmid]; !ok || !vm.Running {
+		return errors.New("proxmox fake: guest agent not running")
+	}
+	return nil
+}
+
+func (f *Fake) WaitTask(context.Context, string) error { return nil }
+
+func (f *Fake) Status(_ context.Context, vmid int) (VMStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return VMStatus{}, nil
+	}
+	return VMStatus{Exists: true, Running: vm.Running}, nil
+}
+
+// IDs returns the current VM IDs (test helper).
+func (f *Fake) IDs() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []int{}
+	for id := range f.VMs {
+		out = append(out, id)
+	}
+	return out
+}

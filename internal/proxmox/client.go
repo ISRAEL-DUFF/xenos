@@ -99,6 +99,9 @@ type ConfigParams struct {
 	SSHKeys    string // newline-separated public keys
 	IPConfig0  string // e.g. "ip=203.0.113.10/32,gw=203.0.113.1,ip6=2001:db8::10/64,gw6=2001:db8::1"
 	Nameserver string
+	// DisableKVM runs the guest under software emulation (kvm=0, cpu=qemu64).
+	// For test hosts without hardware virtualisation only; it is very slow.
+	DisableKVM bool
 }
 
 func (c *Client) Configure(ctx context.Context, vmid int, p ConfigParams) error {
@@ -110,6 +113,10 @@ func (c *Client) Configure(ctx context.Context, vmid int, p ConfigParams) error 
 		"ipconfig0":  {p.IPConfig0},
 		"nameserver": {p.Nameserver},
 	}
+	if p.DisableKVM {
+		f.Set("kvm", "0")
+		f.Set("cpu", "qemu64")
+	}
 	return c.do(ctx, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/config", c.node, vmid), f, nil)
 }
 
@@ -120,9 +127,31 @@ func (c *Client) ResizeDisk(ctx context.Context, vmid int, disk string, sizeGB i
 
 // Power performs start, stop, shutdown or reboot and returns the task UPID.
 func (c *Client) Power(ctx context.Context, vmid int, action string) (string, error) {
+	f := url.Values{}
+	if action == "shutdown" {
+		f.Set("timeout", "60")
+		f.Set("forceStop", "1") // hard-stop if the guest ignores ACPI shutdown
+	}
 	var upid string
-	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/status/%s", c.node, vmid, action), url.Values{}, &upid)
+	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/status/%s", c.node, vmid, action), f, &upid)
 	return upid, err
+}
+
+// Status reports whether a QEMU guest with this VMID exists and is running.
+func (c *Client) Status(ctx context.Context, vmid int) (VMStatus, error) {
+	var vms []struct {
+		VMID   int    `json:"vmid"`
+		Status string `json:"status"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu", c.node), nil, &vms); err != nil {
+		return VMStatus{}, err
+	}
+	for _, v := range vms {
+		if v.VMID == vmid {
+			return VMStatus{Exists: true, Running: v.Status == "running"}, nil
+		}
+	}
+	return VMStatus{}, nil
 }
 
 func (c *Client) Destroy(ctx context.Context, vmid int) (string, error) {

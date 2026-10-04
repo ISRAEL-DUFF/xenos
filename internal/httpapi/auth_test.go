@@ -8,9 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"regexp"
-	"strings"
 	"sync"
 	"testing"
 
@@ -18,6 +16,7 @@ import (
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/store"
+	"github.com/israel-duff/xenos/internal/testutil"
 	"github.com/israel-duff/xenos/web"
 )
 
@@ -45,36 +44,28 @@ func (m *captureMailer) token(t *testing.T) string {
 	return g[1]
 }
 
-// newTestServer needs XENOS_TEST_DATABASE_URL pointing at a disposable database
-// whose name contains "test"; its public schema is wiped.
-func newTestServer(t *testing.T) (*httptest.Server, *captureMailer) {
+type testEnv struct {
+	ts     *httptest.Server
+	mailer *captureMailer
+	st     *store.Store
+	ispend *billing.Fake
+}
+
+func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	url := os.Getenv("XENOS_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("XENOS_TEST_DATABASE_URL not set")
-	}
-	if !strings.Contains(url, "test") {
-		t.Fatal("refusing to wipe a database whose URL lacks 'test'")
-	}
-	ctx := context.Background()
-	st, err := store.Open(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(st.Close)
-	if _, err := st.Pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	mailer := &captureMailer{}
-	cfg := config.Config{PublicURL: "http://test", CookieSecure: false}
-	srv := NewServer(cfg, st, jobs.New(st.Pool), billing.NewFake(150_000), mailer,
+	st := testutil.DB(t)
+	env := &testEnv{mailer: &captureMailer{}, st: st, ispend: billing.NewFake(150_000)}
+	cfg := config.Config{PublicURL: "http://test", CookieSecure: false, Region: "test-1"}
+	srv := NewServer(cfg, st, jobs.New(st.Pool), env.ispend, env.mailer,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), web.Dist())
-	ts := httptest.NewServer(srv.Router())
-	t.Cleanup(ts.Close)
-	return ts, mailer
+	env.ts = httptest.NewServer(srv.Router())
+	t.Cleanup(env.ts.Close)
+	return env
+}
+
+func newTestServer(t *testing.T) (*httptest.Server, *captureMailer) {
+	env := newTestEnv(t)
+	return env.ts, env.mailer
 }
 
 type client struct {

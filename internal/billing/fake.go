@@ -18,6 +18,8 @@ type Fake struct {
 	moves     map[string]fakeMove
 	n         int
 	Merchant  int64 // merchant USDT balance, micro-USDT
+	// SignupCredit is given to each new customer (local development only).
+	SignupCredit int64
 }
 
 type fakeCustomer struct {
@@ -57,6 +59,7 @@ func (f *Fake) CreateCustomer(_ context.Context, key, email, _ string) (Customer
 	id := f.next("cus")
 	c := &fakeCustomer{Customer: Customer{ID: id, VirtualAcct: "9900000000", VirtualBank: "FakeBank",
 		NGNWalletID: id + "_ngn", USDTWalletID: id + "_usdt"}}
+	c.usdt = f.SignupCredit
 	f.customers[id] = c
 	f.seen[key] = Movement{ID: id}
 	return c.Customer, nil
@@ -159,4 +162,11 @@ func (f *Fake) Reverse(_ context.Context, key, movementID string) (Movement, err
 	m := Movement{ID: f.next("mv")}
 	f.seen[key] = m
 	return m, nil
+}
+
+// Credit adds USDT directly to a customer's wallet (test helper).
+func (f *Fake) Credit(customerID string, uusdt int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.customers[customerID].usdt += uusdt
 }

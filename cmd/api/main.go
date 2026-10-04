@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -47,7 +48,13 @@ func run(log *slog.Logger) error {
 	var ispend billing.ISpend
 	if cfg.ISpendURL == "" {
 		log.Warn("XENOS_ISPEND_URL unset: using in-memory fake iSpend")
-		ispend = billing.NewFake(150_000) // ₦1,500/USDT, in kobo
+		fake := billing.NewFake(150_000) // ₦1,500/USDT, in kobo
+		if v := os.Getenv("XENOS_FAKE_ISPEND_CREDIT_UUSDT"); v != "" {
+			if fake.SignupCredit, err = strconv.ParseInt(v, 10, 64); err != nil {
+				return err
+			}
+		}
+		ispend = fake
 	} else {
 		return errors.New("real iSpend client not implemented yet")
 	}

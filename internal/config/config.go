@@ -4,6 +4,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"time"
 )
 
 type Config struct {
@@ -20,6 +22,16 @@ type Config struct {
 	PVETokenSecret string
 	PVEStorage     string
 	PVEBridge      string
+	PVEDisk        string // boot disk name on cloned templates
+	PVEInsecureTLS bool   // accept the host's self-signed certificate
+	PVEDisableKVM  bool   // test hosts without hardware virtualisation (very slow)
+
+	ProvisionTimeout  time.Duration // how long to wait for a new VM's guest agent
+	WorkerConcurrency int
+	IPv4PrefixLen     int    // prefix length written into each VM's network config
+	IPv6Prefix        string // /64 to allocate VM addresses from; empty disables IPv6
+	IPv6Gateway       string
+	Nameservers       string // space-separated
 
 	ISpendURL            string
 	ISpendTenantKey      string
@@ -42,11 +54,28 @@ func Load() (Config, error) {
 		PVETokenSecret: os.Getenv("XENOS_PVE_TOKEN_SECRET"),
 		PVEStorage:     get("XENOS_PVE_STORAGE", "vmdata"),
 		PVEBridge:      get("XENOS_PVE_BRIDGE", "vmbr0"),
+		PVEDisk:        get("XENOS_PVE_DISK", "scsi0"),
+		PVEInsecureTLS: get("XENOS_PVE_INSECURE_TLS", "false") == "true",
+		PVEDisableKVM:  get("XENOS_PVE_DISABLE_KVM", "false") == "true",
+
+		IPv6Prefix:  os.Getenv("XENOS_IPV6_PREFIX"),
+		IPv6Gateway: os.Getenv("XENOS_IPV6_GATEWAY"),
+		Nameservers: get("XENOS_NAMESERVERS", "1.1.1.1 9.9.9.9"),
 
 		ISpendURL:            os.Getenv("XENOS_ISPEND_URL"),
 		ISpendTenantKey:      os.Getenv("XENOS_ISPEND_TENANT_KEY"),
 		ISpendWebhookSecret:  os.Getenv("XENOS_ISPEND_WEBHOOK_SECRET"),
 		ISpendMerchantWallet: os.Getenv("XENOS_ISPEND_MERCHANT_WALLET"),
+	}
+	var err error
+	if c.ProvisionTimeout, err = time.ParseDuration(get("XENOS_PROVISION_TIMEOUT", "3m")); err != nil {
+		return c, fmt.Errorf("XENOS_PROVISION_TIMEOUT: %w", err)
+	}
+	if c.WorkerConcurrency, err = strconv.Atoi(get("XENOS_WORKER_CONCURRENCY", "4")); err != nil || c.WorkerConcurrency < 1 {
+		return c, fmt.Errorf("XENOS_WORKER_CONCURRENCY must be a positive integer")
+	}
+	if c.IPv4PrefixLen, err = strconv.Atoi(get("XENOS_IPV4_PREFIX_LEN", "32")); err != nil || c.IPv4PrefixLen < 1 || c.IPv4PrefixLen > 32 {
+		return c, fmt.Errorf("XENOS_IPV4_PREFIX_LEN must be 1-32")
 	}
 	if c.DatabaseURL == "" {
 		return c, fmt.Errorf("XENOS_DATABASE_URL is required")

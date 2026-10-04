@@ -74,10 +74,16 @@ func (s *Server) Router() http.Handler {
 			r.Post("/ssh-keys", s.createSSHKey)
 			r.Delete("/ssh-keys/{id}", s.deleteSSHKey)
 
+			r.Post("/vms", s.createVM)
+			r.Get("/vms", s.listVMs)
+			r.Get("/vms/{id}", s.getVM)
+			r.Delete("/vms/{id}", s.deleteVM)
+			r.Post("/vms/{id}/start", s.powerAction("start", "stopped"))
+			r.Post("/vms/{id}/stop", s.powerAction("stop", "running"))
+			r.Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
+
 			// Not yet implemented; see "VPS V1 Weekend Build Plan.md" Phase 2/3.
 			for _, route := range []struct{ method, path string }{
-				{"POST", "/vms"}, {"GET", "/vms"}, {"GET", "/vms/{id}"}, {"DELETE", "/vms/{id}"},
-				{"POST", "/vms/{id}/reboot"}, {"POST", "/vms/{id}/stop"}, {"POST", "/vms/{id}/start"},
 				{"GET", "/wallet"}, {"POST", "/wallet/convert"},
 			} {
 				r.MethodFunc(route.method, route.path, notImplemented)

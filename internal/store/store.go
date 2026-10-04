@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"embed"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -31,6 +32,19 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{Pool: pool, Q: db.New(pool)}, nil
+}
+
+// InTx runs fn in a transaction; q is bound to it. It commits if fn returns nil.
+func (s *Store) InTx(ctx context.Context, fn func(q *db.Queries, tx pgx.Tx) error) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(s.Q.WithTx(tx), tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) Close() { s.Pool.Close() }

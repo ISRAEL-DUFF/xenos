@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,12 +26,22 @@ type Queue struct{ pool *pgxpool.Pool }
 
 func New(pool *pgxpool.Pool) *Queue { return &Queue{pool} }
 
+// Execer is satisfied by *pgxpool.Pool and pgx.Tx.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 func (q *Queue) Enqueue(ctx context.Context, kind string, payload any) error {
+	return EnqueueTx(ctx, q.pool, kind, payload)
+}
+
+// EnqueueTx adds a job inside the caller's transaction, so the job exists if and only if the change that needs it commits.
+func EnqueueTx(ctx context.Context, e Execer, kind string, payload any) error {
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	_, err = q.pool.Exec(ctx, `INSERT INTO jobs (kind, payload) VALUES ($1, $2)`, kind, b)
+	_, err = e.Exec(ctx, `INSERT INTO jobs (kind, payload) VALUES ($1, $2)`, kind, b)
 	return err
 }
 
@@ -66,6 +78,12 @@ func (q *Queue) Fail(ctx context.Context, j *Job, cause error) error {
 	return err
 }
 
+// Requeue puts an interrupted job back without counting the attempt.
+func (q *Queue) Requeue(ctx context.Context, j *Job) error {
+	_, err := q.pool.Exec(ctx, `UPDATE jobs SET status='queued', attempts = GREATEST(attempts - 1, 0) WHERE id=$1`, j.ID)
+	return err
+}
+
 // RecoverStale requeues jobs left 'running' by a crashed worker.
 func (q *Queue) RecoverStale(ctx context.Context) error {
 	_, err := q.pool.Exec(ctx, `UPDATE jobs SET status='queued' WHERE status='running'`)
@@ -74,31 +92,57 @@ func (q *Queue) RecoverStale(ctx context.Context) error {
 
 type Handler func(ctx context.Context, j *Job) error
 
-// Run polls until ctx is cancelled, dispatching to handlers by job kind.
-func (q *Queue) Run(ctx context.Context, handlers map[string]Handler, onErr func(error)) {
+// Run starts `workers` goroutines that poll for jobs until ctx is cancelled
+// and dispatch to handlers by kind. Handlers for the same VM must serialise
+// themselves (see internal/vm). Completion is recorded even after shutdown
+// begins, so an interrupted job is requeued rather than left 'running'.
+func (q *Queue) Run(ctx context.Context, workers int, handlers map[string]Handler, onErr func(error)) {
+	if workers < 1 {
+		workers = 1
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			q.loop(ctx, handlers, onErr)
+		}()
+	}
+	wg.Wait()
+}
+
+func (q *Queue) loop(ctx context.Context, handlers map[string]Handler, onErr func(error)) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
-		for {
+		for ctx.Err() == nil {
 			j, err := q.Claim(ctx)
 			if err != nil {
-				onErr(err)
+				if ctx.Err() == nil {
+					onErr(err)
+				}
 				break
 			}
 			if j == nil {
 				break
 			}
+			done := context.WithoutCancel(ctx)
 			h, ok := handlers[j.Kind]
 			if !ok {
-				_ = q.Fail(ctx, &Job{ID: j.ID, Attempts: MaxAttempts}, errors.New("no handler for "+j.Kind))
+				_ = q.Fail(done, &Job{ID: j.ID, Attempts: MaxAttempts}, errors.New("no handler for "+j.Kind))
 				continue
 			}
 			if err := h(ctx, j); err != nil {
+				if ctx.Err() != nil {
+					// Interrupted by shutdown, not a real failure: retry without penalty.
+					_ = q.Requeue(done, j)
+					return
+				}
 				onErr(err)
-				_ = q.Fail(ctx, j, err)
+				_ = q.Fail(done, j, err)
 				continue
 			}
-			_ = q.Done(ctx, j.ID)
+			_ = q.Done(done, j.ID)
 		}
 		select {
 		case <-ctx.Done():

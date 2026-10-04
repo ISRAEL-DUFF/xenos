@@ -92,6 +92,7 @@ type Template struct {
 	Name              string `json:"name"`
 	ProxmoxTemplateID int32  `json:"proxmox_template_id"`
 	Active            bool   `json:"active"`
+	CiUser            string `json:"ci_user"`
 }
 
 type UsageCharge struct {
@@ -133,6 +134,7 @@ type Vm struct {
 	Port25Unblocked bool               `json:"port25_unblocked"`
 	CreatedAt       time.Time          `json:"created_at"`
 	DeletedAt       pgtype.Timestamptz `json:"deleted_at"`
+	AuthorizedKeys  string             `json:"authorized_keys"`
 }
 
 type WebhookEvent struct {
