@@ -10,6 +10,7 @@ import (
 var (
 	ErrInsufficientFunds = errors.New("billing: insufficient funds")
 	ErrQuoteUnavailable  = errors.New("billing: ispend cannot quote")
+	ErrQuoteExpired      = errors.New("billing: quote expired")
 )
 
 type Customer struct {
@@ -42,7 +43,11 @@ type Movement struct {
 // call carries an idempotency key.
 type ISpend interface {
 	CreateCustomer(ctx context.Context, key, email, phone string) (Customer, error)
+	// Customer returns the customer's wallets and NGN virtual account.
+	Customer(ctx context.Context, customerID string) (Customer, error)
 	Balances(ctx context.Context, customerID string) (Balances, error)
+	// Rate is the current NGN kobo per 1 USDT buy rate including the tenant spread. Display only.
+	Rate(ctx context.Context) (int64, error)
 	Quote(ctx context.Context, customerID string, amountNGN int64) (Quote, error)
 	Convert(ctx context.Context, key, customerID, quoteID string) (Movement, error)
 	// Charge moves USDT from the customer's wallet to the VPS merchant wallet.

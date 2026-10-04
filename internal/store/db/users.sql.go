@@ -14,7 +14,7 @@ import (
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (email, password_hash, phone)
 VALUES ($1, $2, $3)
-RETURNING id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at
+RETURNING id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at, grace_started_at, low_balance_notified_at
 `
 
 type CreateUserParams struct {
@@ -38,12 +38,14 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.VmLimit,
 		&i.AutoConvert,
 		&i.CreatedAt,
+		&i.GraceStartedAt,
+		&i.LowBalanceNotifiedAt,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at FROM users WHERE email = $1
+SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at, grace_started_at, low_balance_notified_at FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -61,12 +63,14 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.VmLimit,
 		&i.AutoConvert,
 		&i.CreatedAt,
+		&i.GraceStartedAt,
+		&i.LowBalanceNotifiedAt,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at FROM users WHERE id = $1
+SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at, grace_started_at, low_balance_notified_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
@@ -84,6 +88,8 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (User, error) {
 		&i.VmLimit,
 		&i.AutoConvert,
 		&i.CreatedAt,
+		&i.GraceStartedAt,
+		&i.LowBalanceNotifiedAt,
 	)
 	return i, err
 }

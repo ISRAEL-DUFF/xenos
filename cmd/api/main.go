@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/store"
+	"github.com/israel-duff/xenos/internal/worker"
 	"github.com/israel-duff/xenos/web"
 )
 
@@ -45,22 +45,24 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	var ispend billing.ISpend
-	if cfg.ISpendURL == "" {
-		log.Warn("XENOS_ISPEND_URL unset: using in-memory fake iSpend")
-		fake := billing.NewFake(150_000) // ₦1,500/USDT, in kobo
-		if v := os.Getenv("XENOS_FAKE_ISPEND_CREDIT_UUSDT"); v != "" {
-			if fake.SignupCredit, err = strconv.ParseInt(v, 10, 64); err != nil {
-				return err
-			}
-		}
-		ispend = fake
-	} else {
-		return errors.New("real iSpend client not implemented yet")
+	ispend, err := billing.FromConfig(cfg, log)
+	if err != nil {
+		return err
 	}
+	mailer := mail.LogMailer{Log: log}
 
-	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mail.LogMailer{Log: log}, log, web.Dist())
+	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mailer, log, web.Dist())
 	hs := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Router(), ReadHeaderTimeout: 10 * time.Second}
+
+	if cfg.RunWorker {
+		// Development convenience: the fake iSpend only lives inside one process.
+		log.Warn("XENOS_RUN_WORKER=true: running the worker inside the API process")
+		go func() {
+			if err := worker.Run(ctx, cfg, st, ispend, mailer, log); err != nil {
+				log.Error("worker stopped", "err", err)
+			}
+		}()
+	}
 
 	go func() {
 		<-ctx.Done()

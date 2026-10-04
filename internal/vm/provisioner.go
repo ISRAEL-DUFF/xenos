@@ -26,6 +26,8 @@ const (
 	JobProvision = "vm.provision"
 	JobPower     = "vm.power"
 	JobDelete    = "vm.delete"
+	JobSuspend   = "vm.suspend" // out of funds: stop the guest, keep its disk
+	JobResume    = "vm.resume"  // funded again: back to stopped; the customer starts it
 )
 
 // Power actions accepted by JobPower.
@@ -57,6 +59,7 @@ type Provisioner struct {
 	PVE   proxmox.API
 	Cfg   Config
 	Log   *slog.Logger
+	Now   func() time.Time // defaults to time.Now; tests inject a clock
 
 	mu    sync.Mutex
 	locks map[int64]*vmLock
@@ -96,8 +99,19 @@ func (p *Provisioner) Handlers() map[string]jobs.Handler {
 		JobProvision: p.handle(p.provision),
 		JobPower:     p.handle(p.power),
 		JobDelete:    p.handle(p.delete),
+		JobSuspend:   p.handle(p.suspend),
+		JobResume:    p.handle(p.resume),
 	}
 }
+
+func (p *Provisioner) now() time.Time {
+	if p.Now != nil {
+		return p.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func tsOf(t time.Time) pgtype.Timestamptz { return pgtype.Timestamptz{Time: t, Valid: true} }
 
 type step func(ctx context.Context, j *jobs.Job, in Payload) error
 
@@ -137,7 +151,6 @@ func (p *Provisioner) provision(ctx context.Context, j *jobs.Job, in Payload) er
 	}
 	if ctx.Err() == nil && j.Attempts >= jobs.MaxAttempts {
 		// Out of retries: destroy the half-built VM, free the IP, mark error.
-		// TODO(phase 3): refund any charge taken at creation.
 		p.abort(context.WithoutCancel(ctx), w, err)
 	}
 	return err
@@ -192,7 +205,9 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 	if err := p.waitAgent(ctx, vmid); err != nil {
 		return err
 	}
-	if _, err := p.transition(ctx, w.ID, []string{"provisioning"}, "running"); err != nil {
+	// Billing starts now, at the top of the current hour (hours are charged in advance).
+	// A VM that never reaches running is never charged, so a failed build needs no refund.
+	if _, err := p.Store.Q.MarkVMRunning(ctx, db.MarkVMRunningParams{ID: w.ID, BillingFrom: tsOf(p.now().Truncate(time.Hour))}); err != nil {
 		return err
 	}
 	p.Log.Info("vm running", "vm_id", w.ID, "vmid", vmid)
@@ -328,6 +343,10 @@ func (p *Provisioner) delete(ctx context.Context, _ *jobs.Job, in Payload) error
 		[]string{"pending", "provisioning", "running", "stopped", "suspended", "error", "deleting"}, "deleting"); err != nil {
 		return err
 	}
+	// Billing ends when deletion is requested; the hour in progress was already charged.
+	if err := p.Store.Q.StopBilling(ctx, db.StopBillingParams{ID: w.ID, BillingUntil: tsOf(p.now())}); err != nil {
+		return err
+	}
 	if err := p.destroyIfPresent(ctx, int(w.ProxmoxVmid.Int32)); err != nil {
 		return fmt.Errorf("destroy: %w", err)
 	}
@@ -335,6 +354,34 @@ func (p *Provisioner) delete(ctx context.Context, _ *jobs.Job, in Payload) error
 		return err
 	}
 	return p.Store.Q.MarkVMDeleted(ctx, w.ID)
+}
+
+// ---- suspension ----
+
+// suspend stops a guest whose owner ran out of funds and ends its billing. The disk is kept.
+func (p *Provisioner) suspend(ctx context.Context, _ *jobs.Job, in Payload) error {
+	w, err := p.work(ctx, in.VMID)
+	if err != nil {
+		return err
+	}
+	if w.State != "running" && w.State != "stopped" {
+		return nil
+	}
+	if st, err := p.PVE.Status(ctx, int(w.ProxmoxVmid.Int32)); err != nil {
+		return err
+	} else if st.Running {
+		if err := p.run(ctx, int(w.ProxmoxVmid.Int32), "shutdown"); err != nil {
+			return err
+		}
+	}
+	_, err = p.Store.Q.SuspendVM(ctx, db.SuspendVMParams{ID: w.ID, SuspendedAt: tsOf(p.now())})
+	return err
+}
+
+// resume returns a suspended VM to stopped and restarts its billing from the current hour.
+func (p *Provisioner) resume(ctx context.Context, _ *jobs.Job, in Payload) error {
+	_, err := p.Store.Q.ResumeVM(ctx, db.ResumeVMParams{ID: in.VMID, BillingFrom: tsOf(p.now().Truncate(time.Hour))})
+	return err
 }
 
 // ---- helpers ----

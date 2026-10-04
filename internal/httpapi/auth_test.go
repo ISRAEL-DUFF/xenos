@@ -49,16 +49,17 @@ type testEnv struct {
 	mailer *captureMailer
 	st     *store.Store
 	ispend *billing.Fake
+	srv    *Server
 }
 
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	st := testutil.DB(t)
 	env := &testEnv{mailer: &captureMailer{}, st: st, ispend: billing.NewFake(150_000)}
-	cfg := config.Config{PublicURL: "http://test", CookieSecure: false, Region: "test-1"}
-	srv := NewServer(cfg, st, jobs.New(st.Pool), env.ispend, env.mailer,
+	cfg := config.Config{PublicURL: "http://test", CookieSecure: false, Region: "test-1", ISpendWebhookSecret: testWebhookSecret}
+	env.srv = NewServer(cfg, st, jobs.New(st.Pool), env.ispend, env.mailer,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), web.Dist())
-	env.ts = httptest.NewServer(srv.Router())
+	env.ts = httptest.NewServer(env.srv.Router())
 	t.Cleanup(env.ts.Close)
 	return env
 }

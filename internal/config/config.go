@@ -28,6 +28,7 @@ type Config struct {
 
 	ProvisionTimeout  time.Duration // how long to wait for a new VM's guest agent
 	WorkerConcurrency int
+	RunWorker         bool   // run the worker inside the API process (development)
 	IPv4PrefixLen     int    // prefix length written into each VM's network config
 	IPv6Prefix        string // /64 to allocate VM addresses from; empty disables IPv6
 	IPv6Gateway       string
@@ -37,6 +38,7 @@ type Config struct {
 	ISpendTenantKey      string
 	ISpendWebhookSecret  string
 	ISpendMerchantWallet string
+	FakeISpendCredit     int64 // dev only: USDT (micro) given to each new customer of the fake iSpend
 }
 
 func Load() (Config, error) {
@@ -61,6 +63,7 @@ func Load() (Config, error) {
 		IPv6Prefix:  os.Getenv("XENOS_IPV6_PREFIX"),
 		IPv6Gateway: os.Getenv("XENOS_IPV6_GATEWAY"),
 		Nameservers: get("XENOS_NAMESERVERS", "1.1.1.1 9.9.9.9"),
+		RunWorker:   get("XENOS_RUN_WORKER", "false") == "true",
 
 		ISpendURL:            os.Getenv("XENOS_ISPEND_URL"),
 		ISpendTenantKey:      os.Getenv("XENOS_ISPEND_TENANT_KEY"),
@@ -68,6 +71,11 @@ func Load() (Config, error) {
 		ISpendMerchantWallet: os.Getenv("XENOS_ISPEND_MERCHANT_WALLET"),
 	}
 	var err error
+	if v := os.Getenv("XENOS_FAKE_ISPEND_CREDIT_UUSDT"); v != "" {
+		if c.FakeISpendCredit, err = strconv.ParseInt(v, 10, 64); err != nil {
+			return c, fmt.Errorf("XENOS_FAKE_ISPEND_CREDIT_UUSDT: %w", err)
+		}
+	}
 	if c.ProvisionTimeout, err = time.ParseDuration(get("XENOS_PROVISION_TIMEOUT", "3m")); err != nil {
 		return c, fmt.Errorf("XENOS_PROVISION_TIMEOUT: %w", err)
 	}
@@ -89,3 +97,6 @@ func get(k, def string) string {
 	}
 	return def
 }
+
+// Grace is how long suspended VMs are kept after the wallet runs out.
+func (Config) Grace() time.Duration { return 72 * time.Hour }

@@ -6,15 +6,16 @@ import (
 	"sync"
 )
 
-// Fake is an in-memory ISpend for local development and tests. Rate is NGN
-// kobo per 1 USDT (e.g. 150_000_00 = ₦150,000/USDT).
+// Fake is an in-memory ISpend for local development and tests. RateKobo is NGN
+// kobo per 1 USDT (e.g. 150_000 = ₦1,500/USDT).
 type Fake struct {
 	mu        sync.Mutex
-	Rate      int64
-	Down      bool // simulate an outage
+	RateKobo  int64 // NGN kobo per 1 USDT
+	Down      bool  // simulate an outage
 	customers map[string]*fakeCustomer
 	seen      map[string]Movement // idempotency key -> result
 	quotes    map[string]Quote
+	expired   map[string]bool
 	moves     map[string]fakeMove
 	n         int
 	Merchant  int64 // merchant USDT balance, micro-USDT
@@ -35,10 +36,11 @@ type fakeMove struct {
 
 func NewFake(rateKoboPerUSDT int64) *Fake {
 	return &Fake{
-		Rate:      rateKoboPerUSDT,
+		RateKobo:  rateKoboPerUSDT,
 		customers: map[string]*fakeCustomer{},
 		seen:      map[string]Movement{},
 		quotes:    map[string]Quote{},
+		expired:   map[string]bool{},
 		moves:     map[string]fakeMove{},
 	}
 }
@@ -72,6 +74,28 @@ func (f *Fake) Deposit(customerID string, kobo int64) {
 	f.customers[customerID].ngn += kobo
 }
 
+func (f *Fake) Customer(_ context.Context, id string) (Customer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Down {
+		return Customer{}, errDown
+	}
+	c, ok := f.customers[id]
+	if !ok {
+		return Customer{}, fmt.Errorf("billing: unknown customer %s", id)
+	}
+	return c.Customer, nil
+}
+
+func (f *Fake) Rate(context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Down {
+		return 0, ErrQuoteUnavailable
+	}
+	return f.RateKobo, nil
+}
+
 func (f *Fake) Balances(_ context.Context, id string) (Balances, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -91,8 +115,8 @@ func (f *Fake) Quote(_ context.Context, id string, amountNGN int64) (Quote, erro
 	if f.Down {
 		return Quote{}, ErrQuoteUnavailable
 	}
-	q := Quote{ID: f.next("q"), AmountNGN: amountNGN, AmountUSDT: amountNGN * 1_000_000 / f.Rate,
-		Rate: fmt.Sprintf("%d.%02d", f.Rate/100, f.Rate%100)}
+	q := Quote{ID: f.next("q"), AmountNGN: amountNGN, AmountUSDT: amountNGN * 1_000_000 / f.RateKobo,
+		Rate: fmt.Sprintf("%d.%02d", f.RateKobo/100, f.RateKobo%100)}
 	f.quotes[q.ID] = q
 	return q, nil
 }
@@ -106,11 +130,17 @@ func (f *Fake) Convert(_ context.Context, key, id, quoteID string) (Movement, er
 	if m, ok := f.seen[key]; ok {
 		return m, nil
 	}
+	if f.expired[quoteID] {
+		return Movement{}, ErrQuoteExpired
+	}
 	q, ok := f.quotes[quoteID]
 	if !ok {
 		return Movement{}, fmt.Errorf("billing: unknown quote %s", quoteID)
 	}
-	c := f.customers[id]
+	c, ok := f.customers[id]
+	if !ok {
+		return Movement{}, fmt.Errorf("billing: unknown customer %s", id)
+	}
 	if c.ngn < q.AmountNGN {
 		return Movement{}, ErrInsufficientFunds
 	}
@@ -130,7 +160,10 @@ func (f *Fake) Charge(_ context.Context, key, id string, amt int64) (Movement, e
 	if m, ok := f.seen[key]; ok {
 		return m, nil
 	}
-	c := f.customers[id]
+	c, ok := f.customers[id]
+	if !ok {
+		return Movement{}, fmt.Errorf("billing: unknown customer %s", id)
+	}
 	if c.usdt < amt {
 		return Movement{}, ErrInsufficientFunds
 	}
@@ -169,4 +202,11 @@ func (f *Fake) Credit(customerID string, uusdt int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.customers[customerID].usdt += uusdt
+}
+
+// ExpireQuote makes Convert reject the quote (test helper).
+func (f *Fake) ExpireQuote(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.expired[id] = true
 }

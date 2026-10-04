@@ -15,6 +15,9 @@ Spec: [VPS V1 Weekend Build Plan.md](<VPS V1 Weekend Build Plan.md>).
 | `internal/mail` | `Mailer` interface (log-only for now) |
 | `internal/jobs` | Postgres job queue (`FOR UPDATE SKIP LOCKED`) |
 | `internal/proxmox` | `API` interface, REST client (clone, configure, resize, power, status, task wait) and in-memory `Fake` |
+| `internal/wallet` | NGN→USDT conversions: deposit handling, manual quotes, retries |
+| `internal/metering` | Hourly VM charging, out-of-funds suspension/grace/deletion, low-balance emails |
+| `internal/worker` | Assembles the job handlers and metering loop |
 | `internal/vm` | Worker-side VM lifecycle: provision, power, delete (the only code that changes VM state) |
 | `internal/sshkey` | SSH public key validation |
 | `internal/testutil` | Per-test Postgres schemas for integration tests |
@@ -59,8 +62,22 @@ Provisioning clones the template, sets cores/memory/cloud-init/IP, resizes the d
 
 Run exactly one worker process (startup requeues every job left `running`). For a test host without KVM set `XENOS_PVE_DISABLE_KVM=true` and a long `XENOS_PROVISION_TIMEOUT`.
 
+## Billing
+
+Plans are priced in USDT (int64 micro-USDT, never floats). Customers fund naira at iSpend; the rate is applied **once**, when naira becomes USDT, so later rate moves never change credit already bought. Naira amounts in the dashboard are display only.
+
+- **Deposits:** `POST /v1/webhooks/ispend` verifies an HMAC signature (5-minute window), stores the event id once, and, if the customer has auto-convert on, queues a conversion. Replays do nothing. The iSpend idempotency key for a conversion is its id.
+- **Manual conversion:** `POST /v1/wallet/convert {amount_ngn_kobo}` returns a quote; send `{quote_id}` to confirm exactly that quote. Needs a verified email. An expired quote fails rather than silently converting at a new rate. `PATCH /v1/wallet/settings {auto_convert}`.
+- **Wallet:** `GET /v1/wallet` shows balances, rate, runway, virtual account (verified users only), conversions and recent charges. When iSpend cannot quote, `quoting_paused` is set and the naira stays safe in the NGN wallet; a sweep converts it when quoting returns.
+- **Metering** (`internal/metering`, ticks every minute, one instance guarded by a Postgres advisory lock): each hour is charged **in advance**, once per VM, key `vm:{id}:hour:{yyyymmddhh}`. Billing runs from the hour a VM reaches `running` until the hour deletion was requested or the VM was suspended; stopped VMs still bill. The usage row and the per-VM cursor move in one transaction. If iSpend is down, rows stay `pending` and are collected later with the same key: hours are charged late, never skipped or doubled. Per-VM monthly cap = plan cap, UTC calendar month. A VM that never reaches `running` is never charged, so failed provisioning needs no refund.
+- **Out of funds:** first failed charge → `unpaid`, 72-hour grace starts, email sent, VMs suspended (stopped, disk kept, billing paused). Wallet covering 24h of the suspended VMs after the debt is paid → VMs return to `stopped`. Grace expiry → VMs deleted.
+- **Low balance:** under 24h of runway → one email a day with the naira needed at today's rate.
+
+**Assumed, to confirm against the real iSpend API:** the webhook signature scheme and payload (`internal/billing/webhook.go`), and the `ISpend` interface in `internal/billing/ispend.go` (customer, balances, rate, quote, convert, charge, reverse). The real client is not written yet; the in-memory fake is used.
+
 ## Status
 
-Phase 2 is code-complete and tested against a fake Proxmox; it is **not yet verified on a real Proxmox host** (its "done when" needs one). Implemented: schema, config, job queue, Proxmox client, fake iSpend, auth, SSH keys, VM create/list/get/power/delete with the provisioning worker, `xenosctl`.
-Still 501: wallet, `POST /v1/webhooks/ispend` (Phase 3). Not built: metering and suspension (Phase 3), admin endpoints, the VM dashboard pages (Phase 5).
+Phase 2 is code-complete but not yet verified on a real Proxmox host. Phase 3 is code-complete against the fake iSpend and is not yet exercised against the real service.
+Implemented: schema, config, job queue, Proxmox client, auth, SSH keys, VM lifecycle, `xenosctl`, wallet and conversions, deposit webhook, hourly metering, suspension/grace, low-balance emails.
+Not built: the real iSpend client, admin endpoints and manual adjustments, the VM/wallet dashboard pages (Phase 5), guardrails and backups (Phase 4).
 Plan prices in the seed migration are placeholders. Emails are logged, not sent, until a provider is chosen.

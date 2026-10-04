@@ -18,6 +18,7 @@ import (
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/store"
+	"github.com/israel-duff/xenos/internal/wallet"
 )
 
 type Server struct {
@@ -28,13 +29,17 @@ type Server struct {
 	Log     *slog.Logger
 	WebRoot fs.FS
 	Mailer  mail.Mailer
+	Wallet  *wallet.Service
+	Cache   *billing.BalanceCache
 
 	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit *auth.Limiter
 }
 
 // NewServer builds a Server with its rate limiters (signup 3/hour per IP per the plan).
 func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISpend, m mail.Mailer, log *slog.Logger, webRoot fs.FS) *Server {
-	return &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot,
+	cache := billing.NewBalanceCache(is, 60*time.Second)
+	return &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot, Cache: cache,
+		Wallet:         &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log},
 		signupLimit:    auth.NewLimiter(3, time.Hour),
 		loginIPLimit:   auth.NewLimiter(30, 15*time.Minute),
 		loginAcctLimit: auth.NewLimiter(8, 15*time.Minute),
@@ -82,24 +87,18 @@ func (s *Server) Router() http.Handler {
 			r.Post("/vms/{id}/stop", s.powerAction("stop", "running"))
 			r.Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
 
-			// Not yet implemented; see "VPS V1 Weekend Build Plan.md" Phase 2/3.
-			for _, route := range []struct{ method, path string }{
-				{"GET", "/wallet"}, {"POST", "/wallet/convert"},
-			} {
-				r.MethodFunc(route.method, route.path, notImplemented)
-			}
+			r.Get("/wallet", s.getWallet)
+			r.Patch("/wallet/settings", s.walletSettings)
+			// Starting a top-up or conversion needs a verified email.
+			r.With(s.requireVerified).Post("/wallet/convert", s.convert)
 		})
 
 		// Authenticated by webhook signature instead of a session (Phase 3).
-		r.Post("/webhooks/ispend", notImplemented)
+		r.Post("/webhooks/ispend", s.ispendWebhook)
 	})
 
 	r.NotFound(s.spa)
 	return r
-}
-
-func notImplemented(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not implemented"})
 }
 
 func (s *Server) listPlans(w http.ResponseWriter, r *http.Request) {

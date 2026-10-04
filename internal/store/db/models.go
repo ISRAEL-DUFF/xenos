@@ -22,6 +22,16 @@ type Conversion struct {
 	DepositEventID   pgtype.Text    `json:"deposit_event_id"`
 	Status           string         `json:"status"`
 	CreatedAt        time.Time      `json:"created_at"`
+	LastError        pgtype.Text    `json:"last_error"`
+}
+
+type ConversionQuote struct {
+	ID            string    `json:"id"`
+	UserID        int64     `json:"user_id"`
+	AmountNgnKobo int64     `json:"amount_ngn_kobo"`
+	AmountUusdt   int64     `json:"amount_uusdt"`
+	Rate          string    `json:"rate"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type EmailVerification struct {
@@ -103,20 +113,23 @@ type UsageCharge struct {
 	AmountUusdt      int64       `json:"amount_uusdt"`
 	IspendMovementID pgtype.Text `json:"ispend_movement_id"`
 	Status           string      `json:"status"`
+	CreatedAt        time.Time   `json:"created_at"`
 }
 
 type User struct {
-	ID               int64              `json:"id"`
-	Email            string             `json:"email"`
-	PasswordHash     string             `json:"password_hash"`
-	IspendCustomerID pgtype.Text        `json:"ispend_customer_id"`
-	EmailVerifiedAt  pgtype.Timestamptz `json:"email_verified_at"`
-	Phone            string             `json:"phone"`
-	Status           string             `json:"status"`
-	IsAdmin          bool               `json:"is_admin"`
-	VmLimit          int32              `json:"vm_limit"`
-	AutoConvert      bool               `json:"auto_convert"`
-	CreatedAt        time.Time          `json:"created_at"`
+	ID                   int64              `json:"id"`
+	Email                string             `json:"email"`
+	PasswordHash         string             `json:"password_hash"`
+	IspendCustomerID     pgtype.Text        `json:"ispend_customer_id"`
+	EmailVerifiedAt      pgtype.Timestamptz `json:"email_verified_at"`
+	Phone                string             `json:"phone"`
+	Status               string             `json:"status"`
+	IsAdmin              bool               `json:"is_admin"`
+	VmLimit              int32              `json:"vm_limit"`
+	AutoConvert          bool               `json:"auto_convert"`
+	CreatedAt            time.Time          `json:"created_at"`
+	GraceStartedAt       pgtype.Timestamptz `json:"grace_started_at"`
+	LowBalanceNotifiedAt pgtype.Timestamptz `json:"low_balance_notified_at"`
 }
 
 type Vm struct {
@@ -135,6 +148,8 @@ type Vm struct {
 	CreatedAt       time.Time          `json:"created_at"`
 	DeletedAt       pgtype.Timestamptz `json:"deleted_at"`
 	AuthorizedKeys  string             `json:"authorized_keys"`
+	BillingFrom     pgtype.Timestamptz `json:"billing_from"`
+	BillingUntil    pgtype.Timestamptz `json:"billing_until"`
 }
 
 type WebhookEvent struct {

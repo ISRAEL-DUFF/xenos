@@ -1,24 +1,19 @@
-// Command worker runs background jobs: provisioning, power actions, deletion
-// (and, in later phases, metering and suspension).
-//
-// Run a single worker process: crash recovery requeues every job left
-// 'running', which is only correct when no other worker is active.
+// Command worker runs background processing: VM provisioning, power actions,
+// deletion, suspension, naira conversions and hourly metering.
 package main
 
 import (
 	"context"
 	"log/slog"
-	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
+	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
-	"github.com/israel-duff/xenos/internal/jobs"
-	"github.com/israel-duff/xenos/internal/proxmox"
+	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/store"
-	"github.com/israel-duff/xenos/internal/vm"
+	"github.com/israel-duff/xenos/internal/worker"
 )
 
 func main() {
@@ -42,33 +37,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer st.Close()
-
-	var pve proxmox.API
-	if cfg.PVEURL == "" {
-		log.Warn("XENOS_PVE_URL unset: using in-memory fake Proxmox, no real VMs will be created")
-		pve = proxmox.NewFake()
-	} else {
-		pve = proxmox.New(cfg.PVEURL, cfg.PVENode, cfg.PVETokenID, cfg.PVETokenSecret, cfg.PVEInsecureTLS)
-	}
-
-	var v6 netip.Prefix
-	if cfg.IPv6Prefix != "" {
-		if v6, err = netip.ParsePrefix(cfg.IPv6Prefix); err != nil {
-			return err
-		}
-	}
-	prov := &vm.Provisioner{Store: st, PVE: pve, Log: log, Cfg: vm.Config{
-		Storage: cfg.PVEStorage, Disk: cfg.PVEDisk, DisableKVM: cfg.PVEDisableKVM,
-		AgentTimeout: cfg.ProvisionTimeout, PollInterval: 3 * time.Second,
-		IPv4PrefixLen: cfg.IPv4PrefixLen, IPv6Prefix: v6, IPv6Gateway: cfg.IPv6Gateway,
-		Nameservers: cfg.Nameservers,
-	}}
-
-	q := jobs.New(st.Pool)
-	if err := q.RecoverStale(ctx); err != nil {
+	is, err := billing.FromConfig(cfg, log)
+	if err != nil {
 		return err
 	}
-	log.Info("worker started", "concurrency", cfg.WorkerConcurrency)
-	q.Run(ctx, cfg.WorkerConcurrency, prov.Handlers(), func(err error) { log.Error("job", "err", err) })
-	return nil
+	return worker.Run(ctx, cfg, st, is, mail.LogMailer{Log: log}, log)
 }
