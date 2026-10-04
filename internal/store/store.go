@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+
+	"github.com/israel-duff/xenos/internal/store/db"
 )
 
 //go:embed migrations/*.sql
@@ -16,6 +18,7 @@ var migrations embed.FS
 
 type Store struct {
 	Pool *pgxpool.Pool
+	Q    *db.Queries
 }
 
 func Open(ctx context.Context, url string) (*Store, error) {
@@ -27,7 +30,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{Pool: pool}, nil
+	return &Store{Pool: pool, Q: db.New(pool)}, nil
 }
 
 func (s *Store) Close() { s.Pool.Close() }

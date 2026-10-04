@@ -12,9 +12,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/israel-duff/xenos/internal/auth"
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/jobs"
+	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/store"
 )
 
@@ -25,30 +27,62 @@ type Server struct {
 	ISpend  billing.ISpend
 	Log     *slog.Logger
 	WebRoot fs.FS
+	Mailer  mail.Mailer
+
+	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit *auth.Limiter
+}
+
+// NewServer builds a Server with its rate limiters (signup 3/hour per IP per the plan).
+func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISpend, m mail.Mailer, log *slog.Logger, webRoot fs.FS) *Server {
+	return &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot,
+		signupLimit:    auth.NewLimiter(3, time.Hour),
+		loginIPLimit:   auth.NewLimiter(30, 15*time.Minute),
+		loginAcctLimit: auth.NewLimiter(8, 15*time.Minute),
+		resendLimit:    auth.NewLimiter(3, time.Hour),
+		resetLimit:     auth.NewLimiter(5, time.Hour),
+	}
 }
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer)
+	r.Use(middleware.RequestID, middleware.Recoverer)
 	r.Use(s.logRequests)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 
 	r.Route("/v1", func(r chi.Router) {
-		// Public catalogue.
+		r.Use(s.authenticate)
+
+		// Public.
 		r.Get("/plans", s.listPlans)
 		r.Get("/templates", s.listTemplates)
+		r.Post("/auth/signup", s.signup)
+		r.Post("/auth/login", s.login)
+		r.Post("/auth/verify", s.verifyEmail)
+		r.Post("/auth/forgot-password", s.forgotPassword)
+		r.Post("/auth/reset-password", s.resetPassword)
 
-		// Not yet implemented; see "VPS V1 Weekend Build Plan.md" Phase 2/3.
-		for _, route := range []struct{ method, path string }{
-			{"POST", "/auth/signup"}, {"POST", "/auth/login"}, {"POST", "/auth/verify"},
-			{"GET", "/ssh-keys"}, {"POST", "/ssh-keys"}, {"DELETE", "/ssh-keys/{id}"},
-			{"POST", "/vms"}, {"GET", "/vms"}, {"GET", "/vms/{id}"}, {"DELETE", "/vms/{id}"},
-			{"POST", "/vms/{id}/reboot"}, {"POST", "/vms/{id}/stop"}, {"POST", "/vms/{id}/start"},
-			{"GET", "/wallet"}, {"POST", "/wallet/convert"}, {"POST", "/webhooks/ispend"},
-		} {
-			r.MethodFunc(route.method, route.path, notImplemented)
-		}
+		// Authenticated (cookie sessions also need X-CSRF-Token on unsafe methods).
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireAuth)
+			r.Get("/auth/me", s.me)
+			r.Post("/auth/logout", s.logout)
+			r.Post("/auth/resend-verification", s.resendVerification)
+			r.Post("/auth/change-password", s.changePassword)
+
+			// Not yet implemented; see "VPS V1 Weekend Build Plan.md" Phase 2/3.
+			for _, route := range []struct{ method, path string }{
+				{"GET", "/ssh-keys"}, {"POST", "/ssh-keys"}, {"DELETE", "/ssh-keys/{id}"},
+				{"POST", "/vms"}, {"GET", "/vms"}, {"GET", "/vms/{id}"}, {"DELETE", "/vms/{id}"},
+				{"POST", "/vms/{id}/reboot"}, {"POST", "/vms/{id}/stop"}, {"POST", "/vms/{id}/start"},
+				{"GET", "/wallet"}, {"POST", "/wallet/convert"},
+			} {
+				r.MethodFunc(route.method, route.path, notImplemented)
+			}
+		})
+
+		// Authenticated by webhook signature instead of a session (Phase 3).
+		r.Post("/webhooks/ispend", notImplemented)
 	})
 
 	r.NotFound(s.spa)
@@ -60,57 +94,21 @@ func notImplemented(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) listPlans(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.Pool.Query(r.Context(),
-		`SELECT id, slug, vcpu, ram_mb, disk_gb, price_uusdt_hourly, price_uusdt_monthly_cap
-		 FROM plans WHERE active ORDER BY price_uusdt_hourly`)
+	plans, err := s.Store.Q.ListActivePlans(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	defer rows.Close()
-	type plan struct {
-		ID           int64  `json:"id"`
-		Slug         string `json:"slug"`
-		VCPU         int    `json:"vcpu"`
-		RAMMB        int    `json:"ram_mb"`
-		DiskGB       int    `json:"disk_gb"`
-		HourlyUUSDT  int64  `json:"price_uusdt_hourly"`
-		MonthlyUUSDT int64  `json:"price_uusdt_monthly_cap"`
-	}
-	out := []plan{}
-	for rows.Next() {
-		var p plan
-		if err := rows.Scan(&p.ID, &p.Slug, &p.VCPU, &p.RAMMB, &p.DiskGB, &p.HourlyUUSDT, &p.MonthlyUUSDT); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		out = append(out, p)
-	}
-	writeJSON(w, 200, out)
+	writeJSON(w, 200, plans)
 }
 
 func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.Pool.Query(r.Context(), `SELECT id, slug, name FROM templates WHERE active ORDER BY id`)
+	tpls, err := s.Store.Q.ListActiveTemplates(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	defer rows.Close()
-	type tpl struct {
-		ID   int64  `json:"id"`
-		Slug string `json:"slug"`
-		Name string `json:"name"`
-	}
-	out := []tpl{}
-	for rows.Next() {
-		var t tpl
-		if err := rows.Scan(&t.ID, &t.Slug, &t.Name); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		out = append(out, t)
-	}
-	writeJSON(w, 200, out)
+	writeJSON(w, 200, tpls)
 }
 
 // spa serves the embedded dashboard, falling back to index.html for client-side routes.

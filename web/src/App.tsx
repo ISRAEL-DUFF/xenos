@@ -1,6 +1,8 @@
-import { Link, Route, Routes } from "react-router-dom";
+import { Link, Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, formatUSDT, type Plan } from "./api";
+import { useAuth } from "./auth";
+import { ForgotPassword, Login, ResetPassword, Signup, VerifyEmail } from "./pages-auth";
 
 function Plans() {
   const { data, error, isLoading } = useQuery({ queryKey: ["plans"], queryFn: () => api<Plan[]>("/plans") });
@@ -23,24 +25,67 @@ function Plans() {
 
 const Soon = ({ name }: { name: string }) => <p className="text-gray-600">{name} — coming soon.</p>;
 
-export default function App() {
+function Layout() {
+  const { user, logout } = useAuth();
   return (
     <div className="mx-auto max-w-4xl p-4">
-      <nav className="mb-6 flex flex-wrap gap-4 border-b pb-3 text-sm">
+      <nav className="mb-6 flex flex-wrap items-center gap-4 border-b pb-3 text-sm">
         <Link to="/" className="font-bold">Xenos</Link>
-        <Link to="/vms">VMs</Link>
-        <Link to="/ssh-keys">SSH keys</Link>
-        <Link to="/wallet">Wallet</Link>
-        <Link to="/account">Account</Link>
+        {user && (
+          <>
+            <Link to="/vms">VMs</Link>
+            <Link to="/ssh-keys">SSH keys</Link>
+            <Link to="/wallet">Wallet</Link>
+            <Link to="/account">Account</Link>
+            <button className="ml-auto underline" onClick={() => logout()}>Log out ({user.email})</button>
+          </>
+        )}
+        {!user && (
+          <span className="ml-auto flex gap-4">
+            <Link to="/login">Log in</Link>
+            <Link to="/signup">Sign up</Link>
+          </span>
+        )}
       </nav>
-      <Routes>
-        <Route path="/" element={<Plans />} />
-        <Route path="/vms" element={<Soon name="VMs" />} />
-        <Route path="/ssh-keys" element={<Soon name="SSH keys" />} />
-        <Route path="/wallet" element={<Soon name="Wallet" />} />
-        <Route path="/account" element={<Soon name="Account" />} />
-        <Route path="*" element={<Soon name="Not found" />} />
-      </Routes>
+      <Outlet />
     </div>
+  );
+}
+
+function RequireAuth() {
+  const { user, loading } = useAuth();
+  if (loading) return <p>Loading…</p>;
+  if (!user) return <Navigate to="/login" replace />;
+  return (
+    <>
+      {!user.email_verified && (
+        <p className="mb-4 rounded bg-amber-100 p-3 text-sm">
+          Verify your email to fund your wallet. Check your inbox for the link.
+        </p>
+      )}
+      <Outlet />
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route path="/" element={<Plans />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
+        <Route path="/verify-email" element={<VerifyEmail />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/reset-password" element={<ResetPassword />} />
+        <Route element={<RequireAuth />}>
+          <Route path="/vms" element={<Soon name="VMs" />} />
+          <Route path="/ssh-keys" element={<Soon name="SSH keys" />} />
+          <Route path="/wallet" element={<Soon name="Wallet" />} />
+          <Route path="/account" element={<Soon name="Account" />} />
+        </Route>
+        <Route path="*" element={<Soon name="Not found" />} />
+      </Route>
+    </Routes>
   );
 }

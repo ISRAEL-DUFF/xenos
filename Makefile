@@ -1,4 +1,4 @@
-.PHONY: web build run test lint db
+.PHONY: web build run test lint db sqlc
 web:
 	cd web && npm install && npm run build
 build: web
@@ -12,3 +12,5 @@ lint:
 	go vet ./...
 db:
 	docker compose up -d postgres
+sqlc:
+	sqlc generate

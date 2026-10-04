@@ -7,9 +7,12 @@ import (
 )
 
 type Config struct {
-	HTTPAddr    string
-	DatabaseURL string
-	Region      string
+	HTTPAddr     string
+	DatabaseURL  string
+	Region       string
+	PublicURL    string // base URL used in emailed links
+	CookieSecure bool   // set Secure on session cookies (disable only for local http)
+	TrustProxy   bool   // trust X-Forwarded-For from the reverse proxy (Caddy)
 
 	PVEURL         string
 	PVENode        string
@@ -26,9 +29,12 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:    get("XENOS_HTTP_ADDR", ":8080"),
-		DatabaseURL: os.Getenv("XENOS_DATABASE_URL"),
-		Region:      get("XENOS_REGION", "eu-de-1"),
+		HTTPAddr:     get("XENOS_HTTP_ADDR", ":8080"),
+		DatabaseURL:  os.Getenv("XENOS_DATABASE_URL"),
+		Region:       get("XENOS_REGION", "eu-de-1"),
+		PublicURL:    get("XENOS_PUBLIC_URL", "http://localhost:8080"),
+		CookieSecure: get("XENOS_COOKIE_SECURE", "true") != "false",
+		TrustProxy:   get("XENOS_TRUST_PROXY", "false") == "true",
 
 		PVEURL:         os.Getenv("XENOS_PVE_URL"),
 		PVENode:        get("XENOS_PVE_NODE", "pve"),

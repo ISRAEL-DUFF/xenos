@@ -14,6 +14,7 @@ import (
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/httpapi"
 	"github.com/israel-duff/xenos/internal/jobs"
+	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/web"
 )
@@ -51,7 +52,7 @@ func run(log *slog.Logger) error {
 		return errors.New("real iSpend client not implemented yet")
 	}
 
-	srv := &httpapi.Server{Cfg: cfg, Store: st, Jobs: jobs.New(st.Pool), ISpend: ispend, Log: log, WebRoot: web.Dist()}
+	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mail.LogMailer{Log: log}, log, web.Dist())
 	hs := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Router(), ReadHeaderTimeout: 10 * time.Second}
 
 	go func() {
