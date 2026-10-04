@@ -1,0 +1,162 @@
+// Package proxmox is a thin client over the Proxmox VE REST API using an API token.
+// The control plane is the only component that talks to Proxmox.
+package proxmox
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type Client struct {
+	base  string
+	token string // "USER@REALM!TOKENID=SECRET"
+	node  string
+	http  *http.Client
+}
+
+// New builds a client. Proxmox ships a self-signed cert by default; pass
+// insecureTLS only until a proper cert is installed on the host.
+func New(baseURL, node, tokenID, tokenSecret string, insecureTLS bool) *Client {
+	return &Client{
+		base:  strings.TrimRight(baseURL, "/") + "/api2/json",
+		token: fmt.Sprintf("%s=%s", tokenID, tokenSecret),
+		node:  node,
+		http: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureTLS}},
+		},
+	}
+}
+
+func (c *Client) do(ctx context.Context, method, path string, form url.Values, out any) error {
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "PVEAPIToken="+c.token)
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("proxmox %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(raw)))
+	}
+	if out == nil {
+		return nil
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return err
+	}
+	return json.Unmarshal(env.Data, out)
+}
+
+// Nodes lists cluster nodes; used as the connectivity smoke test.
+func (c *Client) Nodes(ctx context.Context) ([]map[string]any, error) {
+	var out []map[string]any
+	return out, c.do(ctx, http.MethodGet, "/nodes", nil, &out)
+}
+
+// CloneParams describes a full clone of a template.
+type CloneParams struct {
+	TemplateID int
+	NewID      int
+	Name       string
+	Storage    string
+}
+
+// Clone starts a full clone and returns the task UPID.
+func (c *Client) Clone(ctx context.Context, p CloneParams) (string, error) {
+	f := url.Values{"newid": {fmt.Sprint(p.NewID)}, "name": {p.Name}, "full": {"1"}, "storage": {p.Storage}}
+	var upid string
+	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/clone", c.node, p.TemplateID), f, &upid)
+	return upid, err
+}
+
+// ConfigParams is the post-clone VM configuration (cores, memory, cloud-init).
+type ConfigParams struct {
+	Cores      int
+	MemoryMB   int
+	CIUser     string
+	SSHKeys    string // newline-separated public keys
+	IPConfig0  string // e.g. "ip=203.0.113.10/32,gw=203.0.113.1,ip6=2001:db8::10/64,gw6=2001:db8::1"
+	Nameserver string
+}
+
+func (c *Client) Configure(ctx context.Context, vmid int, p ConfigParams) error {
+	f := url.Values{
+		"cores":      {fmt.Sprint(p.Cores)},
+		"memory":     {fmt.Sprint(p.MemoryMB)},
+		"ciuser":     {p.CIUser},
+		"sshkeys":    {url.PathEscape(p.SSHKeys)}, // PVE expects URL-encoded keys
+		"ipconfig0":  {p.IPConfig0},
+		"nameserver": {p.Nameserver},
+	}
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/config", c.node, vmid), f, nil)
+}
+
+func (c *Client) ResizeDisk(ctx context.Context, vmid int, disk string, sizeGB int) error {
+	f := url.Values{"disk": {disk}, "size": {fmt.Sprintf("%dG", sizeGB)}}
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/resize", c.node, vmid), f, nil)
+}
+
+// Power performs start, stop, shutdown or reboot and returns the task UPID.
+func (c *Client) Power(ctx context.Context, vmid int, action string) (string, error) {
+	var upid string
+	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/status/%s", c.node, vmid, action), url.Values{}, &upid)
+	return upid, err
+}
+
+func (c *Client) Destroy(ctx context.Context, vmid int) (string, error) {
+	var upid string
+	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d?purge=1&destroy-unreferenced-disks=1", c.node, vmid), nil, &upid)
+	return upid, err
+}
+
+// AgentPing succeeds once the QEMU guest agent responds, i.e. the guest booted.
+func (c *Client) AgentPing(ctx context.Context, vmid int) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/agent/ping", c.node, vmid), url.Values{}, nil)
+}
+
+// WaitTask polls a task until it stops and errors if it did not finish OK.
+func (c *Client) WaitTask(ctx context.Context, upid string) error {
+	for {
+		var st struct {
+			Status     string `json:"status"`
+			ExitStatus string `json:"exitstatus"`
+		}
+		path := fmt.Sprintf("/nodes/%s/tasks/%s/status", c.node, url.PathEscape(upid))
+		if err := c.do(ctx, http.MethodGet, path, nil, &st); err != nil {
+			return err
+		}
+		if st.Status == "stopped" {
+			if st.ExitStatus != "OK" {
+				return fmt.Errorf("proxmox task %s: %s", upid, st.ExitStatus)
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
