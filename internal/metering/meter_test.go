@@ -507,3 +507,42 @@ func TestChargeNarrationIdentifiesTheVMAndHour(t *testing.T) {
 		t.Fatalf("narration = %q, want %q (it is the only metadata iswallet keeps for reconciliation)", got, want)
 	}
 }
+
+// reuseFake refuses every charge as IDEMPOTENCY_KEY_REUSED, the one error that can never succeed on retry.
+type reuseFake struct{ *billing.Fake }
+
+func (reuseFake) Charge(context.Context, string, string, int64, string) (billing.Movement, error) {
+	return billing.Movement{}, billing.ErrIdempotencyKeyReused
+}
+
+type alerts struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (a *alerts) Notify(_ context.Context, key string, _ time.Duration, text string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sent = append(a.sent, key+"|"+text)
+}
+
+func TestKeyReusedChargeIsAlertedNotRetriedAsTransient(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	al := &alerts{}
+	e.meter.Alerts = al
+	uid, _ := e.user("a@x.co", 1_000_000)
+	vm1 := e.runningVM(uid)
+	e.meter.ISpend = reuseFake{e.is}
+
+	e.tickAt(at(10, 21))
+	if len(al.sent) != 1 || !strings.Contains(al.sent[0], "IDEMPOTENCY_KEY_REUSED") {
+		t.Fatalf("operators must hear about a key-generation bug: %v", al.sent)
+	}
+	// It is not an outage: it must not mark iswallet down or start the out-of-funds path.
+	if n := e.n(`SELECT count(*) FROM users WHERE grace_started_at IS NOT NULL`); n != 0 {
+		t.Fatal("a key-reuse error is not a lack of funds")
+	}
+	if n := e.n(`SELECT count(*) FROM usage_charges WHERE vm_id=$1 AND status='pending'`, vm1); n != 1 {
+		t.Fatalf("the charge stays open for a human, pending rows = %d", n)
+	}
+}

@@ -43,8 +43,8 @@ XENOS_PVE_TOKEN_SECRET=...
 XENOS_PVE_STORAGE=vmdata
 XENOS_ISPEND_URL=https://...    # iswallet base URL (sandbox: https://synledger.name.ng/iwallet); empty = in-memory fake
 XENOS_ISPEND_API_KEY=...
-XENOS_ISPEND_MERCHANT_WALLET=...  # the one wallet Xenos owns at iswallet (POST /v1/wallets)
-XENOS_ISPEND_USDT_DECIMALS=...    # required, no default: confirm with iswallet
+XENOS_ISPEND_USDT_DECIMALS=6      # iswallet USDT is micro-USDT; a guard against a mismatched balance response
+# XENOS_ISPEND_MERCHANT_WALLET is optional: by default charges go to the operating wallet from GET /v1/platform/account
 XENOS_ISPEND_OWNER_PREFIX=xenos-prod   # distinct per environment
 XENOS_ISPEND_WEBHOOK_SECRET=...   # printed once by `xenosctl ispend subscribe`
 XENOS_TELEGRAM_BOT_TOKEN=...    # and/or XENOS_ALERT_EMAIL

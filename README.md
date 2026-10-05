@@ -79,9 +79,9 @@ Plans are priced in USDT (int64 micro-USDT, never floats). Customers fund naira 
 - **Low balance:** under 24h of runway → one email a day with the naira needed at today's rate.
 - **Limits:** new customers are TIER_1: ₦50,000 per transfer and per day (shown on the wallet page). There is no BVN / TIER_2 upgrade flow in V1.
 
-**Not confirmed with iswallet yet** (the client fails safe until they are): how to **read balances** (the real client's `Balances` returns an explicit error, so the live wallet shows "unavailable"), and the **USDT decimal scale** (`XENOS_ISPEND_USDT_DECIMALS` has no default). Also unconfirmed: where a webhook states its event type, and which credits fire `wallet.credit.posted`. Until the balance endpoint is documented the real client cannot be used end to end; the in-memory fake covers development and the whole test suite.
+Balances are read with `GET /v1/wallets/{id}/balance`: we use `available`, and refuse any response whose currency `scale` is not what we expect (NGN 2, USDT 6). The merchant wallet is the tenant's operating wallet from `GET /v1/platform/account`. The webhook body is an envelope whose `event_type` we require; we never infer an event's meaning from its shape. If iswallet's execute response and the quote disagree on the USDT credited, we record the quote and alert an operator (iswallet's own guide example is inconsistent here; see the conformance report). The real client matches the documented API and passes contract tests, but **has not run against the sandbox yet**: it needs a key.
 
-**Setting up iswallet:** get a sandbox key; create the Xenos merchant wallet (`POST /v1/wallets`) and set `XENOS_ISPEND_MERCHANT_WALLET`; set `XENOS_ISPEND_USDT_DECIMALS` and a per-environment `XENOS_ISPEND_OWNER_PREFIX`; register the webhook with `xenosctl ispend subscribe https://<your-domain>/v1/webhooks/ispend` and put the printed signing secret (shown once) in `XENOS_ISPEND_WEBHOOK_SECRET`.
+**Setting up iswallet:** get a sandbox key and set `XENOS_ISPEND_URL`, `XENOS_ISPEND_API_KEY`, a per-environment `XENOS_ISPEND_OWNER_PREFIX` (sandbox is never reset); register the webhook with `xenosctl ispend subscribe https://<your-domain>/v1/webhooks/ispend` and put the printed signing secret (shown once) in `XENOS_ISPEND_WEBHOOK_SECRET`. Do not create a merchant wallet.
 
 ## Guardrails and operations
 
@@ -103,6 +103,6 @@ Auth for the dashboard is the httpOnly session cookie with a CSRF header; bearer
 
 ## Status
 
-All five phases are code-complete and tested against fakes. What is **not** verified: anything on a real Proxmox host (provisioning, cloud-init networking, the SMTP block, `vzdump`), the real iswallet service (the client is written to the guide but its balance endpoint and USDT scale are unconfirmed, and it has not run against the sandbox), and the real Telegram/email alert channel.
+All five phases are code-complete and tested against fakes. What is **not** verified: anything on a real Proxmox host (provisioning, cloud-init networking, the SMTP block, `vzdump`), the real iswallet service (the client matches the guide and its contract tests pass, but it has not run against the sandbox: no key yet), and the real Telegram/email alert channel.
 Not built: BVN / TIER_2 upgrade, card funding (iswallet has none), email delivery (emails are logged), and the browser console and other backlog items from the plan.
 Plan prices in the seed migration are placeholders.

@@ -8,15 +8,17 @@ Run with the iSpend sandbox and test keys first. Switch to live only when every 
 
 - [ ] **auto** New user signs up (AUP required), verifies email, adds an SSH key: `TestAuthFlow`, `TestSignupRequiresAUP`, `TestSSHKeys`
 - [ ] **auto** iswallet deposit webhook is deduped on the transaction id, USDT credits are never re-converted, reversals are recorded and alerted once: `TestDepositDedupedByTransactionNotDeliveryKey`, `TestOnlyNairaBankDepositsAreConverted`, `TestDepositReversalIsRecordedAndAlertedOnce`
-- [ ] **auto** A conversion whose reply was lost replays the same quote and key; an expired automatic quote is replaced under a new key; a customer's expired quote is refused: `TestLostConvertReplyIsReplayedNotRepeated`, `TestExpiredAutoQuoteIsReplacedUnderANewKey`, `TestManualQuoteExpiresAfterSixtySeconds`
+- [ ] **auto** A conversion whose reply was lost replays the same quote and key; an expired automatic quote is replaced under a new key; a customer's expired quote is refused: `TestLostConvertReplyIsReplayedNotRepeated`, `TestExpiredAutoQuoteIsReplacedUnderANewKey`, `TestManualQuoteExpiresAfterSixtySeconds`, `TestConvertCreditMismatchIsRecordedAsQuotedAndAlerted`
 - [ ] **auto** `INSUFFICIENT_LIQUIDITY` holds the conversion without touching the customer's naira, then completes: `TestLiquidityShortageHoldsTheConversionThenCompletes`
+- [ ] **auto** A reused idempotency key is alerted and never treated as an outage or as insufficient funds: `TestKeyReusedChargeIsAlertedNotRetriedAsTransient`
 - [ ] **auto** The real client matches the documented API (paths, headers, idempotency, error codes, never rounds a charge, paces itself under 100/min): `internal/billing/iswallet_test.go`
 - [ ] **auto** A ₦5,000 deposit converts once into USDT at the active rate; replaying the event changes nothing: `TestDepositAutoConvertsOnceEvenIfReplayed`
 - [ ] **auto** Deposits made before email verification wait and convert on verification: `TestUnverifiedDepositIsHeldThenConvertedOnVerify`
 - [ ] **auto** Changing the FX rate leaves existing USDT balances unchanged: `TestDepositAutoConvertsOnceEvenIfReplayed`
 - [ ] **auto** Rejected / forged webhooks are refused and counted: `TestWebhookValidation`, `TestWebhookFailuresAreRecorded`
-- [ ] **manual** Against the real iswallet sandbox (needs a key and answers to Q1/Q2 in `docs/iswallet-conformance.md`): `POST /v1/sandbox/simulate/deposit` arrives, verifies and converts once; a redelivered event changes nothing; a 61-second-old quote is refused; a charge replayed after an hour has one ledger effect; `simulate/reversal` raises the alert
-- [ ] **manual** The USDT decimal scale is confirmed and `XENOS_ISPEND_USDT_DECIMALS` is set; one real charge of the nano hourly price moves exactly 0.006 USDT
+- [ ] **manual** Against the real iswallet sandbox (needs a key): `POST /v1/sandbox/simulate/deposit` arrives, verifies and converts once; a redelivered event changes nothing; a 61-second-old quote is refused; a charge replayed after an hour has one ledger effect; `simulate/reversal` raises the alert
+- [ ] **manual** One real charge of the nano hourly price moves exactly 0.006 USDT (6,000 micro-USDT, 6 decimals), and the sandbox balance response reports USDT `scale` 6
+- [ ] **manual** Run a conversion in the sandbox and compare the execute response's `credit_amount` with the quote's (the guide's example disagrees by 1,000×; we alert if they differ)
 
 ## VMs
 

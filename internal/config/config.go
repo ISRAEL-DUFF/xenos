@@ -37,7 +37,7 @@ type Config struct {
 	ISpendURL            string
 	ISpendAPIKey         string
 	ISpendOwnerPrefix    string // namespaces owner_ref at iswallet (global across tenants)
-	ISpendUSDTDecimals   int    // scale of iswallet's USDT minor unit; required with the real client
+	ISpendUSDTDecimals   int    // scale of iswallet's USDT minor unit (6); a guard against balance responses that disagree
 	ISpendWebhookSecret  string
 	ISpendMerchantWallet string
 	TelegramBotToken     string // operator alerts; both Telegram values or neither
@@ -88,10 +88,8 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("XENOS_FAKE_ISPEND_CREDIT_UUSDT: %w", err)
 		}
 	}
-	if v := os.Getenv("XENOS_ISPEND_USDT_DECIMALS"); v != "" {
-		if c.ISpendUSDTDecimals, err = strconv.Atoi(v); err != nil {
-			return c, fmt.Errorf("XENOS_ISPEND_USDT_DECIMALS: %w", err)
-		}
+	if c.ISpendUSDTDecimals, err = strconv.Atoi(get("XENOS_ISPEND_USDT_DECIMALS", "6")); err != nil {
+		return c, fmt.Errorf("XENOS_ISPEND_USDT_DECIMALS: %w", err)
 	}
 	if c.DepositLimitKobo, err = strconv.ParseInt(get("XENOS_DEPOSIT_LIMIT_KOBO", "5000000"), 10, 64); err != nil {
 		return c, fmt.Errorf("XENOS_DEPOSIT_LIMIT_KOBO: %w", err)

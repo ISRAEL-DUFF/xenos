@@ -94,9 +94,6 @@ func (s *Service) Sweep(ctx context.Context, jq *jobs.Queue) error {
 // HandleWebhook acts on a verified iswallet delivery. Anything it does not need is acknowledged
 // and ignored, so iswallet stops retrying it.
 func (s *Service) HandleWebhook(ctx context.Context, ev billing.Event) error {
-	if ev.TypeInferred {
-		s.Log.Warn("webhook event type was inferred from its fields; confirm the envelope with iswallet", "type", ev.Type, "txn", ev.TxnID)
-	}
 	switch ev.Type {
 	case billing.EventCreditPosted:
 		// Only naira arriving by bank transfer is a customer deposit. A USDT credit (a conversion or
@@ -333,6 +330,12 @@ func (s *Service) RunConversion(ctx context.Context, id int64) error {
 			return nerr
 		}
 		return retry(err)
+	case errors.Is(err, billing.ErrIdempotencyKeyReused):
+		// Not retryable: a different payload under a key we already used is a bug in how we build keys.
+		s.alert(ctx, fmt.Sprintf("conversion-key-reused-%d", id), 0, fmt.Sprintf(
+			"Conversion %d: iswallet refused the idempotency key as reused with a different payload. This is a bug in our key handling; do not retry blindly.", id))
+		_ = retry(err)
+		return giveUp(err)
 	case errors.Is(err, billing.ErrQuoteUsed):
 		s.alert(ctx, fmt.Sprintf("conversion-quote-used-%d", id), 0, fmt.Sprintf(
 			"Conversion %d: iswallet says its quote was already executed under a different key. Check the ledger before doing anything else.", id))
@@ -346,9 +349,14 @@ func (s *Service) RunConversion(ctx context.Context, id int64) error {
 	}
 
 	s.Cache.Invalidate(cust)
-	credited := mv.CreditUUSDT
-	if credited == 0 {
-		credited = quote.AmountUSDT
+	// The quote is the binding promise, so it is what we record. iswallet's execute response also
+	// reports the credit; if the two ever disagree, say so rather than silently trusting either.
+	credited := quote.AmountUSDT
+	if mv.CreditUUSDT != 0 && mv.CreditUUSDT != quote.AmountUSDT {
+		s.Log.Error("convert credit differs from the quote", "conversion", id, "quote_uusdt", quote.AmountUSDT, "convert_uusdt", mv.CreditUUSDT)
+		s.alert(ctx, fmt.Sprintf("convert-credit-mismatch-%d", id), 0, fmt.Sprintf(
+			"Conversion %d: iswallet's execute response says it credited %d micro-USDT but the quote promised %d. We recorded the quote. Check the customer's balance against the ledger.",
+			id, mv.CreditUUSDT, quote.AmountUSDT))
 	}
 	return s.Store.Q.CompleteConversion(ctx, db.CompleteConversionParams{
 		ID: id, AmountUusdt: pgtype.Int8{Int64: credited, Valid: true}, Column3: quote.Rate,

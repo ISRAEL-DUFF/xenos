@@ -383,7 +383,8 @@ export function AdminRevenue() {
   const rate = fx.rate_kobo_per_usdt ?? null;
   return (
     <div className="space-y-5">
-      <div className="grid gap-3 sm:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-5">
+        <Stat label="Operating wallet" value={rev.data.merchant_uusdt !== null ? formatUSDT(rev.data.merchant_uusdt) : "—"} sub="pays admin credits" />
         <Stat label="Naira converted (30d)" value={formatNaira(totals.converted_ngn_kobo)} />
         <Stat label="Credit sold (30d)" value={formatUSDT(totals.converted_uusdt)} />
         <Stat label="Usage billed (30d)" value={formatUSDT(totals.usage_uusdt)} sub={usdtToKobo(totals.usage_uusdt, rate) !== null ? `≈ ${formatNaira(usdtToKobo(totals.usage_uusdt, rate)!)}` : undefined} />

@@ -11,35 +11,36 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 )
 
-// ErrBalancesUnconfirmed is returned by Balances until iswallet documents how to read a
-// wallet's balances. The guide describes the call ("one call, both currencies") but gives
-// no path or response shape, and a wrong guess about a money read is worse than failing.
-// Every caller already treats a Balances error as "wallet unavailable" and fails safe.
-var ErrBalancesUnconfirmed = errors.New("billing: the iswallet balance endpoint is not yet confirmed")
-
 // ISWallet is the real client for the iswallet (iSpend) API.
-// Reference: XENOS-INTEGRATION-GUIDE.md from the iswallet team (v1.0, 5 Oct 2026).
+// Reference: XENOS-INTEGRATION-GUIDE.md from the iswallet team (v1.1, 5 Oct 2026).
 type ISWallet struct {
-	BaseURL        string // e.g. https://synledger.name.ng/iwallet
-	APIKey         string
-	MerchantWallet string // the Xenos wallet charges are paid into
+	BaseURL string // e.g. https://synledger.name.ng/iwallet
+	APIKey  string
+	// MerchantWallet is the wallet charges are paid into. Leave it empty to use the tenant's
+	// operating wallet from GET /v1/platform/account (iswallet provisions one per tenant; do not
+	// create a second wallet that also looks like the company's money).
+	MerchantWallet string
 	// OwnerPrefix namespaces owner_ref. iswallet's owner_ref uniqueness is global across tenants,
 	// so a bare "8821" can collide with another tenant. Use a different prefix per environment too:
 	// sandbox wallets are never reset, so a rebuilt dev database would otherwise reuse old refs.
 	OwnerPrefix string
-	// USDTDecimals is the scale of iswallet's USDT minor unit. REQUIRED: a wrong value mis-prices
-	// every charge by a power of ten. Confirm it with iswallet; do not assume 6.
+	// USDTDecimals is the scale of iswallet's USDT minor unit: 6 (micro-USDT), confirmed by iswallet.
+	// It is a guard, not a guess: every balance response states its scale and a mismatch is refused.
 	USDTDecimals int
 
 	HTTP *http.Client
 	Log  *slog.Logger
 
 	limiter *rate.Limiter
+
+	mu         sync.Mutex
+	operatingW string // resolved from /v1/platform/account when MerchantWallet is empty
 }
 
 // ISWalletConfig builds a client.
@@ -58,10 +59,8 @@ func NewISWallet(c ISWalletConfig) (*ISWallet, error) {
 		return nil, errors.New("iswallet: base URL is required")
 	case c.APIKey == "":
 		return nil, errors.New("iswallet: API key is required")
-	case c.MerchantWallet == "":
-		return nil, errors.New("iswallet: merchant wallet id is required (create one wallet for Xenos and set XENOS_ISPEND_MERCHANT_WALLET)")
 	case c.USDTDecimals < 1 || c.USDTDecimals > 12:
-		return nil, errors.New("iswallet: USDT decimals must be set explicitly (XENOS_ISPEND_USDT_DECIMALS); a wrong scale mis-prices every charge")
+		return nil, errors.New("iswallet: USDT decimals must be set (XENOS_ISPEND_USDT_DECIMALS, 6 for iswallet)")
 	}
 	if c.OwnerPrefix == "" {
 		c.OwnerPrefix = "xenos"
@@ -115,6 +114,8 @@ func (e *APIError) Is(target error) bool {
 		return e.Code == "INSUFFICIENT_LIQUIDITY"
 	case ErrQuoteUnavailable:
 		return e.Code == "FX_UNAVAILABLE"
+	case ErrIdempotencyKeyReused:
+		return e.Code == "IDEMPOTENCY_KEY_REUSED"
 	case ErrRateLimited:
 		return e.Status == http.StatusTooManyRequests || e.Code == "RATE_LIMITED"
 	}
@@ -168,7 +169,8 @@ func (c *ISWallet) do(ctx context.Context, method, path, idemKey string, in, out
 
 // parseAPIError tolerates the envelope shapes we expect: {"error":{"code","message","original_response"},"request_id"}.
 func parseAPIError(resp *http.Response, raw []byte) error {
-	e := &APIError{Status: resp.StatusCode, RequestID: resp.Header.Get("X-Request-Id")}
+	// The request id is inside error{} and on the X-Request-ID header; the header is always present.
+	e := &APIError{Status: resp.StatusCode, RequestID: resp.Header.Get("X-Request-ID")}
 	var env struct {
 		Error     json.RawMessage `json:"error"`
 		Code      string          `json:"code"`
@@ -283,9 +285,88 @@ func (c *ISWallet) Customer(ctx context.Context, id string) (Customer, error) {
 	return Customer{ID: id, VirtualAcct: va.AccountNumber, VirtualBank: va.BankName, VirtualName: va.AccountName}, nil
 }
 
-// Balances is not implemented: see ErrBalancesUnconfirmed.
-func (c *ISWallet) Balances(context.Context, string) (Balances, error) {
-	return Balances{}, ErrBalancesUnconfirmed
+// Balances reads GET /v1/wallets/{id}/balance. It reads balances[] (the top-level balance is only
+// the canonical currency), uses AVAILABLE (total minus pending outflows), and treats a currency
+// the wallet does not hold yet as zero. Every entry states its scale; a scale other than the one we
+// expect is refused rather than converted, so a wrong scale can never mis-state a balance.
+func (c *ISWallet) Balances(ctx context.Context, id string) (Balances, error) {
+	var out struct {
+		Balances []struct {
+			Currency  string `json:"currency"`
+			Available int64  `json:"available"`
+			Scale     *int   `json:"scale"`
+		} `json:"balances"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/wallets/"+url.PathEscape(id)+"/balance", "", nil, &out); err != nil {
+		return Balances{}, err
+	}
+	var b Balances
+	for _, e := range out.Balances {
+		switch e.Currency {
+		case "NGN":
+			if e.Scale != nil && *e.Scale != 2 {
+				return Balances{}, fmt.Errorf("%w: NGN scale %d, expected 2", ErrScaleMismatch, *e.Scale)
+			}
+			b.NGNKobo = e.Available
+		case "USDT":
+			if e.Scale != nil && *e.Scale != c.USDTDecimals {
+				return Balances{}, fmt.Errorf("%w: USDT scale %d, expected %d", ErrScaleMismatch, *e.Scale, c.USDTDecimals)
+			}
+			b.USDTMicro = MinorToMicro(e.Available, c.USDTDecimals)
+		}
+	}
+	return b, nil
+}
+
+// merchantWallet returns the wallet charges are paid into: the configured override, else the
+// tenant's operating wallet from GET /v1/platform/account (stable, so resolved once).
+func (c *ISWallet) merchantWallet(ctx context.Context) (string, error) {
+	if c.MerchantWallet != "" {
+		return c.MerchantWallet, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.operatingW != "" {
+		return c.operatingW, nil
+	}
+	acct, err := c.platformAccount(ctx)
+	if err != nil {
+		return "", err
+	}
+	if acct.OperatingWalletID == "" {
+		return "", errors.New("iswallet: /v1/platform/account returned no operating_wallet_id")
+	}
+	c.operatingW = acct.OperatingWalletID
+	return c.operatingW, nil
+}
+
+type platformAccount struct {
+	ClientID          string `json:"client_id"`
+	OperatingWalletID string `json:"operating_wallet_id"`
+	Balances          []struct {
+		Currency  string `json:"currency"`
+		Available int64  `json:"available"`
+	} `json:"balances"`
+}
+
+func (c *ISWallet) platformAccount(ctx context.Context) (platformAccount, error) {
+	var a platformAccount
+	err := c.do(ctx, http.MethodGet, "/v1/platform/account", "", nil, &a)
+	return a, err
+}
+
+// MerchantBalance is the available USDT in the Xenos operating wallet.
+func (c *ISWallet) MerchantBalance(ctx context.Context) (int64, error) {
+	a, err := c.platformAccount(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, b := range a.Balances {
+		if b.Currency == "USDT" {
+			return MinorToMicro(b.Available, c.USDTDecimals), nil
+		}
+	}
+	return 0, nil
 }
 
 // ---- rates and conversion ----
@@ -364,17 +445,32 @@ func (c *ISWallet) transfer(ctx context.Context, key, from, to string, uusdt int
 }
 
 func (c *ISWallet) Charge(ctx context.Context, key, customerID string, uusdt int64, narration string) (Movement, error) {
-	return c.transfer(ctx, key, customerID, c.MerchantWallet, uusdt, narration)
+	if _, err := MicroToMinor(uusdt, c.USDTDecimals); err != nil {
+		return Movement{}, err // refuse before any network call
+	}
+	merchant, err := c.merchantWallet(ctx)
+	if err != nil {
+		return Movement{}, err
+	}
+	return c.transfer(ctx, key, customerID, merchant, uusdt, narration)
 }
 
-// Adjust is a transfer between the customer and the Xenos merchant wallet: a credit is paid
-// from the merchant wallet, a debit is collected into it. (iswallet's /v1/platform/credits is
-// an operator facility whose request shape the guide does not give.)
+// Adjust is a transfer between the customer and the Xenos operating wallet, in either direction
+// (iswallet confirmed this is the supported way): a credit is paid from it, a debit is collected
+// into it. The staff note is the narration, the only place the reason lives on iswallet's side
+// until transfers gain structured metadata. (Not /v1/platform/credits: iswallet says not to.)
 func (c *ISWallet) Adjust(ctx context.Context, key, customerID string, uusdt int64, note string) (Movement, error) {
-	if uusdt >= 0 {
-		return c.transfer(ctx, key, c.MerchantWallet, customerID, uusdt, "adjustment: "+note)
+	if _, err := MicroToMinor(max(uusdt, -uusdt), c.USDTDecimals); err != nil {
+		return Movement{}, err
 	}
-	return c.transfer(ctx, key, customerID, c.MerchantWallet, -uusdt, "adjustment: "+note)
+	merchant, err := c.merchantWallet(ctx)
+	if err != nil {
+		return Movement{}, err
+	}
+	if uusdt >= 0 {
+		return c.transfer(ctx, key, merchant, customerID, uusdt, "adjustment: "+note)
+	}
+	return c.transfer(ctx, key, customerID, merchant, -uusdt, "adjustment: "+note)
 }
 
 // ---- webhooks ----

@@ -30,7 +30,7 @@ func (e *testEnv) webhook(t *testing.T, ev map[string]any, signedAt time.Time, s
 	body, _ := json.Marshal(ev)
 	req, _ := http.NewRequest("POST", e.ts.URL+"/v1/webhooks/ispend", bytes.NewReader(body))
 	if secret != "" {
-		for k, v := range billing.SignWebhook(secret, signedAt, body, "dlv-"+str(ev["txn_id"])) {
+		for k, v := range billing.SignWebhook(secret, signedAt, body, "dlv-"+str(ev["id"])) {
 			req.Header[k] = v
 		}
 	}
@@ -44,11 +44,21 @@ func (e *testEnv) webhook(t *testing.T, ev map[string]any, signedAt time.Time, s
 
 func str(v any) string { s, _ := v.(string); return s }
 
+// envelope is what iswallet actually POSTs: {id, idempotency_key, event_type, ..., wallet_id, data{...}}.
+func envelope(eventType, wallet, txn string, data map[string]any) map[string]any {
+	data["wallet_id"], data["txn_id"] = wallet, txn
+	return map[string]any{"id": "evt-" + txn, "idempotency_key": "dlv-" + txn, "event_type": eventType,
+		"schema_version": "v1", "occurred_at": "2026-10-05T09:14:02Z", "wallet_id": wallet, "data": data}
+}
+
 // depositEvent is a naira bank deposit: wallet.credit.posted for NGN, source pull_inflow.
 func depositEvent(txn, wallet string, kobo int64) map[string]any {
-	return map[string]any{"wallet_id": wallet, "amount": kobo, "currency": "NGN", "balance_after": kobo,
-		"txn_id": txn, "operation_id": "op-" + txn, "source_type": billing.SourceBankInflow, "source_ref": "prov-" + txn}
+	return envelope(billing.EventCreditPosted, wallet, txn, map[string]any{"amount": kobo, "currency": "NGN",
+		"balance_after": kobo, "operation_id": "op-" + txn, "source_type": billing.SourceBankInflow, "source_ref": "prov-" + txn})
 }
+
+// data returns an envelope's data object for tests that need to alter a field.
+func data(ev map[string]any) map[string]any { return ev["data"].(map[string]any) }
 
 func (e *testEnv) drainWallet(t *testing.T) int {
 	return testutil.DrainJobs(t, e.st, e.srv.Wallet.Handlers())
@@ -116,8 +126,12 @@ func TestWebhookValidation(t *testing.T) {
 	if code := env.webhook(t, depositEvent("e2", cust, 0), time.Now(), testWebhookSecret); code != 400 {
 		t.Errorf("zero amount = %d, want 400", code)
 	}
-	if code := env.webhook(t, map[string]any{"event_type": "wallet.something.else", "wallet_id": "w", "txn_id": "e3"}, time.Now(), testWebhookSecret); code != 200 {
-		t.Errorf("unknown type = %d, want 200", code)
+	if code := env.webhook(t, envelope("convert.completed", "w", "e3", map[string]any{"amount": 1}), time.Now(), testWebhookSecret); code != 200 {
+		t.Errorf("an event type we do not use = %d, want 200 (acknowledged and ignored)", code)
+	}
+	// A validly signed body that does not say what it is is refused, never guessed at.
+	if code := env.webhook(t, map[string]any{"id": "x", "wallet_id": "w", "data": map[string]any{"amount": 1, "currency": "NGN"}}, time.Now(), testWebhookSecret); code != 400 {
+		t.Errorf("no event_type = %d, want 400", code)
 	}
 	if code := env.webhook(t, depositEvent("e4", "cus_nobody", 100_000), time.Now(), testWebhookSecret); code != 200 {
 		t.Errorf("unknown customer = %d, want 200", code)
@@ -398,11 +412,13 @@ func TestOnlyNairaBankDepositsAreConverted(t *testing.T) {
 
 	// A USDT credit (our own conversion or an adjustment) must never be converted again,
 	// and neither must a naira credit that is not a bank inflow.
-	usdt := depositEvent("tx-usdt", cust, 30_781)
-	usdt["currency"], usdt["source_type"] = "USDT", "convert"
+	usdt := depositEvent("tx-usdt", cust, 30_781_000)
+	data(usdt)["currency"], data(usdt)["source_type"] = "USDT", "wallet_transfer"
 	other := depositEvent("tx-other", cust, 500_000)
-	other["source_type"] = "adjustment"
-	for _, ev := range []map[string]any{usdt, other} {
+	data(other)["source_type"] = "wallet_transfer" // our own adjustment credit, also fires wallet.credit.posted
+	legacy := depositEvent("tx-legacy", cust, 500_000)
+	data(legacy)["source_type"] = "va_deposit"
+	for _, ev := range []map[string]any{usdt, other, legacy} {
 		if code := env.webhook(t, ev, time.Now(), testWebhookSecret); code != 200 {
 			t.Fatalf("ignored events are still acknowledged, got %d", code)
 		}
@@ -417,8 +433,8 @@ func TestDepositReversalIsRecordedAndAlertedOnce(t *testing.T) {
 	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
 	cust := customerOf(t, env, "a@x.co")
 
-	rev := map[string]any{"wallet_id": cust, "amount": 500_000, "currency": "NGN", "txn_id": "tx-rev",
-		"reversed_provider_reference": "prov-tx-1", "uncovered_amount": 200_000}
+	rev := envelope(billing.EventCreditReversed, cust, "tx-rev", map[string]any{"amount": 500_000, "currency": "NGN",
+		"reversed_provider_reference": "prov-tx-1", "uncovered_amount": 200_000})
 	for i := 0; i < 3; i++ {
 		if code := env.webhook(t, rev, time.Now(), testWebhookSecret); code != 200 {
 			t.Fatalf("reversal delivery = %d", code)
@@ -569,5 +585,27 @@ func TestCardTopUpIsGone(t *testing.T) {
 	verifyEmail(t, env, c)
 	if code, _ := c.do("POST", "/v1/wallet/topup/card", map[string]any{"amount_ngn_kobo": 200_000}, c.csrfHdr()); code != 404 {
 		t.Fatalf("iswallet has no card funding; the endpoint must not exist, got %d", code)
+	}
+}
+
+// iswallet's execute response and the quote should agree on the USDT credited. If they ever disagree
+// we record the quote (the binding promise) and tell an operator, rather than trusting either blindly.
+func TestConvertCreditMismatchIsRecordedAsQuotedAndAlerted(t *testing.T) {
+	env := newTestEnv(t)
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
+	cust := customerOf(t, env, "a@x.co")
+	env.ispend.Deposit(cust, 500_000)
+	env.ispend.ReportedCreditUUSDT = 3_333 // the sort of unit slip v1.1 of the guide still shows in its example
+
+	env.webhook(t, depositEvent("tx-m", cust, 500_000), time.Now(), testWebhookSecret)
+	env.drainWallet(t)
+
+	var credited int64
+	_ = env.st.Pool.QueryRow(context.Background(), `SELECT amount_uusdt FROM conversions WHERE status='complete'`).Scan(&credited)
+	if credited != 3_333_333 {
+		t.Fatalf("recorded %d, want the quoted 3,333,333", credited)
+	}
+	if env.mailer.count("execute response says it credited") != 1 {
+		t.Fatalf("operators must be told about the mismatch: %v", env.mailer.all)
 	}
 }

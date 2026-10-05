@@ -21,6 +21,12 @@ var (
 	// ErrLiquidity: iswallet itself lacks the USDT to back the credit (INSUFFICIENT_LIQUIDITY). Not the
 	// customer's fault: hold the conversion, retry later, tell iswallet.
 	ErrLiquidity = errors.New("billing: iswallet has insufficient USDT liquidity")
+	// ErrIdempotencyKeyReused: the key was already used with a different payload (422
+	// IDEMPOTENCY_KEY_REUSED). Never retryable: it means a key-generation bug on our side.
+	ErrIdempotencyKeyReused = errors.New("billing: idempotency key reused with a different payload")
+	// ErrScaleMismatch: iswallet reports a currency scale we are not configured for. We refuse to
+	// act on balances rather than risk a power-of-ten error.
+	ErrScaleMismatch = errors.New("billing: unexpected currency scale")
 	// ErrRateLimited: HTTP 429. Back off; there is no Retry-After.
 	ErrRateLimited = errors.New("billing: rate limited by ispend")
 	// ErrUnrepresentable: an amount cannot be expressed in iswallet's USDT minor unit without rounding.
@@ -66,7 +72,11 @@ type ISpend interface {
 	CreateCustomer(ctx context.Context, key, ref, email, phone string) (Customer, error)
 	// Customer ensures the wallet has a virtual account and returns it (idempotent).
 	Customer(ctx context.Context, customerID string) (Customer, error)
+	// Balances returns the AVAILABLE balances (total minus funds committed to pending outflows).
+	// A currency the wallet does not hold yet is zero.
 	Balances(ctx context.Context, customerID string) (Balances, error)
+	// MerchantBalance is the available USDT in the Xenos operating wallet, which pays admin credits.
+	MerchantBalance(ctx context.Context) (int64, error)
 	// Rate is the current NGN kobo per 1 USDT buy rate including iswallet's spread. Display only.
 	Rate(ctx context.Context) (int64, error)
 	Quote(ctx context.Context, customerID string, amountNGN int64) (Quote, error)

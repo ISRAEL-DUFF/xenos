@@ -13,14 +13,16 @@ import (
 	"time"
 )
 
-// iswallet webhook delivery (guide §8):
+// iswallet webhook delivery (guide v1.1 §9):
 //
 //	X-iSpend-Signature        sha256=<hex HMAC-SHA256(signing_secret, "<timestamp>.<raw body>")>
 //	X-iSpend-Timestamp        unix seconds
 //	X-iSpend-Idempotency-Key  per-delivery key
 //
-// Events we subscribe to: wallet.credit.posted (a deposit is spendable) and
-// wallet.credit.reversed (a confirmed deposit was clawed back).
+// The POSTed body is an envelope: {id, idempotency_key, event_type, schema_version, occurred_at,
+// wallet_id, data{...}}. `id` is the stable event id; the payload is under `data`.
+// Events we subscribe to: wallet.credit.posted (a credit is spendable) and wallet.credit.reversed
+// (a confirmed deposit was clawed back).
 
 const (
 	HeaderSignature   = "X-iSpend-Signature"
@@ -30,7 +32,9 @@ const (
 	EventCreditPosted   = "wallet.credit.posted"
 	EventCreditReversed = "wallet.credit.reversed"
 
-	// SourceBankInflow is the source_type of a naira bank transfer into a virtual account.
+	// SourceBankInflow is the source_type of a naira bank transfer into a virtual account, the
+	// only credit we auto-convert. Other credits, notably our own adjustment transfers
+	// ("wallet_transfer"), must never be converted.
 	SourceBankInflow = "pull_inflow"
 
 	// SignatureTolerance bounds how old a signed delivery may be, limiting replay of captured requests.
@@ -42,11 +46,10 @@ var ErrBadSignature = errors.New("billing: invalid webhook signature")
 // Event is a verified webhook delivery. Amounts are in the currency's minor unit
 // (kobo for NGN); only NGN deposits are acted on, so no USDT scaling happens here.
 type Event struct {
+	ID          string // stable event id, the same on every retry
 	DeliveryKey string
 	Type        string
-	// TypeInferred is true when the delivery did not say what it is and we worked it out
-	// from its fields. TODO: confirm with iswallet where the event type is carried.
-	TypeInferred bool
+	OccurredAt  time.Time
 
 	WalletID     string
 	Amount       int64 // credited amount, after any provider deduction
@@ -62,29 +65,35 @@ type Event struct {
 	UncoveredAmount     int64
 }
 
-// DedupeKey identifies the underlying ledger event across redeliveries. The
-// transaction id is stable; the per-delivery key is the fallback.
+// DedupeKey identifies the underlying ledger fact across redeliveries. The transaction id is the
+// ledger fact itself, so it also protects us if iswallet ever emitted two events for one movement;
+// the stable event id is the fallback.
 func (e Event) DedupeKey() string {
 	if e.TxnID != "" {
 		return e.Type + ":" + e.TxnID
 	}
-	return e.Type + ":" + e.DeliveryKey
+	return e.Type + ":" + e.ID
 }
 
-type webhookBody struct {
-	EventType   string `json:"event_type"`
-	Type        string `json:"type"`
-	WalletID    string `json:"wallet_id"`
-	Amount      int64  `json:"amount"`
-	Currency    string `json:"currency"`
-	Balance     int64  `json:"balance_after"`
-	TxnID       string `json:"txn_id"`
-	OperationID string `json:"operation_id"`
-	SourceType  string `json:"source_type"`
-	SourceRef   string `json:"source_ref"`
+type envelope struct {
+	ID             string    `json:"id"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	EventType      string    `json:"event_type"`
+	OccurredAt     time.Time `json:"occurred_at"`
+	WalletID       string    `json:"wallet_id"`
+	Data           struct {
+		WalletID    string `json:"wallet_id"`
+		Amount      int64  `json:"amount"`
+		Currency    string `json:"currency"`
+		Balance     int64  `json:"balance_after"`
+		TxnID       string `json:"txn_id"`
+		OperationID string `json:"operation_id"`
+		SourceType  string `json:"source_type"`
+		SourceRef   string `json:"source_ref"`
 
-	ReversedProviderRef string `json:"reversed_provider_reference"`
-	UncoveredAmount     int64  `json:"uncovered_amount"`
+		ReversedProviderRef string `json:"reversed_provider_reference"`
+		UncoveredAmount     int64  `json:"uncovered_amount"`
+	} `json:"data"`
 }
 
 // SignWebhook returns the headers iswallet would send for body at time t (tests and dev tooling).
@@ -104,9 +113,9 @@ func mac(secret, ts string, body []byte) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// ParseWebhook verifies the signature over the RAW body, checks freshness, then
-// decodes the event. An empty secret always fails, so a misconfigured server
-// rejects everything.
+// ParseWebhook verifies the signature over the RAW body, checks freshness, then decodes the
+// envelope. An empty secret always fails, so a misconfigured server rejects everything. A body
+// that does not say what event it is, is rejected: we never infer an event's meaning from its shape.
 func ParseWebhook(secret string, h http.Header, body []byte, now time.Time) (Event, error) {
 	sig := strings.TrimPrefix(h.Get(HeaderSignature), "sha256=")
 	ts := h.Get(HeaderTimestamp)
@@ -126,24 +135,21 @@ func ParseWebhook(secret string, h http.Header, body []byte, now time.Time) (Eve
 		return Event{}, ErrBadSignature
 	}
 
-	var b webhookBody
-	if err := json.Unmarshal(body, &b); err != nil {
-		return Event{}, fmt.Errorf("billing: malformed webhook body")
+	var e envelope
+	if err := json.Unmarshal(body, &e); err != nil || e.EventType == "" {
+		return Event{}, fmt.Errorf("billing: malformed webhook body (no event_type)")
 	}
-	ev := Event{DeliveryKey: h.Get(HeaderDeliveryKey), WalletID: b.WalletID, Amount: b.Amount, Currency: b.Currency,
-		BalanceAfter: b.Balance, TxnID: b.TxnID, OperationID: b.OperationID, SourceType: b.SourceType, SourceRef: b.SourceRef,
-		ReversedProviderRef: b.ReversedProviderRef, UncoveredAmount: b.UncoveredAmount}
-	switch {
-	case b.EventType != "":
-		ev.Type = b.EventType
-	case b.Type != "":
-		ev.Type = b.Type
-	case h.Get("X-iSpend-Event") != "":
-		ev.Type = h.Get("X-iSpend-Event")
-	case b.ReversedProviderRef != "":
-		ev.Type, ev.TypeInferred = EventCreditReversed, true
-	default:
-		ev.Type, ev.TypeInferred = EventCreditPosted, true
+	d := e.Data
+	wallet := d.WalletID
+	if wallet == "" {
+		wallet = e.WalletID
 	}
-	return ev, nil
+	key := e.IdempotencyKey
+	if key == "" {
+		key = h.Get(HeaderDeliveryKey)
+	}
+	return Event{ID: e.ID, DeliveryKey: key, Type: e.EventType, OccurredAt: e.OccurredAt, WalletID: wallet,
+		Amount: d.Amount, Currency: d.Currency, BalanceAfter: d.Balance, TxnID: d.TxnID, OperationID: d.OperationID,
+		SourceType: d.SourceType, SourceRef: d.SourceRef, ReversedProviderRef: d.ReversedProviderRef,
+		UncoveredAmount: d.UncoveredAmount}, nil
 }

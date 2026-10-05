@@ -8,21 +8,28 @@ import (
 	"time"
 )
 
+const postedBody = `{"id":"evt_8f21","idempotency_key":"dlv-1","event_type":"wallet.credit.posted","schema_version":"v1",` +
+	`"occurred_at":"2026-10-05T09:14:02Z","wallet_id":"w1","data":{"wallet_id":"w1","amount":5000000,"currency":"NGN",` +
+	`"balance_after":5000000,"txn_id":"tx9","operation_id":"op1","source_type":"pull_inflow","source_ref":"prov-1"}}`
+
 func TestParseWebhook(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	body := []byte(`{"wallet_id":"w1","amount":5000000,"currency":"NGN","balance_after":5000000,"txn_id":"tx9","operation_id":"op1","source_type":"pull_inflow","source_ref":"prov-1"}`)
+	body := []byte(postedBody)
 	good := SignWebhook("s3cret", now, body, "dlv-1")
 
 	ev, err := ParseWebhook("s3cret", good, body, now)
-	if err != nil || ev.WalletID != "w1" || ev.Amount != 5000000 || ev.Currency != "NGN" || ev.TxnID != "tx9" ||
-		ev.SourceType != SourceBankInflow || ev.DeliveryKey != "dlv-1" {
+	if err != nil || ev.ID != "evt_8f21" || ev.Type != EventCreditPosted || ev.WalletID != "w1" || ev.Amount != 5000000 ||
+		ev.Currency != "NGN" || ev.TxnID != "tx9" || ev.SourceType != SourceBankInflow || ev.DeliveryKey != "dlv-1" ||
+		ev.OccurredAt.IsZero() {
 		t.Fatalf("good webhook: %+v %v", ev, err)
 	}
-	if ev.Type != EventCreditPosted || !ev.TypeInferred {
-		t.Fatalf("a body with no type is inferred as a posted credit: %+v", ev)
-	}
 	if ev.DedupeKey() != "wallet.credit.posted:tx9" {
-		t.Fatalf("dedupe key = %s", ev.DedupeKey())
+		t.Fatalf("dedupe key = %s (the ledger txn id, not the delivery key)", ev.DedupeKey())
+	}
+	// Without a txn id the stable event id is the fallback.
+	noTxn := []byte(`{"id":"evt_1","event_type":"wallet.credit.posted","wallet_id":"w","data":{"amount":1,"currency":"NGN"}}`)
+	if e, _ := ParseWebhook("s", SignWebhook("s", now, noTxn, "d"), noTxn, now); e.DedupeKey() != "wallet.credit.posted:evt_1" {
+		t.Fatalf("fallback dedupe key = %s", e.DedupeKey())
 	}
 
 	hdr := func(mut func(http.Header)) http.Header {
@@ -53,19 +60,30 @@ func TestParseWebhook(t *testing.T) {
 	}
 }
 
-func TestParseWebhookReversalAndExplicitType(t *testing.T) {
+func TestParseWebhookReversal(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	rev := []byte(`{"wallet_id":"w1","amount":5000000,"currency":"NGN","txn_id":"tx10","reversed_provider_reference":"prov-1","uncovered_amount":2000000}`)
+	rev := []byte(`{"id":"evt_2","event_type":"wallet.credit.reversed","wallet_id":"w1","data":{"wallet_id":"w1","amount":5000000,` +
+		`"currency":"NGN","txn_id":"tx10","reversed_provider_reference":"prov-1","uncovered_amount":2000000}}`)
 	ev, err := ParseWebhook("s", SignWebhook("s", now, rev, "d2"), rev, now)
 	if err != nil || ev.Type != EventCreditReversed || ev.ReversedProviderRef != "prov-1" || ev.UncoveredAmount != 2000000 {
 		t.Fatalf("reversal: %+v %v", ev, err)
 	}
-	explicit := []byte(`{"event_type":"wallet.credit.posted","wallet_id":"w1","amount":1,"currency":"NGN"}`)
-	if ev, _ := ParseWebhook("s", SignWebhook("s", now, explicit, "d3"), explicit, now); ev.Type != EventCreditPosted || ev.TypeInferred {
-		t.Fatalf("an explicit type must be used as given: %+v", ev)
-	}
-	if ev.DedupeKey() == "" {
-		t.Fatal("dedupe key must never be empty")
+}
+
+// We never infer an event's meaning from its shape: a validly signed body that does not say what it
+// is must be refused, not guessed at (a reversal misread as a deposit would convert money we do not hold).
+func TestParseWebhookRequiresAnEventType(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	for name, body := range map[string]string{
+		"inner payload only": `{"wallet_id":"w","amount":1,"currency":"NGN","txn_id":"t","source_type":"pull_inflow"}`,
+		"empty type":         `{"id":"e","event_type":"","wallet_id":"w","data":{"amount":1}}`,
+		"not json":           `nope`,
+	} {
+		b := []byte(body)
+		_, err := ParseWebhook("s", SignWebhook("s", now, b, "d"), b, now)
+		if err == nil || errors.Is(err, ErrBadSignature) {
+			t.Errorf("%s: want a malformed-body error (not a signature error), got %v", name, err)
+		}
 	}
 }
 

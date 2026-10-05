@@ -52,8 +52,8 @@ func newStub(t *testing.T) (*stubServer, *ISWallet) {
 		_, _ = w.Write([]byte(out))
 	}))
 	t.Cleanup(ts.Close)
-	c, err := NewISWallet(ISWalletConfig{BaseURL: ts.URL + "/", APIKey: "key_test", MerchantWallet: "wal_merchant",
-		OwnerPrefix: "xenos-test", USDTDecimals: 3, RequestsPerMinute: 6000, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	c, err := NewISWallet(ISWalletConfig{BaseURL: ts.URL + "/", APIKey: "key_test",
+		OwnerPrefix: "xenos-test", USDTDecimals: 6, RequestsPerMinute: 6000, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +75,15 @@ func defaultReply(r stubReq) (int, string) {
 	case r.Path == "/v1/rates":
 		return 200, `{"rate":{"from":"NGN","to":"USDT","market_rate":"0.00062500","spread_bps":150,"effective_rate":"0.00061562"}}`
 	case r.Path == "/v1/convert/quotes":
-		return 200, `{"quote_id":"cvq_1","debit_amount":5000000,"credit_amount":30781,"fx_rate":"0.00061562","expires_at":"2026-10-05T09:15:02Z"}`
+		return 200, `{"quote_id":"cvq_1","debit_amount":5000000,"credit_amount":30781000,"fx_rate":"0.00061562","expires_at":"2026-10-05T09:15:02Z"}`
 	case r.Path == "/v1/convert":
-		return 200, `{"convert_id":"cv_1","status":"completed","debit_amount":5000000,"credit_amount":30781}`
+		return 200, `{"convert_id":"cv_1","status":"completed","debit_amount":5000000,"credit_amount":30781000}`
+	case strings.HasSuffix(r.Path, "/balance"):
+		return 200, `{"wallet_id":"wal_1","currency":"NGN","balance":{"total":5000000,"available":5000000,"pending":0},` +
+			`"balances":[{"currency":"NGN","total":5000000,"available":4000000,"pending":1000000,"scale":2},` +
+			`{"currency":"USDT","total":30781000,"available":30000000,"pending":781000,"scale":6}]}`
+	case r.Path == "/v1/platform/account":
+		return 200, `{"client_id":"xenos","operating_wallet_id":"wal_op","balances":[{"currency":"USDT","total":9000000,"available":8000000,"pending":0}]}`
 	case r.Path == "/v1/transfers":
 		return 200, `{"transfer_id":"tr_1","txn_id":"tx_1"}`
 	case r.Path == "/v1/webhooks/subscriptions":
@@ -90,20 +96,19 @@ func str(v any) string { s, _ := v.(string); return s }
 
 func errReply(status int, code string) func(stubReq) (int, string) {
 	return func(stubReq) (int, string) {
-		return status, `{"error":{"code":"` + code + `","message":"nope"},"request_id":"req_42"}`
+		return status, `{"error":{"code":"` + code + `","message":"nope","request_id":"req_42"}}`
 	}
 }
 
 func TestISWalletConfigIsValidated(t *testing.T) {
-	ok := ISWalletConfig{BaseURL: "http://x", APIKey: "k", MerchantWallet: "w", USDTDecimals: 3}
+	ok := ISWalletConfig{BaseURL: "http://x", APIKey: "k", USDTDecimals: 6}
 	if _, err := NewISWallet(ok); err != nil {
 		t.Fatal(err)
 	}
 	for name, mut := range map[string]func(*ISWalletConfig){
 		"no url":      func(c *ISWalletConfig) { c.BaseURL = "" },
 		"no key":      func(c *ISWalletConfig) { c.APIKey = "" },
-		"no merchant": func(c *ISWalletConfig) { c.MerchantWallet = "" },
-		"no decimals": func(c *ISWalletConfig) { c.USDTDecimals = 0 }, // there is no safe default
+		"no decimals": func(c *ISWalletConfig) { c.USDTDecimals = 0 },
 	} {
 		c := ok
 		mut(&c)
@@ -171,7 +176,7 @@ func TestRateAndQuote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 3-decimal USDT: 30781 minor units = 30.781 USDT = 30,781,000 micro-USDT.
+	// USDT has 6 decimals (micro-USDT): 30,781,000 minor units = 30.781 USDT.
 	if q.ID != "cvq_1" || q.AmountNGN != 5_000_000 || q.AmountUSDT != 30_781_000 || q.Rate != "1624.38" ||
 		!q.ExpiresAt.Equal(time.Date(2026, 10, 5, 9, 15, 2, 0, time.UTC)) {
 		t.Fatalf("quote = %+v", q)
@@ -252,9 +257,9 @@ func TestChargeAndAdjust(t *testing.T) {
 		t.Fatalf("charge = %+v %v", mv, err)
 	}
 	r := s.last()
-	// 6,000 micro-USDT at 3 decimals is 6 minor units.
+	// 6,000 micro-USDT is 6,000 minor units; the destination is the operating wallet from /v1/platform/account.
 	if r.Path != "/v1/transfers" || r.IdemKey != "vm:42:hour:2026100514" || r.Body["from_wallet_id"] != "wal_cust" ||
-		r.Body["to_wallet_id"] != "wal_merchant" || r.Body["amount"] != float64(6) || r.Body["currency"] != "USDT" ||
+		r.Body["to_wallet_id"] != "wal_op" || r.Body["amount"] != float64(6000) || r.Body["currency"] != "USDT" ||
 		r.Body["narration"] != "vm:42 hour:2026100514" {
 		t.Fatalf("charge request: %+v", r)
 	}
@@ -263,21 +268,23 @@ func TestChargeAndAdjust(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = s.last()
-	if r.Body["from_wallet_id"] != "wal_merchant" || r.Body["to_wallet_id"] != "wal_cust" || r.Body["amount"] != float64(2000) || r.Body["narration"] != "adjustment: goodwill" {
+	if r.Body["from_wallet_id"] != "wal_op" || r.Body["to_wallet_id"] != "wal_cust" || r.Body["amount"] != float64(2_000_000) || r.Body["narration"] != "adjustment: goodwill" {
 		t.Fatalf("a credit is paid from the merchant wallet: %+v", r)
 	}
 	if _, err := c.Adjust(ctx, "adjustment:2", "wal_cust", -1_000_000, "correction"); err != nil {
 		t.Fatal(err)
 	}
-	if r = s.last(); r.Body["from_wallet_id"] != "wal_cust" || r.Body["to_wallet_id"] != "wal_merchant" || r.Body["amount"] != float64(1000) {
+	if r = s.last(); r.Body["from_wallet_id"] != "wal_cust" || r.Body["to_wallet_id"] != "wal_op" || r.Body["amount"] != float64(1_000_000) {
 		t.Fatalf("a debit is collected into the merchant wallet: %+v", r)
 	}
 }
 
 func TestChargeNeverRounds(t *testing.T) {
+	// With a coarser minor unit (3 decimals) 6,500 micro-USDT does not land on a whole unit: refuse,
+	// and never call iswallet. (The live scale is 6, where every micro-USDT amount is representable.)
 	s, c := newStub(t)
+	c.USDTDecimals = 3
 	n := len(s.reqs)
-	// 6,500 micro-USDT is finer than a 3-decimal minor unit: refuse, and never call iswallet.
 	if _, err := c.Charge(context.Background(), "k", "w", 6500, "n"); !errors.Is(err, ErrUnrepresentable) {
 		t.Fatalf("err = %v", err)
 	}
@@ -294,13 +301,114 @@ func TestLongNarrationIsTruncated(t *testing.T) {
 	}
 }
 
-func TestBalancesFailClosedUntilConfirmed(t *testing.T) {
+func TestBalancesReadAvailableFromTheBalancesArray(t *testing.T) {
 	s, c := newStub(t)
-	if _, err := c.Balances(context.Background(), "wal_1"); !errors.Is(err, ErrBalancesUnconfirmed) {
-		t.Fatalf("err = %v", err)
+	b, err := c.Balances(context.Background(), "wal_1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(s.reqs) != 0 {
-		t.Fatal("no request should be sent for an endpoint we have not confirmed")
+	// available (total minus pending outflows), not total; USDT is scaled to micro.
+	if b.NGNKobo != 4_000_000 || b.USDTMicro != 30_000_000 {
+		t.Fatalf("balances = %+v, want available NGN 4,000,000 kobo and 30,000,000 micro-USDT", b)
+	}
+	if r := s.last(); r.Method != "GET" || r.Path != "/v1/wallets/wal_1/balance" || r.Auth != "Bearer key_test" {
+		t.Fatalf("request: %+v", r)
+	}
+}
+
+func TestBalancesAbsentCurrencyIsZero(t *testing.T) {
+	s, c := newStub(t)
+	s.reply = func(r stubReq) (int, string) {
+		if strings.HasSuffix(r.Path, "/balance") { // a new customer holds NGN only until their first convert
+			return 200, `{"wallet_id":"w","currency":"NGN","balance":{"total":100,"available":100,"pending":0},"balances":[{"currency":"NGN","total":100,"available":100,"pending":0,"scale":2}]}`
+		}
+		return 0, ""
+	}
+	if b, err := c.Balances(context.Background(), "w"); err != nil || b.NGNKobo != 100 || b.USDTMicro != 0 {
+		t.Fatalf("balances = %+v %v", b, err)
+	}
+}
+
+// A scale we do not expect is refused rather than converted: a power-of-ten error in a balance
+// would mis-state what a customer can spend.
+func TestBalancesRefuseAnUnexpectedScale(t *testing.T) {
+	for name, body := range map[string]string{
+		"USDT": `{"balances":[{"currency":"USDT","available":6,"scale":3}]}`,
+		"NGN":  `{"balances":[{"currency":"NGN","available":6,"scale":3}]}`,
+	} {
+		s, c := newStub(t)
+		b := body
+		s.reply = func(r stubReq) (int, string) {
+			if strings.HasSuffix(r.Path, "/balance") {
+				return 200, b
+			}
+			return 0, ""
+		}
+		if _, err := c.Balances(context.Background(), "w"); !errors.Is(err, ErrScaleMismatch) {
+			t.Errorf("%s: err = %v, want ErrScaleMismatch", name, err)
+		}
+	}
+}
+
+func TestMerchantWalletComesFromPlatformAccountAndIsCached(t *testing.T) {
+	s, c := newStub(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := c.Charge(ctx, "k"+string(rune('a'+i)), "wal_c", 6000, "n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lookups := 0
+	for _, r := range s.reqs {
+		if r.Path == "/v1/platform/account" {
+			lookups++
+		}
+	}
+	if lookups != 1 {
+		t.Fatalf("the operating wallet is stable: expected one lookup, got %d", lookups)
+	}
+
+	// An explicit override skips the lookup entirely.
+	s2, c2 := newStub(t)
+	c2.MerchantWallet = "wal_override"
+	_, _ = c2.Charge(ctx, "k", "wal_c", 6000, "n")
+	for _, r := range s2.reqs {
+		if r.Path == "/v1/platform/account" {
+			t.Fatal("a configured merchant wallet must not trigger a lookup")
+		}
+	}
+	if s2.last().Body["to_wallet_id"] != "wal_override" {
+		t.Fatalf("destination: %v", s2.last().Body["to_wallet_id"])
+	}
+}
+
+func TestMerchantBalance(t *testing.T) {
+	_, c := newStub(t)
+	if b, err := c.MerchantBalance(context.Background()); err != nil || b != 8_000_000 {
+		t.Fatalf("operating wallet available USDT = %d %v", b, err)
+	}
+}
+
+func TestIdempotencyKeyReusedIsItsOwnError(t *testing.T) {
+	s, c := newStub(t)
+	s.reply = errReply(422, "IDEMPOTENCY_KEY_REUSED")
+	err := func() error { _, e := c.Charge(context.Background(), "k", "w", 6000, "n"); return e }()
+	if !errors.Is(err, ErrIdempotencyKeyReused) || errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("a key-reuse 422 must not look like insufficient funds: %v", err)
+	}
+}
+
+func TestRequestIDFromHeaderWhenBodyHasNone(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-ID", "req_hdr")
+		w.WriteHeader(502)
+		_, _ = w.Write([]byte(`<html>bad gateway from a proxy</html>`)) // an answer iswallet did not generate
+	}))
+	defer ts.Close()
+	c, _ := NewISWallet(ISWalletConfig{BaseURL: ts.URL, APIKey: "k", MerchantWallet: "w", USDTDecimals: 6, RequestsPerMinute: 6000})
+	var api *APIError
+	if _, err := c.Rate(context.Background()); !errors.As(err, &api) || api.RequestID != "req_hdr" || api.Status != 502 {
+		t.Fatalf("err = %v", err)
 	}
 }
 

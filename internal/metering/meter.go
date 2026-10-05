@@ -45,6 +45,10 @@ type Meter struct {
 	// MinRunwayHours is the balance, in hours of usage, needed to create a VM,
 	// to leave grace, and below which a low-balance warning is sent (plan: 24).
 	MinRunwayHours int64
+	// Alerts delivers operator alerts; may be nil.
+	Alerts interface {
+		Notify(ctx context.Context, key string, cooldown time.Duration, text string)
+	}
 	// LockKey is the Postgres advisory lock that keeps a single meter running.
 	LockKey int64
 	// SpreadMinutes spreads each VM's hourly charge over the first part of the hour instead of
@@ -202,6 +206,15 @@ func (t *tick) attempt(ctx context.Context, c charge) error {
 			}
 		}
 		return t.startGrace(ctx, c.userID)
+	case errors.Is(err, billing.ErrIdempotencyKeyReused):
+		// Cannot succeed on retry: this charge's key was used with different details. Alert (rate
+		// limited) and leave the charge open for a human; other charges are unaffected.
+		t.m.Log.Error("charge key reused with a different payload", "vm_id", c.vmID, "hour", c.hour, "err", err)
+		if t.m.Alerts != nil {
+			t.m.Alerts.Notify(ctx, "charge-key-reused", time.Hour, fmt.Sprintf(
+				"A usage charge (vm %d, hour %s) was refused by iswallet as IDEMPOTENCY_KEY_REUSED. This is a key-generation bug; the charge stays open until reviewed.", c.vmID, c.hour.Format(time.RFC3339)))
+		}
+		return nil
 	default:
 		t.fail("charge", err)
 		return nil

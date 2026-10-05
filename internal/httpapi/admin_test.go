@@ -319,6 +319,9 @@ func TestAdminCapacityJobsAndRevenue(t *testing.T) {
 	if code != 200 || totals["converted_ngn_kobo"] != float64(500000) || totals["converted_uusdt"] != float64(3333333) || totals["usage_uusdt"] != float64(6000) {
 		t.Fatalf("revenue = %d %v", code, rev)
 	}
+	if rev["merchant_uusdt"] == nil {
+		t.Fatalf("revenue should show the operating wallet balance: %v", rev)
+	}
 	if len(rev["days"].([]any)) != 7 || rev["fx"].(map[string]any)["rate_kobo_per_usdt"] != float64(150000) {
 		t.Fatalf("revenue days/fx = %v", rev)
 	}

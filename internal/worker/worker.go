@@ -53,7 +53,7 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISp
 		Mailer: mailer, ToEmail: cfg.AlertEmail}
 	wal := &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log, Alerter: notifier}
 	meter := &metering.Meter{Store: st, ISpend: is, Cache: cache, Jobs: q, Mailer: mailer, Log: log,
-		Grace: cfg.Grace(), MinRunwayHours: minRunway, SpreadMinutes: cfg.MeterSpreadMinutes}
+		Grace: cfg.Grace(), MinRunwayHours: minRunway, SpreadMinutes: cfg.MeterSpreadMinutes, Alerts: notifier}
 
 	handlers := prov.Handlers()
 	for k, h := range wal.Handlers() {

@@ -495,6 +495,11 @@ func (s *Server) adminRevenue(w http.ResponseWriter, r *http.Request) {
 	if rate, err := s.ISpend.Rate(r.Context()); err == nil && rate > 0 {
 		fx["rate_kobo_per_usdt"], fx["quoting_paused"] = rate, false
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"days": daysOut, "fx": fx, "totals": map[string]int64{
+	// The operating wallet pays admin credits, so show what it holds (null if iswallet cannot be reached).
+	var merchant *int64
+	if bal, err := s.ISpend.MerchantBalance(r.Context()); err == nil {
+		merchant = &bal
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"days": daysOut, "fx": fx, "merchant_uusdt": merchant, "totals": map[string]int64{
 		"converted_ngn_kobo": totals.NGN, "converted_uusdt": totals.Converted, "usage_uusdt": totals.Usage}})
 }

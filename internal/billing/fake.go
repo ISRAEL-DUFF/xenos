@@ -24,6 +24,9 @@ type Fake struct {
 	// DropConvertReply makes the next Convert EXECUTE but then fail as if the answer was lost in
 	// transit: the situation that makes idempotent replay essential.
 	DropConvertReply bool
+	// ReportedCreditUUSDT, if non-zero, is what Convert REPORTS as credited, though the quoted
+	// amount is what is actually credited (simulates a response that disagrees with the quote).
+	ReportedCreditUUSDT int64
 	// ExpireNextQuote marks the next quote expired the moment it is issued.
 	ExpireNextQuote bool
 	// Now is the clock quotes expire against; defaults to time.Now.
@@ -197,6 +200,9 @@ func (f *Fake) Convert(_ context.Context, key, id, quoteID string) (Movement, er
 	c.usdt += q.AmountUSDT
 	q.usedBy = key
 	m := Movement{ID: f.next("cv"), CreditUUSDT: q.AmountUSDT}
+	if f.ReportedCreditUUSDT != 0 {
+		m.CreditUUSDT = f.ReportedCreditUUSDT
+	}
 	f.seen[key] = m
 	if f.DropConvertReply {
 		f.DropConvertReply = false
@@ -272,4 +278,13 @@ func (f *Fake) Seen(key string) bool {
 	defer f.mu.Unlock()
 	_, ok := f.seen[key]
 	return ok
+}
+
+func (f *Fake) MerchantBalance(context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Down {
+		return 0, errDown
+	}
+	return f.Merchant, nil
 }

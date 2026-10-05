@@ -193,4 +193,5 @@ export interface Revenue {
   days: { date: string; converted_ngn_kobo: number; converted_uusdt: number; usage_uusdt: number }[];
   fx: { managed_in: string; quoting_paused: boolean; rate_kobo_per_usdt?: number };
   totals: { converted_ngn_kobo: number; converted_uusdt: number; usage_uusdt: number };
+  merchant_uusdt: number | null; // USDT in the Xenos operating wallet; admin credits are paid from it
 }
