@@ -180,9 +180,9 @@ if (process.env.E2E_PROMOTE) {
 
   await page.getByRole("link", { name: email }).first().click();
   await page.getByText("Account controls", { exact: true }).waitFor();
-  await page.getByLabel("Amount (USDT)").fill("2.5");
+  await page.getByLabel("Amount (USDT)").fill("0.005");
   await page.getByLabel("Note").fill("e2e goodwill credit");
-  await page.getByRole("button", { name: /Credit 2\.50 USDT/ }).click();
+  await page.getByRole("button", { name: /Credit 0\.0050 USDT/ }).click();
   await page.getByText("e2e goodwill credit").waitFor();
   await shot(page, "11-admin-user");
 

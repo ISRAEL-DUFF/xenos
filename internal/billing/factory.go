@@ -1,14 +1,13 @@
 package billing
 
 import (
-	"errors"
 	"log/slog"
 
 	"github.com/israel-duff/xenos/internal/config"
 )
 
-// FromConfig returns the real iSpend client when configured, otherwise the
-// in-memory fake (state is per process, so use XENOS_RUN_WORKER=true in dev).
+// FromConfig returns the real iswallet client when XENOS_ISPEND_URL is set, otherwise the
+// in-memory fake (its state is per process, so use XENOS_RUN_WORKER=true in development).
 func FromConfig(cfg config.Config, log *slog.Logger) (ISpend, error) {
 	if cfg.ISpendURL == "" {
 		log.Warn("XENOS_ISPEND_URL unset: using in-memory fake iSpend")
@@ -16,5 +15,6 @@ func FromConfig(cfg config.Config, log *slog.Logger) (ISpend, error) {
 		f.SignupCredit = cfg.FakeISpendCredit
 		return f, nil
 	}
-	return nil, errors.New("real iSpend client not implemented yet")
+	return NewISWallet(ISWalletConfig{BaseURL: cfg.ISpendURL, APIKey: cfg.ISpendAPIKey, MerchantWallet: cfg.ISpendMerchantWallet,
+		OwnerPrefix: cfg.ISpendOwnerPrefix, USDTDecimals: cfg.ISpendUSDTDecimals, Log: log})
 }

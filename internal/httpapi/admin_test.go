@@ -171,6 +171,12 @@ func TestAdminBalanceAdjustment(t *testing.T) {
 	newVMUser(t, env, "c@x.co", 1_000_000)
 	cust := customerOf(t, env, "c@x.co")
 	path := fmt.Sprintf("/v1/admin/users/%d/adjustments", userID(t, env, "c@x.co"))
+	// A credit is paid out of the Xenos merchant wallet; a debit is collected into it.
+	if code, out := admin.do("POST", path, map[string]any{"amount_uusdt": 100, "note": "merchant wallet is empty"}, admin.csrfHdr()); code != 409 ||
+		!strings.Contains(out["error"].(string), "merchant wallet") {
+		t.Fatalf("credit from an empty merchant wallet = %d %v", code, out)
+	}
+	env.ispend.FundMerchant(10_000_000)
 
 	bal := func() int64 { b, _ := env.ispend.Balances(context.Background(), cust); return b.USDTMicro }
 
@@ -203,14 +209,14 @@ func TestAdminBalanceAdjustment(t *testing.T) {
 	if n := count(t, env, `SELECT count(*) FROM adjustments WHERE status='complete' AND note LIKE 'goodwill%'`); n != 1 {
 		t.Fatal("adjustment not recorded with its note")
 	}
-	if n := count(t, env, `SELECT count(*) FROM adjustments WHERE status='failed'`); n != 1 {
-		t.Fatalf("the rejected debit should be recorded as failed, got %d", n)
+	if n := count(t, env, `SELECT count(*) FROM adjustments WHERE status='failed'`); n != 2 {
+		t.Fatalf("the two rejected adjustments should be recorded as failed, got %d", n)
 	}
 	if n := count(t, env, `SELECT count(*) FROM admin_audit WHERE action='balance.adjust'`); n != 2 {
 		t.Fatalf("audit rows = %d", n)
 	}
 	_, detail := admin.do("GET", fmt.Sprintf("/v1/admin/users/%d", userID(t, env, "c@x.co")), nil, nil)
-	if adj := detail["adjustments"].([]any); len(adj) != 3 {
+	if adj := detail["adjustments"].([]any); len(adj) != 4 {
 		t.Fatalf("detail should list adjustments, got %v", adj)
 	}
 }
@@ -318,22 +324,10 @@ func TestAdminCapacityJobsAndRevenue(t *testing.T) {
 	}
 }
 
-func TestCardTopUpAndVMMonthCost(t *testing.T) {
+func TestVMMonthCost(t *testing.T) {
 	env := newTestEnv(t)
 	addIPs(t, env, 1)
 	u := newVMUser(t, env, "u@x.co", 10*nanoDay)
-
-	if code, _ := u.c.do("POST", "/v1/wallet/topup/card", map[string]any{"amount_ngn_kobo": 200_000}, u.c.csrfHdr()); code != 403 {
-		t.Fatalf("unverified card top-up = %d, want 403", code)
-	}
-	verifyEmail(t, env, u.c)
-	code, out := u.c.do("POST", "/v1/wallet/topup/card", map[string]any{"amount_ngn_kobo": 200_000}, u.c.csrfHdr())
-	if code != 200 || !strings.HasPrefix(out["checkout_url"].(string), "https://pay.example.test/checkout/") {
-		t.Fatalf("card top-up = %d %v", code, out)
-	}
-	if code, _ := u.c.do("POST", "/v1/wallet/topup/card", map[string]any{"amount_ngn_kobo": 50}, u.c.csrfHdr()); code != 400 {
-		t.Fatalf("tiny card top-up = %d", code)
-	}
 
 	_, vmOut := u.create(t, nil)
 	id := int64(vmOut["id"].(float64))

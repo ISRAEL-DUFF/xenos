@@ -75,7 +75,7 @@ func newEnv(t *testing.T, start time.Time) *env {
 // user creates a user with an iSpend customer and the given USDT balance.
 func (e *env) user(email string, balance int64) (int64, string) {
 	e.t.Helper()
-	c, err := e.is.CreateCustomer(context.Background(), "signup:"+email, email, "")
+	c, err := e.is.CreateCustomer(context.Background(), "signup:"+email, "user:"+email, email, "")
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestChargeInterruptedAfterISpendSucceeded(t *testing.T) {
 	e := newEnv(t, at(10, 20))
 	uid, cust := e.user("a@x.co", 1_000_000)
 	vmID := e.runningVM(uid)
-	_, err := e.is.Charge(context.Background(), billing.ChargeKey(vmID, at(10, 0)), cust, nano)
+	_, err := e.is.Charge(context.Background(), billing.ChargeKey(vmID, at(10, 0)), cust, nano, "vm")
 	must(t, err)
 	e.tickAt(at(10, 21))
 	if e.is.Merchant != nano {
@@ -453,5 +453,57 @@ func TestFailedProvisioningIsNeverCharged(t *testing.T) {
 	e.tickAt(at(11, 30))
 	if e.is.Merchant != 0 || e.n(`SELECT count(*) FROM usage_charges`) != 0 {
 		t.Fatal("a VM that never ran must not be billed")
+	}
+}
+
+func TestChargesAreSpreadAcrossTheHour(t *testing.T) {
+	// iswallet allows 100 calls a minute per key and sends no Retry-After, so the hourly charges
+	// must not all land at :00. Each VM's charge falls due at a stable offset into the hour.
+	e := newEnv(t, at(10, 20))
+	e.meter.SpreadMinutes = 30
+	uid, _ := e.user("a@x.co", 1_000_000)
+	vm1 := e.runningVM(uid) // offset (1*17)%30 = 17 minutes
+	vm2 := e.runningVM(uid) // offset (2*17)%30 = 4 minutes
+	if e.meter.chargeOffset(vm1) != 17*time.Minute || e.meter.chargeOffset(vm2) != 4*time.Minute {
+		t.Fatalf("offsets %v %v", e.meter.chargeOffset(vm1), e.meter.chargeOffset(vm2))
+	}
+
+	e.tickAt(at(10, 20)) // hour 10 is long due for both
+	if e.is.Merchant != 2*nano {
+		t.Fatalf("merchant=%d", e.is.Merchant)
+	}
+	e.tickAt(at(11, 0))
+	e.tickAt(at(11, 3))
+	if e.is.Merchant != 2*nano {
+		t.Fatalf("nothing is due at the top of the hour: merchant=%d", e.is.Merchant)
+	}
+	e.tickAt(at(11, 4))
+	if e.is.Merchant != 3*nano {
+		t.Fatalf("VM 2 falls due at 11:04: merchant=%d", e.is.Merchant)
+	}
+	e.tickAt(at(11, 16))
+	if e.is.Merchant != 3*nano {
+		t.Fatal("VM 1 is not due before 11:17")
+	}
+	e.tickAt(at(11, 17))
+	if e.is.Merchant != 4*nano {
+		t.Fatalf("VM 1 falls due at 11:17: merchant=%d", e.is.Merchant)
+	}
+	// A late tick catches up every hour that is due, in order.
+	e.tickAt(at(14, 30))
+	if e.is.Merchant != 2*nano*5 { // hours 10..14 for both VMs
+		t.Fatalf("catch-up: merchant=%d", e.is.Merchant)
+	}
+}
+
+func TestChargeNarrationIdentifiesTheVMAndHour(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	uid, _ := e.user("a@x.co", 1_000_000)
+	vmID := e.runningVM(uid)
+	e.tickAt(at(10, 21))
+	key := billing.ChargeKey(vmID, at(10, 0))
+	want := fmt.Sprintf("vm:%d hour:2026100510", vmID)
+	if got := e.is.Narrations[key]; got != want {
+		t.Fatalf("narration = %q, want %q (it is the only metadata iswallet keeps for reconciliation)", got, want)
 	}
 }

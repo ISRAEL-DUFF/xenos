@@ -49,8 +49,15 @@ SELECT COALESCE(sum(amount_uusdt), 0)::bigint FROM usage_charges
 WHERE user_id = $1 AND status IN ('pending', 'unpaid');
 
 -- name: SaveQuote :exec
-INSERT INTO conversion_quotes (id, user_id, amount_ngn_kobo, amount_uusdt, rate)
-VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING;
+INSERT INTO conversion_quotes (id, user_id, amount_ngn_kobo, amount_uusdt, rate, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING;
+
+-- name: SetVirtualAccount :exec
+UPDATE users SET va_bank = $2, va_account_number = $3, va_account_name = $4 WHERE id = $1;
+
+-- name: InsertDepositReversal :execrows
+INSERT INTO deposit_reversals (event_key, user_id, wallet_id, amount_kobo, uncovered_kobo, original_ref)
+VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (event_key) DO NOTHING;
 
 -- name: GetUserQuote :one
 SELECT * FROM conversion_quotes WHERE id = $1 AND user_id = $2;
@@ -60,3 +67,9 @@ SELECT c.id FROM conversions c
 WHERE c.status = 'pending'
   AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'conversion.run' AND j.status IN ('queued', 'running')
                   AND j.payload->>'conversion_id' = c.id::text);
+
+-- name: SetConversionQuote :exec
+UPDATE conversions SET ispend_quote_id = $2 WHERE id = $1;
+
+-- name: NextConversionAttempt :exec
+UPDATE conversions SET ispend_quote_id = NULL, convert_attempt = convert_attempt + 1 WHERE id = $1;

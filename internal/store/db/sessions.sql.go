@@ -64,7 +64,7 @@ func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) error {
 }
 
 const getSessionUser = `-- name: GetSessionUser :one
-SELECT s.token_hash, s.kind, s.csrf_token, s.expires_at, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at, u.aup_accepted_at
+SELECT s.token_hash, s.kind, s.csrf_token, s.expires_at, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at, u.aup_accepted_at, u.va_bank, u.va_account_number, u.va_account_name
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1 AND s.expires_at > now()
@@ -89,6 +89,9 @@ type GetSessionUserRow struct {
 	GraceStartedAt       pgtype.Timestamptz `json:"grace_started_at"`
 	LowBalanceNotifiedAt pgtype.Timestamptz `json:"low_balance_notified_at"`
 	AupAcceptedAt        pgtype.Timestamptz `json:"aup_accepted_at"`
+	VaBank               pgtype.Text        `json:"va_bank"`
+	VaAccountNumber      pgtype.Text        `json:"va_account_number"`
+	VaAccountName        pgtype.Text        `json:"va_account_name"`
 }
 
 func (q *Queries) GetSessionUser(ctx context.Context, tokenHash []byte) (GetSessionUserRow, error) {
@@ -113,6 +116,9 @@ func (q *Queries) GetSessionUser(ctx context.Context, tokenHash []byte) (GetSess
 		&i.GraceStartedAt,
 		&i.LowBalanceNotifiedAt,
 		&i.AupAcceptedAt,
+		&i.VaBank,
+		&i.VaAccountNumber,
+		&i.VaAccountName,
 	)
 	return i, err
 }

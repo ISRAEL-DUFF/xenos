@@ -47,6 +47,19 @@ type Meter struct {
 	MinRunwayHours int64
 	// LockKey is the Postgres advisory lock that keeps a single meter running.
 	LockKey int64
+	// SpreadMinutes spreads each VM's hourly charge over the first part of the hour instead of
+	// firing every charge at :00. iswallet rate-limits to 100 calls a minute per key and sends
+	// no Retry-After, so a burst at the top of the hour would be mostly refused. 0 disables it.
+	SpreadMinutes int
+}
+
+// chargeOffset is how long after the top of the hour a VM's charge becomes due: a stable per-VM
+// value in [0, SpreadMinutes), so charges are spread out rather than bunched.
+func (m *Meter) chargeOffset(vmID int64) time.Duration {
+	if m.SpreadMinutes <= 0 {
+		return 0
+	}
+	return time.Duration((vmID*17)%int64(m.SpreadMinutes)) * time.Minute
 }
 
 func (m *Meter) now() time.Time {
@@ -175,7 +188,8 @@ func (t *tick) attempt(ctx context.Context, c charge) error {
 	if t.down {
 		return nil
 	}
-	mv, err := t.m.ISpend.Charge(ctx, billing.ChargeKey(c.vmID, c.hour), c.customer, c.amount)
+	narration := fmt.Sprintf("vm:%d hour:%s", c.vmID, c.hour.UTC().Format("2006010215"))
+	mv, err := t.m.ISpend.Charge(ctx, billing.ChargeKey(c.vmID, c.hour), c.customer, c.amount, narration)
 	switch {
 	case err == nil:
 		delete(t.balances, c.customer)
@@ -225,6 +239,9 @@ func (t *tick) chargeNew(ctx context.Context) error {
 		}
 		last := end.UTC().Truncate(hour)
 		for h := v.BillingFrom.Time.UTC().Truncate(hour); !h.After(last); h = h.Add(hour) {
+			if t.now.Before(h.Add(t.m.chargeOffset(v.ID))) {
+				break // this hour's charge is not due yet; the cursor stays put and later hours wait behind it
+			}
 			c, err := t.record(ctx, v, h)
 			if err != nil {
 				return err

@@ -49,9 +49,11 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISp
 
 	cache := billing.NewBalanceCache(is, 60*time.Second)
 	q := jobs.New(st.Pool)
-	wal := &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log}
+	notifier := &alert.Notifier{Store: st, Log: log, TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID,
+		Mailer: mailer, ToEmail: cfg.AlertEmail}
+	wal := &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log, Alerter: notifier}
 	meter := &metering.Meter{Store: st, ISpend: is, Cache: cache, Jobs: q, Mailer: mailer, Log: log,
-		Grace: cfg.Grace(), MinRunwayHours: minRunway}
+		Grace: cfg.Grace(), MinRunwayHours: minRunway, SpreadMinutes: cfg.MeterSpreadMinutes}
 
 	handlers := prov.Handlers()
 	for k, h := range wal.Handlers() {
@@ -63,8 +65,6 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISp
 	}
 	log.Info("worker started", "concurrency", cfg.WorkerConcurrency)
 	go meter.Run(ctx, meterInterval)
-	notifier := &alert.Notifier{Store: st, Log: log, TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID,
-		Mailer: mailer, ToEmail: cfg.AlertEmail}
 	if !notifier.Configured() {
 		log.Warn("no alert channel configured (XENOS_TELEGRAM_* or XENOS_ALERT_EMAIL): alerts will only appear in the log")
 	}

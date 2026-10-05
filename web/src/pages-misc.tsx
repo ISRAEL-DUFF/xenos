@@ -21,7 +21,7 @@ function Landing() {
     <div className="space-y-10">
       <section className="space-y-4 pt-4 text-center sm:pt-10">
         <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-5xl dark:text-slate-50">Linux servers, paid for in naira.</h1>
-        <p className="mx-auto max-w-xl text-slate-600 dark:text-slate-300">Fund your wallet by bank transfer or card, launch a VM in about a minute, and pay by the hour. Stop paying the moment you delete it.</p>
+        <p className="mx-auto max-w-xl text-slate-600 dark:text-slate-300">Fund your wallet by bank transfer, launch a VM in about a minute, and pay by the hour. Stop paying the moment you delete it.</p>
         <div className="flex justify-center gap-3">
           <Link to="/signup" className={primaryLink}>Create an account</Link>
           <Link to="/login" className="inline-flex rounded-lg border border-slate-300 px-3.5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">Log in</Link>

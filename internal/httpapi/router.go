@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/israel-duff/xenos/internal/alert"
 	"github.com/israel-duff/xenos/internal/auth"
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
@@ -41,7 +42,8 @@ type Server struct {
 func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISpend, m mail.Mailer, log *slog.Logger, webRoot fs.FS) *Server {
 	cache := billing.NewBalanceCache(is, 60*time.Second)
 	return &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot, Cache: cache,
-		Wallet:         &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log},
+		Wallet: &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log, Alerter: &alert.Notifier{Store: st, Log: log,
+			TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID, Mailer: m, ToEmail: cfg.AlertEmail}},
 		signupLimit:    auth.NewLimiter(3, time.Hour),
 		loginIPLimit:   auth.NewLimiter(30, 15*time.Minute),
 		loginAcctLimit: auth.NewLimiter(8, 15*time.Minute),
@@ -93,7 +95,6 @@ func (s *Server) Router() http.Handler {
 			r.Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
 
 			r.Get("/wallet", s.getWallet)
-			r.With(s.requireVerified).Post("/wallet/topup/card", s.cardTopUp)
 			r.Patch("/wallet/settings", s.walletSettings)
 			// Starting a top-up or conversion needs a verified email.
 			r.With(s.requireVerified).Post("/wallet/convert", s.convert)

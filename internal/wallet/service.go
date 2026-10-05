@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -20,6 +22,9 @@ import (
 	"github.com/israel-duff/xenos/internal/store/db"
 )
 
+// ErrBadEvent marks a delivery that is validly signed but cannot be acted on (the webhook answers 400).
+var ErrBadEvent = errors.New("wallet: malformed event")
+
 const (
 	JobConversion = "conversion.run"
 
@@ -27,11 +32,31 @@ const (
 	MinConversionKobo = 100 * 100
 )
 
+// Alerter delivers operator alerts (satisfied by *alert.Notifier). It may be nil.
+type Alerter interface {
+	Notify(ctx context.Context, key string, cooldown time.Duration, text string)
+}
+
 type Service struct {
-	Store  *store.Store
-	ISpend billing.ISpend
-	Cache  *billing.BalanceCache
-	Log    *slog.Logger
+	Store   *store.Store
+	ISpend  billing.ISpend
+	Cache   *billing.BalanceCache
+	Log     *slog.Logger
+	Alerter Alerter
+	Now     func() time.Time // defaults to time.Now
+}
+
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+func (s *Service) alert(ctx context.Context, key string, cooldown time.Duration, text string) {
+	if s.Alerter != nil {
+		s.Alerter.Notify(ctx, key, cooldown, text)
+	}
 }
 
 type convPayload struct {
@@ -66,40 +91,94 @@ func (s *Service) Sweep(ctx context.Context, jq *jobs.Queue) error {
 	return nil
 }
 
-// HandleDeposit records a verified deposit event. It is safe to call any number
-// of times with the same event: the event id is stored once, so a replay does
-// nothing. With auto-convert on, the conversion itself runs in a job so the
-// webhook can answer immediately and iSpend outages are retried.
+// HandleWebhook acts on a verified iswallet delivery. Anything it does not need is acknowledged
+// and ignored, so iswallet stops retrying it.
+func (s *Service) HandleWebhook(ctx context.Context, ev billing.Event) error {
+	if ev.TypeInferred {
+		s.Log.Warn("webhook event type was inferred from its fields; confirm the envelope with iswallet", "type", ev.Type, "txn", ev.TxnID)
+	}
+	switch ev.Type {
+	case billing.EventCreditPosted:
+		// Only naira arriving by bank transfer is a customer deposit. A USDT credit (a conversion or
+		// an adjustment we made ourselves) is not, and must never be converted again.
+		if ev.Currency != "NGN" || ev.SourceType != billing.SourceBankInflow {
+			s.Log.Info("ignoring credit that is not a naira bank deposit", "currency", ev.Currency, "source", ev.SourceType, "txn", ev.TxnID)
+			return nil
+		}
+		return s.HandleDeposit(ctx, ev)
+	case billing.EventCreditReversed:
+		return s.HandleReversal(ctx, ev)
+	default:
+		s.Log.Info("ignoring webhook event", "type", ev.Type, "txn", ev.TxnID)
+		return nil
+	}
+}
+
+// HandleDeposit records a confirmed naira deposit. It is safe to call any number of times for
+// the same ledger event: the event is stored once (keyed by iswallet's transaction id), so a
+// redelivery does nothing. With auto-convert on, the conversion itself runs in a job so the
+// webhook answers immediately and iswallet outages are retried.
 func (s *Service) HandleDeposit(ctx context.Context, ev billing.Event) error {
-	user, err := s.Store.Q.GetUserByISpendCustomer(ctx, textOf(ev.CustomerID))
+	user, err := s.Store.Q.GetUserByISpendCustomer(ctx, textOf(ev.WalletID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		s.Log.Warn("deposit for unknown customer", "customer", ev.CustomerID, "event", ev.ID)
-		return nil // nothing we can do; acknowledge so iSpend stops retrying
+		s.Log.Warn("deposit for an unknown wallet", "wallet", ev.WalletID, "txn", ev.TxnID)
+		return nil // not ours to act on; acknowledge so iswallet stops retrying
 	} else if err != nil {
 		return err
 	}
-	if ev.AmountKobo <= 0 {
-		return fmt.Errorf("deposit event %s has non-positive amount", ev.ID)
+	if ev.Amount <= 0 {
+		return fmt.Errorf("%w: deposit %s has a non-positive amount", ErrBadEvent, ev.DedupeKey())
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
-		if n, err := q.InsertWebhookEvent(ctx, ev.ID); err != nil {
+		if n, err := q.InsertWebhookEvent(ctx, ev.DedupeKey()); err != nil {
 			return err
 		} else if n == 0 {
-			return nil // replay
+			return nil // redelivery
 		}
-		s.Cache.Invalidate(ev.CustomerID)
+		s.Cache.Invalidate(ev.WalletID)
 		if !user.AutoConvert || !user.EmailVerifiedAt.Valid {
-			// The naira stays in the NGN wallet: the customer asked for it, or has not
+			// The naira stays in the NGN balance: the customer asked for that, or has not
 			// verified their email yet (it is converted when they do).
 			return nil
 		}
 		id, err := q.CreateConversion(ctx, db.CreateConversionParams{
-			UserID: user.ID, AmountNgnKobo: ev.AmountKobo, DepositEventID: textOf("deposit:" + ev.ID)})
+			UserID: user.ID, AmountNgnKobo: ev.Amount, DepositEventID: textOf("deposit:" + ev.DedupeKey())})
 		if err != nil {
 			return err
 		}
 		return jobs.EnqueueTx(ctx, tx, JobConversion, convPayload{ConversionID: id})
 	})
+}
+
+// HandleReversal records a confirmed deposit that iswallet later clawed back. The reversal can
+// take the wallet negative; iswallet bears that loss and the customer keeps the credit they were
+// given, so nothing is clawed back here. We record it and tell an operator.
+func (s *Service) HandleReversal(ctx context.Context, ev billing.Event) error {
+	user, err := s.Store.Q.GetUserByISpendCustomer(ctx, textOf(ev.WalletID))
+	var uid pgtype.Int8
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		s.Log.Warn("reversal for an unknown wallet", "wallet", ev.WalletID, "txn", ev.TxnID)
+	case err != nil:
+		return err
+	default:
+		uid = pgtype.Int8{Int64: user.ID, Valid: true}
+	}
+	n, err := s.Store.Q.InsertDepositReversal(ctx, db.InsertDepositReversalParams{
+		EventKey: ev.DedupeKey(), UserID: uid, WalletID: ev.WalletID, AmountKobo: ev.Amount,
+		UncoveredKobo: ev.UncoveredAmount, OriginalRef: ev.ReversedProviderRef})
+	if err != nil || n == 0 {
+		return err // n == 0: a redelivery
+	}
+	s.Cache.Invalidate(ev.WalletID)
+	who := ev.WalletID
+	if uid.Valid {
+		who = user.Email
+	}
+	s.alert(ctx, "deposit-reversed:"+ev.DedupeKey(), 0, fmt.Sprintf(
+		"A confirmed deposit was reversed for %s: %d kobo (original %s), %d kobo of it already spent. iswallet bears the loss and the customer keeps their credit; review the account if this looks abnormal.",
+		who, ev.Amount, ev.ReversedProviderRef, ev.UncoveredAmount))
+	return nil
 }
 
 // ConvertHeldOnVerify converts naira that arrived while the customer's email was
@@ -132,7 +211,8 @@ func (s *Service) Quote(ctx context.Context, userID int64, customerID string, am
 	if err != nil {
 		return billing.Quote{}, err
 	}
-	err = s.Store.Q.SaveQuote(ctx, db.SaveQuoteParams{ID: q.ID, UserID: userID, AmountNgnKobo: q.AmountNGN, AmountUusdt: q.AmountUSDT, Rate: q.Rate})
+	err = s.Store.Q.SaveQuote(ctx, db.SaveQuoteParams{ID: q.ID, UserID: userID, AmountNgnKobo: q.AmountNGN, AmountUusdt: q.AmountUSDT,
+		Rate: q.Rate, ExpiresAt: pgtype.Timestamptz{Time: q.ExpiresAt, Valid: !q.ExpiresAt.IsZero()}})
 	return q, err
 }
 
@@ -148,6 +228,9 @@ func (s *Service) StartManual(ctx context.Context, jq *jobs.Queue, userID int64,
 		return db.Conversion{}, ErrUnknownQuote
 	} else if err != nil {
 		return db.Conversion{}, err
+	}
+	if q.ExpiresAt.Valid && !s.now().Before(q.ExpiresAt.Time) {
+		return db.Conversion{}, billing.ErrQuoteExpired // quotes live 60 seconds; do not even ask
 	}
 	key := "quote:" + q.ID
 	id, err := s.Store.Q.CreateConversion(ctx, db.CreateConversionParams{
@@ -166,10 +249,23 @@ func (s *Service) StartManual(ctx context.Context, jq *jobs.Queue, userID int64,
 	return s.Store.Q.GetConversion(ctx, id)
 }
 
-// RunConversion executes one conversion against iSpend. It is idempotent: the
-// iSpend idempotency key is the conversion id, so retries after a timeout or a
-// crash cannot convert twice. Automatic conversions take a fresh quote on every
-// attempt; manual ones keep the quote the customer confirmed.
+// convertKey is the iswallet idempotency key for one attempt of a conversion. The first attempt
+// is "conversion:<id>"; a later one exists only if the earlier quote expired without executing.
+func convertKey(id int64, attempt int32) string {
+	if attempt <= 1 {
+		return "conversion:" + strconv.FormatInt(id, 10)
+	}
+	return fmt.Sprintf("conversion:%d:%d", id, attempt)
+}
+
+// RunConversion executes one conversion against iswallet and is safe to repeat.
+//
+// iswallet rejects a repeated key with a different payload, so the quote is persisted BEFORE it is
+// executed and every retry replays that same quote under that same key. A replay returns the
+// original result even after the quote has expired, so a conversion that executed but whose answer
+// we lost can never run twice. Only when the quote expired and was never executed (the replay says
+// QUOTE_EXPIRED) does an automatic conversion take a fresh quote under a new key; a customer's own
+// quote is never silently replaced, so they never get a rate they did not see.
 func (s *Service) RunConversion(ctx context.Context, id int64) error {
 	c, err := s.Store.Q.GetConversion(ctx, id)
 	if err != nil {
@@ -183,12 +279,16 @@ func (s *Service) RunConversion(ctx context.Context, id int64) error {
 		return err
 	}
 	if !user.IspendCustomerID.Valid {
-		return errors.New("user has no iSpend customer yet")
+		return errors.New("user has no iswallet wallet yet")
 	}
 	cust := user.IspendCustomerID.String
-	fail := func(err error) error {
+	manual := strings.HasPrefix(c.DepositEventID.String, "quote:")
+	retry := func(err error) error { // leave pending; the job and the sweep try again
 		_ = s.Store.Q.SetConversionError(ctx, db.SetConversionErrorParams{ID: id, LastError: textOf(err.Error())})
 		return err
+	}
+	giveUp := func(err error) error { // retrying cannot help
+		return s.Store.Q.FailConversion(ctx, db.FailConversionParams{ID: id, LastError: textOf(err.Error())})
 	}
 
 	var quote billing.Quote
@@ -199,23 +299,65 @@ func (s *Service) RunConversion(ctx context.Context, id int64) error {
 		}
 		quote = billing.Quote{ID: saved.ID, AmountNGN: saved.AmountNgnKobo, AmountUSDT: saved.AmountUusdt, Rate: saved.Rate}
 	} else {
-		if quote, err = s.ISpend.Quote(ctx, cust, c.AmountNgnKobo); err != nil {
-			return fail(err) // the job retries; the naira is safe in the NGN wallet meanwhile
+		fresh, err := s.ISpend.Quote(ctx, cust, c.AmountNgnKobo)
+		if err != nil {
+			if errors.Is(err, billing.ErrLiquidity) {
+				s.liquidityAlert(ctx)
+			}
+			return retry(err) // rates paused or iswallet down: the naira is safe in the NGN balance meanwhile
 		}
+		if err := s.Store.Q.SaveQuote(ctx, db.SaveQuoteParams{ID: fresh.ID, UserID: c.UserID, AmountNgnKobo: fresh.AmountNGN,
+			AmountUusdt: fresh.AmountUSDT, Rate: fresh.Rate, ExpiresAt: pgtype.Timestamptz{Time: fresh.ExpiresAt, Valid: !fresh.ExpiresAt.IsZero()}}); err != nil {
+			return err
+		}
+		if err := s.Store.Q.SetConversionQuote(ctx, db.SetConversionQuoteParams{ID: id, IspendQuoteID: textOf(fresh.ID)}); err != nil {
+			return err
+		}
+		quote = fresh
 	}
 
-	mv, err := s.ISpend.Convert(ctx, "conversion:"+strconv.FormatInt(id, 10), cust, quote.ID)
-	if errors.Is(err, billing.ErrInsufficientFunds) || (errors.Is(err, billing.ErrQuoteExpired) && c.IspendQuoteID.Valid) {
-		// Retrying cannot help: the NGN wallet lacks the amount, or the customer's quote is stale.
-		_ = fail(err)
-		return s.Store.Q.FailConversion(ctx, db.FailConversionParams{ID: id, LastError: textOf(err.Error())})
-	} else if err != nil {
-		return fail(err)
+	mv, err := s.ISpend.Convert(ctx, convertKey(id, c.ConvertAttempt), cust, quote.ID)
+	switch {
+	case err == nil:
+	case errors.Is(err, billing.ErrInsufficientFunds):
+		_ = retry(err)
+		return giveUp(err)
+	case errors.Is(err, billing.ErrQuoteExpired):
+		if manual {
+			_ = retry(err)
+			return giveUp(err) // the customer must request a new quote
+		}
+		// Never executed (a replay of an executed key would have returned its result), so a new
+		// quote under a new key is safe.
+		if nerr := s.Store.Q.NextConversionAttempt(ctx, id); nerr != nil {
+			return nerr
+		}
+		return retry(err)
+	case errors.Is(err, billing.ErrQuoteUsed):
+		s.alert(ctx, fmt.Sprintf("conversion-quote-used-%d", id), 0, fmt.Sprintf(
+			"Conversion %d: iswallet says its quote was already executed under a different key. Check the ledger before doing anything else.", id))
+		_ = retry(err)
+		return giveUp(err)
+	case errors.Is(err, billing.ErrLiquidity):
+		s.liquidityAlert(ctx)
+		return retry(err) // iswallet's inventory, not the customer's problem: hold and try again later
+	default:
+		return retry(err)
 	}
+
 	s.Cache.Invalidate(cust)
+	credited := mv.CreditUUSDT
+	if credited == 0 {
+		credited = quote.AmountUSDT
+	}
 	return s.Store.Q.CompleteConversion(ctx, db.CompleteConversionParams{
-		ID: id, AmountUusdt: pgtype.Int8{Int64: quote.AmountUSDT, Valid: true}, Column3: quote.Rate,
+		ID: id, AmountUusdt: pgtype.Int8{Int64: credited, Valid: true}, Column3: quote.Rate,
 		IspendQuoteID: textOf(quote.ID), IspendMovementID: textOf(mv.ID)})
+}
+
+func (s *Service) liquidityAlert(ctx context.Context) {
+	s.alert(ctx, "iswallet-liquidity", time.Hour,
+		"iswallet refused a naira conversion for lack of USDT liquidity (INSUFFICIENT_LIQUIDITY). Customer naira is safe and conversions are being retried; tell iswallet their USDT inventory needs topping up for our volume.")
 }
 
 func textOf(v string) pgtype.Text { return pgtype.Text{String: v, Valid: true} }

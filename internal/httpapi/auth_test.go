@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 
@@ -23,13 +24,27 @@ import (
 type captureMailer struct {
 	mu   sync.Mutex
 	last string
+	all  []string // every email as "subject|body"
 }
 
-func (m *captureMailer) Send(_ context.Context, _, _, body string) error {
+func (m *captureMailer) Send(_ context.Context, _, subject, body string) error {
 	m.mu.Lock()
 	m.last = body
+	m.all = append(m.all, subject+"|"+body)
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *captureMailer) count(substr string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, e := range m.all {
+		if strings.Contains(e, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 var tokenRe = regexp.MustCompile(`token=([A-Za-z0-9_-]+)`)
@@ -56,7 +71,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	st := testutil.DB(t)
 	env := &testEnv{mailer: &captureMailer{}, st: st, ispend: billing.NewFake(150_000)}
-	cfg := config.Config{PublicURL: "http://test", CookieSecure: false, Region: "test-1", ISpendWebhookSecret: testWebhookSecret}
+	cfg := config.Config{PublicURL: "http://test", CookieSecure: false, Region: "test-1", ISpendWebhookSecret: testWebhookSecret, AlertEmail: "ops@test.example", DepositLimitKobo: 5_000_000}
 	env.srv = NewServer(cfg, st, jobs.New(st.Pool), env.ispend, env.mailer,
 		slog.New(slog.NewTextHandler(io.Discard, nil)), web.Dist())
 	env.ts = httptest.NewServer(env.srv.Router())

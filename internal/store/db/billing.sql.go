@@ -78,7 +78,7 @@ func (q *Queries) FailConversion(ctx context.Context, arg FailConversionParams) 
 }
 
 const getConversion = `-- name: GetConversion :one
-SELECT id, user_id, ispend_quote_id, amount_ngn_kobo, amount_uusdt, rate, ispend_movement_id, deposit_event_id, status, created_at, last_error FROM conversions WHERE id = $1
+SELECT id, user_id, ispend_quote_id, amount_ngn_kobo, amount_uusdt, rate, ispend_movement_id, deposit_event_id, status, created_at, last_error, convert_attempt FROM conversions WHERE id = $1
 `
 
 func (q *Queries) GetConversion(ctx context.Context, id int64) (Conversion, error) {
@@ -96,12 +96,13 @@ func (q *Queries) GetConversion(ctx context.Context, id int64) (Conversion, erro
 		&i.Status,
 		&i.CreatedAt,
 		&i.LastError,
+		&i.ConvertAttempt,
 	)
 	return i, err
 }
 
 const getConversionByKey = `-- name: GetConversionByKey :one
-SELECT id, user_id, ispend_quote_id, amount_ngn_kobo, amount_uusdt, rate, ispend_movement_id, deposit_event_id, status, created_at, last_error FROM conversions WHERE deposit_event_id = $1
+SELECT id, user_id, ispend_quote_id, amount_ngn_kobo, amount_uusdt, rate, ispend_movement_id, deposit_event_id, status, created_at, last_error, convert_attempt FROM conversions WHERE deposit_event_id = $1
 `
 
 func (q *Queries) GetConversionByKey(ctx context.Context, depositEventID pgtype.Text) (Conversion, error) {
@@ -119,12 +120,13 @@ func (q *Queries) GetConversionByKey(ctx context.Context, depositEventID pgtype.
 		&i.Status,
 		&i.CreatedAt,
 		&i.LastError,
+		&i.ConvertAttempt,
 	)
 	return i, err
 }
 
 const getUserByISpendCustomer = `-- name: GetUserByISpendCustomer :one
-SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at, grace_started_at, low_balance_notified_at, aup_accepted_at FROM users WHERE ispend_customer_id = $1
+SELECT id, email, password_hash, ispend_customer_id, email_verified_at, phone, status, is_admin, vm_limit, auto_convert, created_at, grace_started_at, low_balance_notified_at, aup_accepted_at, va_bank, va_account_number, va_account_name FROM users WHERE ispend_customer_id = $1
 `
 
 func (q *Queries) GetUserByISpendCustomer(ctx context.Context, ispendCustomerID pgtype.Text) (User, error) {
@@ -145,12 +147,15 @@ func (q *Queries) GetUserByISpendCustomer(ctx context.Context, ispendCustomerID 
 		&i.GraceStartedAt,
 		&i.LowBalanceNotifiedAt,
 		&i.AupAcceptedAt,
+		&i.VaBank,
+		&i.VaAccountNumber,
+		&i.VaAccountName,
 	)
 	return i, err
 }
 
 const getUserQuote = `-- name: GetUserQuote :one
-SELECT id, user_id, amount_ngn_kobo, amount_uusdt, rate, created_at FROM conversion_quotes WHERE id = $1 AND user_id = $2
+SELECT id, user_id, amount_ngn_kobo, amount_uusdt, rate, created_at, expires_at FROM conversion_quotes WHERE id = $1 AND user_id = $2
 `
 
 type GetUserQuoteParams struct {
@@ -168,8 +173,38 @@ func (q *Queries) GetUserQuote(ctx context.Context, arg GetUserQuoteParams) (Con
 		&i.AmountUusdt,
 		&i.Rate,
 		&i.CreatedAt,
+		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const insertDepositReversal = `-- name: InsertDepositReversal :execrows
+INSERT INTO deposit_reversals (event_key, user_id, wallet_id, amount_kobo, uncovered_kobo, original_ref)
+VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (event_key) DO NOTHING
+`
+
+type InsertDepositReversalParams struct {
+	EventKey      string      `json:"event_key"`
+	UserID        pgtype.Int8 `json:"user_id"`
+	WalletID      string      `json:"wallet_id"`
+	AmountKobo    int64       `json:"amount_kobo"`
+	UncoveredKobo int64       `json:"uncovered_kobo"`
+	OriginalRef   string      `json:"original_ref"`
+}
+
+func (q *Queries) InsertDepositReversal(ctx context.Context, arg InsertDepositReversalParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertDepositReversal,
+		arg.EventKey,
+		arg.UserID,
+		arg.WalletID,
+		arg.AmountKobo,
+		arg.UncoveredKobo,
+		arg.OriginalRef,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertWebhookEvent = `-- name: InsertWebhookEvent :execrows
@@ -294,17 +329,27 @@ func (q *Queries) ListUserConversions(ctx context.Context, userID int64) ([]List
 	return items, nil
 }
 
+const nextConversionAttempt = `-- name: NextConversionAttempt :exec
+UPDATE conversions SET ispend_quote_id = NULL, convert_attempt = convert_attempt + 1 WHERE id = $1
+`
+
+func (q *Queries) NextConversionAttempt(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, nextConversionAttempt, id)
+	return err
+}
+
 const saveQuote = `-- name: SaveQuote :exec
-INSERT INTO conversion_quotes (id, user_id, amount_ngn_kobo, amount_uusdt, rate)
-VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING
+INSERT INTO conversion_quotes (id, user_id, amount_ngn_kobo, amount_uusdt, rate, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING
 `
 
 type SaveQuoteParams struct {
-	ID            string `json:"id"`
-	UserID        int64  `json:"user_id"`
-	AmountNgnKobo int64  `json:"amount_ngn_kobo"`
-	AmountUusdt   int64  `json:"amount_uusdt"`
-	Rate          string `json:"rate"`
+	ID            string             `json:"id"`
+	UserID        int64              `json:"user_id"`
+	AmountNgnKobo int64              `json:"amount_ngn_kobo"`
+	AmountUusdt   int64              `json:"amount_uusdt"`
+	Rate          string             `json:"rate"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
 }
 
 func (q *Queries) SaveQuote(ctx context.Context, arg SaveQuoteParams) error {
@@ -314,6 +359,7 @@ func (q *Queries) SaveQuote(ctx context.Context, arg SaveQuoteParams) error {
 		arg.AmountNgnKobo,
 		arg.AmountUusdt,
 		arg.Rate,
+		arg.ExpiresAt,
 	)
 	return err
 }
@@ -329,6 +375,41 @@ type SetConversionErrorParams struct {
 
 func (q *Queries) SetConversionError(ctx context.Context, arg SetConversionErrorParams) error {
 	_, err := q.db.Exec(ctx, setConversionError, arg.ID, arg.LastError)
+	return err
+}
+
+const setConversionQuote = `-- name: SetConversionQuote :exec
+UPDATE conversions SET ispend_quote_id = $2 WHERE id = $1
+`
+
+type SetConversionQuoteParams struct {
+	ID            int64       `json:"id"`
+	IspendQuoteID pgtype.Text `json:"ispend_quote_id"`
+}
+
+func (q *Queries) SetConversionQuote(ctx context.Context, arg SetConversionQuoteParams) error {
+	_, err := q.db.Exec(ctx, setConversionQuote, arg.ID, arg.IspendQuoteID)
+	return err
+}
+
+const setVirtualAccount = `-- name: SetVirtualAccount :exec
+UPDATE users SET va_bank = $2, va_account_number = $3, va_account_name = $4 WHERE id = $1
+`
+
+type SetVirtualAccountParams struct {
+	ID              int64       `json:"id"`
+	VaBank          pgtype.Text `json:"va_bank"`
+	VaAccountNumber pgtype.Text `json:"va_account_number"`
+	VaAccountName   pgtype.Text `json:"va_account_name"`
+}
+
+func (q *Queries) SetVirtualAccount(ctx context.Context, arg SetVirtualAccountParams) error {
+	_, err := q.db.Exec(ctx, setVirtualAccount,
+		arg.ID,
+		arg.VaBank,
+		arg.VaAccountNumber,
+		arg.VaAccountName,
+	)
 	return err
 }
 

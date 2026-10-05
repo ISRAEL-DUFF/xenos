@@ -4,52 +4,78 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
-// Fake is an in-memory ISpend for local development and tests. RateKobo is NGN
-// kobo per 1 USDT (e.g. 150_000 = ₦1,500/USDT).
+// Fake is an in-memory ISpend for local development and tests. It mirrors the
+// documented iswallet behaviour: one wallet per customer holding NGN and USDT,
+// quotes that expire after 60 seconds and execute once, conversions that can be
+// refused for platform liquidity, and transfers between wallets.
+//
+// RateKobo is NGN kobo per 1 USDT (150_000 = ₦1,500 per USDT).
 type Fake struct {
-	mu        sync.Mutex
-	RateKobo  int64 // NGN kobo per 1 USDT
-	Down      bool  // simulate an outage
-	customers map[string]*fakeCustomer
-	seen      map[string]Movement // idempotency key -> result
-	quotes    map[string]Quote
-	expired   map[string]bool
-	moves     map[string]fakeMove
-	n         int
-	Merchant  int64 // merchant USDT balance, micro-USDT
-	// SignupCredit is given to each new customer (local development only).
+	mu       sync.Mutex
+	RateKobo int64
+	Down     bool // simulate an outage
+	// LiquidityShort makes Convert fail with ErrLiquidity, as when iswallet's USDT inventory is low.
+	LiquidityShort bool
+	// SignupCredit is given to each new customer's USDT balance (local development only).
 	SignupCredit int64
+	// DropConvertReply makes the next Convert EXECUTE but then fail as if the answer was lost in
+	// transit: the situation that makes idempotent replay essential.
+	DropConvertReply bool
+	// ExpireNextQuote marks the next quote expired the moment it is issued.
+	ExpireNextQuote bool
+	// Now is the clock quotes expire against; defaults to time.Now.
+	Now      func() time.Time
+	QuoteTTL time.Duration // default 60s, as iswallet
+
+	customers map[string]*fakeCustomer
+	seen      map[string]Movement // idempotency key -> original result
+	quotes    map[string]*fakeQuote
+	n         int
+	// Merchant is the Xenos merchant wallet's USDT balance, in micro-USDT.
+	Merchant int64
+	// Narrations records the narration of every distinct charge/adjustment, by idempotency key.
+	Narrations map[string]string
 }
 
 type fakeCustomer struct {
 	Customer
+	ref       string
 	ngn, usdt int64
 }
 
-type fakeMove struct {
-	customerID string
-	usdt       int64
-	reversed   bool
+type fakeQuote struct {
+	Quote
+	customer string
+	usedBy   string // idempotency key that executed it
+	expired  bool
 }
 
 func NewFake(rateKoboPerUSDT int64) *Fake {
 	return &Fake{
-		RateKobo:  rateKoboPerUSDT,
-		customers: map[string]*fakeCustomer{},
-		seen:      map[string]Movement{},
-		quotes:    map[string]Quote{},
-		expired:   map[string]bool{},
-		moves:     map[string]fakeMove{},
+		RateKobo:   rateKoboPerUSDT,
+		QuoteTTL:   60 * time.Second,
+		customers:  map[string]*fakeCustomer{},
+		seen:       map[string]Movement{},
+		quotes:     map[string]*fakeQuote{},
+		Narrations: map[string]string{},
 	}
 }
 
 var errDown = fmt.Errorf("billing: ispend unreachable")
 
+func (f *Fake) now() time.Time {
+	if f.Now != nil {
+		return f.Now()
+	}
+	return time.Now()
+}
+
 func (f *Fake) next(prefix string) string { f.n++; return fmt.Sprintf("%s_%d", prefix, f.n) }
 
-func (f *Fake) CreateCustomer(_ context.Context, key, email, _ string) (Customer, error) {
+func (f *Fake) CreateCustomer(_ context.Context, key, ref, _, _ string) (Customer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.Down {
@@ -58,20 +84,18 @@ func (f *Fake) CreateCustomer(_ context.Context, key, email, _ string) (Customer
 	if m, ok := f.seen[key]; ok {
 		return f.customers[m.ID].Customer, nil
 	}
-	id := f.next("cus")
-	c := &fakeCustomer{Customer: Customer{ID: id, VirtualAcct: "9900000000", VirtualBank: "FakeBank",
-		NGNWalletID: id + "_ngn", USDTWalletID: id + "_usdt"}}
-	c.usdt = f.SignupCredit
+	for _, c := range f.customers { // same owner ref: the existing wallet, as WALLET_ALREADY_EXISTS
+		if c.ref == ref {
+			f.seen[key] = Movement{ID: c.ID}
+			return c.Customer, nil
+		}
+	}
+	id := f.next("wal")
+	c := &fakeCustomer{ref: ref, usdt: f.SignupCredit, Customer: Customer{ID: id,
+		VirtualAcct: fmt.Sprintf("99%08d", f.n), VirtualBank: "FakeBank", VirtualName: "XENOS CUSTOMER"}}
 	f.customers[id] = c
 	f.seen[key] = Movement{ID: id}
 	return c.Customer, nil
-}
-
-// Deposit simulates inbound naira (test helper).
-func (f *Fake) Deposit(customerID string, kobo int64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.customers[customerID].ngn += kobo
 }
 
 func (f *Fake) Customer(_ context.Context, id string) (Customer, error) {
@@ -82,9 +106,36 @@ func (f *Fake) Customer(_ context.Context, id string) (Customer, error) {
 	}
 	c, ok := f.customers[id]
 	if !ok {
-		return Customer{}, fmt.Errorf("billing: unknown customer %s", id)
+		return Customer{}, fmt.Errorf("billing: unknown wallet %s", id)
 	}
 	return c.Customer, nil
+}
+
+// Deposit simulates inbound naira arriving at the customer's virtual account (test helper).
+func (f *Fake) Deposit(customerID string, kobo int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.customers[customerID].ngn += kobo
+}
+
+// Credit adds USDT directly to a customer's balance (test helper).
+func (f *Fake) Credit(customerID string, uusdt int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.customers[customerID].usdt += uusdt
+}
+
+func (f *Fake) Balances(_ context.Context, id string) (Balances, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Down {
+		return Balances{}, errDown
+	}
+	c, ok := f.customers[id]
+	if !ok {
+		return Balances{}, fmt.Errorf("billing: unknown wallet %s", id)
+	}
+	return Balances{NGNKobo: c.ngn, USDTMicro: c.usdt}, nil
 }
 
 func (f *Fake) Rate(context.Context) (int64, error) {
@@ -96,28 +147,23 @@ func (f *Fake) Rate(context.Context) (int64, error) {
 	return f.RateKobo, nil
 }
 
-func (f *Fake) Balances(_ context.Context, id string) (Balances, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.Down {
-		return Balances{}, errDown
-	}
-	c, ok := f.customers[id]
-	if !ok {
-		return Balances{}, fmt.Errorf("billing: unknown customer %s", id)
-	}
-	return Balances{NGNKobo: c.ngn, USDTMicro: c.usdt}, nil
-}
-
 func (f *Fake) Quote(_ context.Context, id string, amountNGN int64) (Quote, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.Down {
 		return Quote{}, ErrQuoteUnavailable
 	}
-	q := Quote{ID: f.next("q"), AmountNGN: amountNGN, AmountUSDT: amountNGN * 1_000_000 / f.RateKobo,
-		Rate: fmt.Sprintf("%d.%02d", f.RateKobo/100, f.RateKobo%100)}
-	f.quotes[q.ID] = q
+	if _, ok := f.customers[id]; !ok {
+		return Quote{}, fmt.Errorf("billing: unknown wallet %s", id)
+	}
+	ttl := f.QuoteTTL
+	if ttl == 0 {
+		ttl = 60 * time.Second
+	}
+	q := Quote{ID: f.next("cvq"), AmountNGN: amountNGN, AmountUSDT: amountNGN * 1_000_000 / f.RateKobo,
+		Rate: fmt.Sprintf("%d.%02d", f.RateKobo/100, f.RateKobo%100), ExpiresAt: f.now().Add(ttl)}
+	f.quotes[q.ID] = &fakeQuote{Quote: q, customer: id, expired: f.ExpireNextQuote}
+	f.ExpireNextQuote = false
 	return q, nil
 }
 
@@ -127,31 +173,52 @@ func (f *Fake) Convert(_ context.Context, key, id, quoteID string) (Movement, er
 	if f.Down {
 		return Movement{}, errDown
 	}
-	if m, ok := f.seen[key]; ok {
+	if m, ok := f.seen[key]; ok { // replay: the original result, even after the quote expired
 		return m, nil
 	}
-	if f.expired[quoteID] {
-		return Movement{}, ErrQuoteExpired
-	}
 	q, ok := f.quotes[quoteID]
-	if !ok {
+	if !ok || q.customer != id {
 		return Movement{}, fmt.Errorf("billing: unknown quote %s", quoteID)
 	}
-	c, ok := f.customers[id]
-	if !ok {
-		return Movement{}, fmt.Errorf("billing: unknown customer %s", id)
+	if q.usedBy != "" {
+		return Movement{}, ErrQuoteUsed
 	}
+	if q.expired || !f.now().Before(q.ExpiresAt) {
+		return Movement{}, ErrQuoteExpired
+	}
+	if f.LiquidityShort {
+		return Movement{}, ErrLiquidity
+	}
+	c := f.customers[id]
 	if c.ngn < q.AmountNGN {
 		return Movement{}, ErrInsufficientFunds
 	}
 	c.ngn -= q.AmountNGN
 	c.usdt += q.AmountUSDT
-	m := Movement{ID: f.next("mv")}
+	q.usedBy = key
+	m := Movement{ID: f.next("cv"), CreditUUSDT: q.AmountUSDT}
 	f.seen[key] = m
+	if f.DropConvertReply {
+		f.DropConvertReply = false
+		return Movement{}, errDown
+	}
 	return m, nil
 }
 
-func (f *Fake) Charge(_ context.Context, key, id string, amt int64) (Movement, error) {
+func (f *Fake) Charge(_ context.Context, key, id string, amt int64, narration string) (Movement, error) {
+	return f.transfer(key, id, amt, narration, true)
+}
+
+func (f *Fake) Adjust(_ context.Context, key, id string, amt int64, note string) (Movement, error) {
+	if amt >= 0 { // credit: merchant -> customer
+		return f.transfer(key, id, amt, "adjustment: "+note, false)
+	}
+	return f.transfer(key, id, -amt, "adjustment: "+note, true)
+}
+
+// transfer moves amt micro-USDT between the customer and the merchant wallet.
+// toMerchant: customer -> merchant (a charge or a debit); otherwise merchant -> customer.
+func (f *Fake) transfer(key, id string, amt int64, narration string, toMerchant bool) (Movement, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.Down {
@@ -162,86 +229,47 @@ func (f *Fake) Charge(_ context.Context, key, id string, amt int64) (Movement, e
 	}
 	c, ok := f.customers[id]
 	if !ok {
-		return Movement{}, fmt.Errorf("billing: unknown customer %s", id)
+		return Movement{}, fmt.Errorf("billing: unknown wallet %s", id)
 	}
-	if c.usdt < amt {
-		return Movement{}, ErrInsufficientFunds
+	if toMerchant {
+		if c.usdt < amt {
+			return Movement{}, ErrInsufficientFunds
+		}
+		c.usdt -= amt
+		f.Merchant += amt
+	} else {
+		if f.Merchant < amt {
+			return Movement{}, ErrInsufficientFunds
+		}
+		f.Merchant -= amt
+		c.usdt += amt
 	}
-	c.usdt -= amt
-	f.Merchant += amt
-	m := Movement{ID: f.next("mv")}
-	f.moves[m.ID] = fakeMove{customerID: id, usdt: amt}
+	m := Movement{ID: f.next("tr")}
 	f.seen[key] = m
+	f.Narrations[key] = narration
 	return m, nil
 }
 
-func (f *Fake) Reverse(_ context.Context, key, movementID string) (Movement, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.Down {
-		return Movement{}, errDown
-	}
-	if m, ok := f.seen[key]; ok {
-		return m, nil
-	}
-	mv, ok := f.moves[movementID]
-	if !ok || mv.reversed {
-		return Movement{}, fmt.Errorf("billing: cannot reverse %s", movementID)
-	}
-	mv.reversed = true
-	f.moves[movementID] = mv
-	f.customers[mv.customerID].usdt += mv.usdt
-	f.Merchant -= mv.usdt
-	m := Movement{ID: f.next("mv")}
-	f.seen[key] = m
-	return m, nil
-}
-
-// Credit adds USDT directly to a customer's wallet (test helper).
-func (f *Fake) Credit(customerID string, uusdt int64) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.customers[customerID].usdt += uusdt
-}
-
-// ExpireQuote makes Convert reject the quote (test helper).
+// ExpireQuote makes Convert reject the quote as expired (test helper).
 func (f *Fake) ExpireQuote(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.expired[id] = true
+	if q, ok := f.quotes[id]; ok {
+		q.expired = true
+	}
 }
 
-func (f *Fake) Adjust(_ context.Context, key, id string, amt int64, _ string) (Movement, error) {
+// FundMerchant adds USDT to the merchant wallet so credits and refunds can be paid (test helper).
+func (f *Fake) FundMerchant(uusdt int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.Down {
-		return Movement{}, errDown
-	}
-	if m, ok := f.seen[key]; ok {
-		return m, nil
-	}
-	c, ok := f.customers[id]
-	if !ok {
-		return Movement{}, fmt.Errorf("billing: unknown customer %s", id)
-	}
-	if c.usdt+amt < 0 {
-		return Movement{}, ErrInsufficientFunds
-	}
-	c.usdt += amt
-	f.Merchant -= amt
-	m := Movement{ID: f.next("mv")}
-	f.seen[key] = m
-	return m, nil
+	f.Merchant += uusdt
 }
 
-func (f *Fake) CardTopUp(_ context.Context, key, id string, amountKobo int64) (string, error) {
+// Seen reports whether an idempotency key has been executed (test helper).
+func (f *Fake) Seen(key string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.Down {
-		return "", errDown
-	}
-	if _, ok := f.customers[id]; !ok {
-		return "", fmt.Errorf("billing: unknown customer %s", id)
-	}
-	return fmt.Sprintf("https://pay.example.test/checkout/%s?amount=%d", key, amountKobo), nil
+	_, ok := f.seen[key]
+	return ok
 }

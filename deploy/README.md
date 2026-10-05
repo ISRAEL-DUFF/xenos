@@ -41,8 +41,12 @@ XENOS_PVE_NODE=<node name>
 XENOS_PVE_TOKEN_ID=xenos@pve!control
 XENOS_PVE_TOKEN_SECRET=...
 XENOS_PVE_STORAGE=vmdata
-XENOS_ISPEND_URL=...            # real client not written yet: leave empty only for a dry run with the fake
-XENOS_ISPEND_WEBHOOK_SECRET=...
+XENOS_ISPEND_URL=https://...    # iswallet base URL (sandbox: https://synledger.name.ng/iwallet); empty = in-memory fake
+XENOS_ISPEND_API_KEY=...
+XENOS_ISPEND_MERCHANT_WALLET=...  # the one wallet Xenos owns at iswallet (POST /v1/wallets)
+XENOS_ISPEND_USDT_DECIMALS=...    # required, no default: confirm with iswallet
+XENOS_ISPEND_OWNER_PREFIX=xenos-prod   # distinct per environment
+XENOS_ISPEND_WEBHOOK_SECRET=...   # printed once by `xenosctl ispend subscribe`
 XENOS_TELEGRAM_BOT_TOKEN=...    # and/or XENOS_ALERT_EMAIL
 XENOS_TELEGRAM_CHAT_ID=...
 ```
@@ -69,6 +73,13 @@ export $(grep -v '^#' /etc/xenos/xenos.env | xargs)
 /opt/xenos/bin/xenosctl ip add 203.0.113.10-203.0.113.14 203.0.113.1   # your routed IPs and the gateway VMs use
 # sign up in the dashboard, then:
 /opt/xenos/bin/xenosctl admin grant you@example.com
+```
+
+Register the iswallet webhook once the API is reachable at its public URL, and store the secret it prints (it is shown only once):
+
+```sh
+/opt/xenos/bin/xenosctl ispend subscribe https://api.example.com/v1/webhooks/ispend
+# then add XENOS_ISPEND_WEBHOOK_SECRET=... to /etc/xenos/xenos.env and restart the API
 ```
 
 Review the placeholder plan prices in migration `00001_init.sql` **before** the first real customer: price changes after launch need an `UPDATE plans`.

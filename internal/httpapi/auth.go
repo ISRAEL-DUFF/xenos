@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/mail"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/auth"
+	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/store/db"
 )
 
@@ -154,19 +156,35 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// linkISpend creates the matching iSpend customer. A failure is logged and
-// left for a later retry rather than blocking signup; the key makes retries safe.
+// linkISpend creates the customer's iswallet wallet (and virtual account) and remembers them. A
+// failure is logged and left for a later retry rather than blocking signup; the idempotency key
+// and owner ref make retries safe.
 func (s *Server) linkISpend(ctx context.Context, u *db.User) {
-	c, err := s.ISpend.CreateCustomer(ctx, "signup:"+u.Email, u.Email, u.Phone)
+	c, err := s.ISpend.CreateCustomer(ctx, "signup:"+u.Email, "user:"+strconv.FormatInt(u.ID, 10), u.Email, u.Phone)
 	if err != nil {
-		s.Log.Error("ispend create customer", "user_id", u.ID, "err", err)
+		s.Log.Error("iswallet create customer", "user_id", u.ID, "err", err)
 		return
 	}
 	if err := s.Store.Q.SetISpendCustomer(ctx, db.SetISpendCustomerParams{ID: u.ID, IspendCustomerID: textOf(c.ID)}); err != nil {
-		s.Log.Error("store ispend customer id", "user_id", u.ID, "err", err)
+		s.Log.Error("store iswallet wallet id", "user_id", u.ID, "err", err)
 		return
 	}
 	u.IspendCustomerID = textOf(c.ID)
+	s.saveVirtualAccount(ctx, u, c)
+}
+
+// saveVirtualAccount keeps the account number locally: iswallet can issue it (idempotently) but
+// has no call to read it back.
+func (s *Server) saveVirtualAccount(ctx context.Context, u *db.User, c billing.Customer) {
+	if c.VirtualAcct == "" {
+		return
+	}
+	if err := s.Store.Q.SetVirtualAccount(ctx, db.SetVirtualAccountParams{ID: u.ID,
+		VaBank: textOf(c.VirtualBank), VaAccountNumber: textOf(c.VirtualAcct), VaAccountName: textOf(c.VirtualName)}); err != nil {
+		s.Log.Error("store virtual account", "user_id", u.ID, "err", err)
+		return
+	}
+	u.VaBank, u.VaAccountNumber, u.VaAccountName = textOf(c.VirtualBank), textOf(c.VirtualAcct), textOf(c.VirtualName)
 }
 
 func (s *Server) sendVerification(ctx context.Context, u db.User) error {

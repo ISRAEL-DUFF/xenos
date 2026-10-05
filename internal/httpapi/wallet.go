@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/israel-duff/xenos/internal/auth"
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/store/db"
 	"github.com/israel-duff/xenos/internal/wallet"
@@ -15,6 +14,7 @@ import (
 type virtualAccountJSON struct {
 	Bank          string `json:"bank"`
 	AccountNumber string `json:"account_number"`
+	AccountName   string `json:"account_name"`
 }
 
 type conversionJSON struct {
@@ -36,20 +36,21 @@ type chargeJSON struct {
 }
 
 type walletJSON struct {
-	NGNKobo        int64               `json:"ngn_kobo"`
-	USDTMicro      int64               `json:"usdt_uusdt"`
-	RateKobo       *int64              `json:"rate_kobo_per_usdt"` // null when iSpend cannot quote
-	USDTInKobo     *int64              `json:"usdt_in_ngn_kobo"`   // display only
-	HourlyUUSDT    int64               `json:"hourly_uusdt"`
-	RunwayHours    *int64              `json:"runway_hours"` // null when nothing is running
-	UnpaidUUSDT    int64               `json:"unpaid_uusdt"`
-	AutoConvert    bool                `json:"auto_convert"`
-	EmailVerified  bool                `json:"email_verified"`
-	QuotingPaused  bool                `json:"quoting_paused"`
-	GraceEndsAt    *time.Time          `json:"grace_ends_at"`
-	VirtualAccount *virtualAccountJSON `json:"virtual_account"` // only after email verification
-	Conversions    []conversionJSON    `json:"conversions"`
-	Charges        []chargeJSON        `json:"charges"`
+	NGNKobo          int64               `json:"ngn_kobo"`
+	USDTMicro        int64               `json:"usdt_uusdt"`
+	RateKobo         *int64              `json:"rate_kobo_per_usdt"` // null when iSpend cannot quote
+	USDTInKobo       *int64              `json:"usdt_in_ngn_kobo"`   // display only
+	HourlyUUSDT      int64               `json:"hourly_uusdt"`
+	RunwayHours      *int64              `json:"runway_hours"` // null when nothing is running
+	UnpaidUUSDT      int64               `json:"unpaid_uusdt"`
+	AutoConvert      bool                `json:"auto_convert"`
+	EmailVerified    bool                `json:"email_verified"`
+	QuotingPaused    bool                `json:"quoting_paused"`
+	GraceEndsAt      *time.Time          `json:"grace_ends_at"`
+	VirtualAccount   *virtualAccountJSON `json:"virtual_account"`    // only after email verification
+	DepositLimitKobo int64               `json:"deposit_limit_kobo"` // per transfer and per day on a basic account; 0 = unknown
+	Conversions      []conversionJSON    `json:"conversions"`
+	Charges          []chargeJSON        `json:"charges"`
 }
 
 func (s *Server) getWallet(w http.ResponseWriter, r *http.Request) {
@@ -81,10 +82,19 @@ func (s *Server) getWallet(w http.ResponseWriter, r *http.Request) {
 		out.GraceEndsAt = &end
 	}
 	if u.EmailVerifiedAt.Valid { // funding details are withheld until the email is verified
-		if c, err := s.ISpend.Customer(ctx, cust); err == nil && c.VirtualAcct != "" {
-			out.VirtualAccount = &virtualAccountJSON{Bank: c.VirtualBank, AccountNumber: c.VirtualAcct}
+		if !u.VaAccountNumber.Valid {
+			// Not issued at signup (iswallet was down): issue it now. The call is idempotent.
+			if c, err := s.ISpend.Customer(ctx, cust); err == nil {
+				s.saveVirtualAccount(ctx, &u, c)
+			} else {
+				s.Log.Warn("virtual account not available yet", "user_id", u.ID, "err", err)
+			}
+		}
+		if u.VaAccountNumber.Valid {
+			out.VirtualAccount = &virtualAccountJSON{Bank: u.VaBank.String, AccountNumber: u.VaAccountNumber.String, AccountName: u.VaAccountName.String}
 		}
 	}
+	out.DepositLimitKobo = s.Cfg.DepositLimitKobo
 
 	if out.HourlyUUSDT, err = s.Store.Q.UserHourlyRate(ctx, u.ID); err != nil {
 		s.fail(w, r, err)
@@ -148,6 +158,9 @@ func (s *Server) convert(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, wallet.ErrUnknownQuote) {
 			writeErr(w, http.StatusBadRequest, "unknown quote, request a new one")
 			return
+		} else if errors.Is(err, billing.ErrQuoteExpired) {
+			writeErr(w, http.StatusConflict, "this quote has expired (quotes last 60 seconds); request a new one")
+			return
 		} else if err != nil {
 			s.fail(w, r, err)
 			return
@@ -187,7 +200,7 @@ func (s *Server) convert(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "conversion is paused right now, your naira is safe; try again later")
 		return
 	}
-	resp := map[string]any{"quote_id": q.ID, "amount_ngn_kobo": q.AmountNGN, "amount_uusdt": q.AmountUSDT, "rate": q.Rate}
+	resp := map[string]any{"quote_id": q.ID, "amount_ngn_kobo": q.AmountNGN, "amount_uusdt": q.AmountUSDT, "rate": q.Rate, "expires_at": q.ExpiresAt}
 	if hourly, err := s.Store.Q.UserHourlyRate(ctx, u.ID); err == nil && hourly > 0 {
 		resp["added_runway_hours"] = q.AmountUSDT / hourly
 	}
@@ -212,14 +225,15 @@ func (s *Server) walletSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"auto_convert": *in.AutoConvert})
 }
 
-// ispendWebhook receives iSpend events. It is authenticated by signature, not session.
+// ispendWebhook receives iswallet events. It is authenticated by signature, not session.
 func (s *Server) ispendWebhook(w http.ResponseWriter, r *http.Request) {
+	// The signature covers the raw bytes, so read them before anything parses or re-serialises.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "unreadable body")
 		return
 	}
-	ev, err := billing.ParseWebhook(s.Cfg.ISpendWebhookSecret, r.Header.Get(billing.SignatureHeader), body, time.Now())
+	ev, err := billing.ParseWebhook(s.Cfg.ISpendWebhookSecret, r.Header, body, time.Now())
 	if errors.Is(err, billing.ErrBadSignature) {
 		// Alert-worthy: repeated failures mean a wrong secret or someone probing.
 		s.Log.Warn("webhook signature failure", "ip", s.clientIP(r))
@@ -232,53 +246,12 @@ func (s *Server) ispendWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	switch ev.Type {
-	case billing.EventDeposit:
-		if ev.AmountKobo <= 0 || ev.CustomerID == "" {
-			writeErr(w, http.StatusBadRequest, "deposit event needs a customer and a positive amount")
-			return
-		}
-		if err := s.Wallet.HandleDeposit(r.Context(), ev); err != nil {
-			s.fail(w, r, err) // 5xx makes iSpend retry the same event, which is safe
-			return
-		}
-	default:
-		s.Log.Info("ignoring webhook event", "type", ev.Type, "id", ev.ID)
+	if err := s.Wallet.HandleWebhook(r.Context(), ev); errors.Is(err, wallet.ErrBadEvent) {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	} else if err != nil {
+		s.fail(w, r, err) // 5xx makes iswallet redeliver (10 attempts, backed off), which is safe
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
-
-// cardTopUp starts a card payment at iSpend and returns the hosted checkout URL.
-// The deposit then arrives through the same webhook as a bank transfer.
-func (s *Server) cardTopUp(w http.ResponseWriter, r *http.Request) {
-	u := principalFrom(r.Context()).User
-	var in struct {
-		AmountKobo int64 `json:"amount_ngn_kobo"`
-	}
-	if !decode(w, r, &in) {
-		return
-	}
-	if in.AmountKobo < wallet.MinConversionKobo || in.AmountKobo > maxCardTopUpKobo {
-		writeErr(w, http.StatusBadRequest, "amount must be between ₦100 and ₦1,000,000")
-		return
-	}
-	if !u.IspendCustomerID.Valid {
-		writeErr(w, http.StatusServiceUnavailable, "wallet is not available yet, try again shortly")
-		return
-	}
-	// A fresh key per attempt: each click is a new payment the customer chooses to complete or abandon.
-	tok, _, err := auth.NewToken()
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	url, err := s.ISpend.CardTopUp(r.Context(), "card:"+tok, u.IspendCustomerID.String, in.AmountKobo)
-	if err != nil {
-		s.Log.Warn("card top-up failed", "user_id", u.ID, "err", err)
-		writeErr(w, http.StatusServiceUnavailable, "card payments are unavailable right now, try a bank transfer or try again later")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"checkout_url": url})
-}
-
-const maxCardTopUpKobo = 1_000_000 * 100

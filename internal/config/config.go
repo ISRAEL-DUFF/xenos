@@ -35,12 +35,16 @@ type Config struct {
 	Nameservers       string // space-separated
 
 	ISpendURL            string
-	ISpendTenantKey      string
+	ISpendAPIKey         string
+	ISpendOwnerPrefix    string // namespaces owner_ref at iswallet (global across tenants)
+	ISpendUSDTDecimals   int    // scale of iswallet's USDT minor unit; required with the real client
 	ISpendWebhookSecret  string
 	ISpendMerchantWallet string
 	TelegramBotToken     string // operator alerts; both Telegram values or neither
 	TelegramChatID       string
 	AlertEmail           string // operator alerts by email in addition to / instead of Telegram
+	DepositLimitKobo     int64  // shown to customers: the most a basic (TIER_1) account may receive per transfer and per day; 0 hides it
+	MeterSpreadMinutes   int    // spread hourly charges over this many minutes after the hour, to stay under iswallet's rate limit
 	FakeISpendCredit     int64  // dev only: USDT (micro) given to each new customer of the fake iSpend
 }
 
@@ -73,7 +77,8 @@ func Load() (Config, error) {
 		AlertEmail:       os.Getenv("XENOS_ALERT_EMAIL"),
 
 		ISpendURL:            os.Getenv("XENOS_ISPEND_URL"),
-		ISpendTenantKey:      os.Getenv("XENOS_ISPEND_TENANT_KEY"),
+		ISpendAPIKey:         os.Getenv("XENOS_ISPEND_API_KEY"),
+		ISpendOwnerPrefix:    get("XENOS_ISPEND_OWNER_PREFIX", "xenos"),
 		ISpendWebhookSecret:  os.Getenv("XENOS_ISPEND_WEBHOOK_SECRET"),
 		ISpendMerchantWallet: os.Getenv("XENOS_ISPEND_MERCHANT_WALLET"),
 	}
@@ -82,6 +87,17 @@ func Load() (Config, error) {
 		if c.FakeISpendCredit, err = strconv.ParseInt(v, 10, 64); err != nil {
 			return c, fmt.Errorf("XENOS_FAKE_ISPEND_CREDIT_UUSDT: %w", err)
 		}
+	}
+	if v := os.Getenv("XENOS_ISPEND_USDT_DECIMALS"); v != "" {
+		if c.ISpendUSDTDecimals, err = strconv.Atoi(v); err != nil {
+			return c, fmt.Errorf("XENOS_ISPEND_USDT_DECIMALS: %w", err)
+		}
+	}
+	if c.DepositLimitKobo, err = strconv.ParseInt(get("XENOS_DEPOSIT_LIMIT_KOBO", "5000000"), 10, 64); err != nil {
+		return c, fmt.Errorf("XENOS_DEPOSIT_LIMIT_KOBO: %w", err)
+	}
+	if c.MeterSpreadMinutes, err = strconv.Atoi(get("XENOS_METER_SPREAD_MINUTES", "40")); err != nil || c.MeterSpreadMinutes < 0 || c.MeterSpreadMinutes > 55 {
+		return c, fmt.Errorf("XENOS_METER_SPREAD_MINUTES must be 0-55")
 	}
 	if c.ProvisionTimeout, err = time.ParseDuration(get("XENOS_PROVISION_TIMEOUT", "3m")); err != nil {
 		return c, fmt.Errorf("XENOS_PROVISION_TIMEOUT: %w", err)

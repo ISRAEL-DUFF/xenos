@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -23,13 +24,15 @@ func customerOf(t *testing.T, env *testEnv, email string) string {
 	return cust
 }
 
-// webhook posts a signed event the way iSpend would.
+// webhook posts a signed iswallet delivery the way iswallet would.
 func (e *testEnv) webhook(t *testing.T, ev map[string]any, signedAt time.Time, secret string) int {
 	t.Helper()
 	body, _ := json.Marshal(ev)
 	req, _ := http.NewRequest("POST", e.ts.URL+"/v1/webhooks/ispend", bytes.NewReader(body))
 	if secret != "" {
-		req.Header.Set(billing.SignatureHeader, billing.SignWebhook(secret, signedAt, body))
+		for k, v := range billing.SignWebhook(secret, signedAt, body, "dlv-"+str(ev["txn_id"])) {
+			req.Header[k] = v
+		}
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -39,8 +42,12 @@ func (e *testEnv) webhook(t *testing.T, ev map[string]any, signedAt time.Time, s
 	return resp.StatusCode
 }
 
-func depositEvent(id, cust string, kobo int64) map[string]any {
-	return map[string]any{"id": id, "type": billing.EventDeposit, "customer_id": cust, "amount_kobo": kobo}
+func str(v any) string { s, _ := v.(string); return s }
+
+// depositEvent is a naira bank deposit: wallet.credit.posted for NGN, source pull_inflow.
+func depositEvent(txn, wallet string, kobo int64) map[string]any {
+	return map[string]any{"wallet_id": wallet, "amount": kobo, "currency": "NGN", "balance_after": kobo,
+		"txn_id": txn, "operation_id": "op-" + txn, "source_type": billing.SourceBankInflow, "source_ref": "prov-" + txn}
 }
 
 func (e *testEnv) drainWallet(t *testing.T) int {
@@ -109,7 +116,7 @@ func TestWebhookValidation(t *testing.T) {
 	if code := env.webhook(t, depositEvent("e2", cust, 0), time.Now(), testWebhookSecret); code != 400 {
 		t.Errorf("zero amount = %d, want 400", code)
 	}
-	if code := env.webhook(t, map[string]any{"id": "e3", "type": "something.else"}, time.Now(), testWebhookSecret); code != 200 {
+	if code := env.webhook(t, map[string]any{"event_type": "wallet.something.else", "wallet_id": "w", "txn_id": "e3"}, time.Now(), testWebhookSecret); code != 200 {
 		t.Errorf("unknown type = %d, want 200", code)
 	}
 	if code := env.webhook(t, depositEvent("e4", "cus_nobody", 100_000), time.Now(), testWebhookSecret); code != 200 {
@@ -353,5 +360,214 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "default-src 'self'") {
 		t.Error("missing CSP")
+	}
+}
+
+// ---- iswallet-specific behaviour ----
+
+func TestDepositDedupedByTransactionNotDeliveryKey(t *testing.T) {
+	env := newTestEnv(t)
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
+	cust := customerOf(t, env, "a@x.co")
+	env.ispend.Deposit(cust, 500_000)
+
+	// Same ledger transaction, redelivered under different per-delivery keys.
+	ev := depositEvent("tx-1", cust, 500_000)
+	body, _ := json.Marshal(ev)
+	for i := 0; i < 3; i++ {
+		req, _ := http.NewRequest("POST", env.ts.URL+"/v1/webhooks/ispend", bytes.NewReader(body))
+		for k, v := range billing.SignWebhook(testWebhookSecret, time.Now(), body, fmt.Sprintf("delivery-%d", i)) {
+			req.Header[k] = v
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("delivery %d: %v %v", i, resp, err)
+		}
+		resp.Body.Close()
+		env.drainWallet(t)
+	}
+	if n := count(t, env, `SELECT count(*) FROM conversions`); n != 1 {
+		t.Fatalf("conversions = %d, want 1", n)
+	}
+}
+
+func TestOnlyNairaBankDepositsAreConverted(t *testing.T) {
+	env := newTestEnv(t)
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
+	cust := customerOf(t, env, "a@x.co")
+
+	// A USDT credit (our own conversion or an adjustment) must never be converted again,
+	// and neither must a naira credit that is not a bank inflow.
+	usdt := depositEvent("tx-usdt", cust, 30_781)
+	usdt["currency"], usdt["source_type"] = "USDT", "convert"
+	other := depositEvent("tx-other", cust, 500_000)
+	other["source_type"] = "adjustment"
+	for _, ev := range []map[string]any{usdt, other} {
+		if code := env.webhook(t, ev, time.Now(), testWebhookSecret); code != 200 {
+			t.Fatalf("ignored events are still acknowledged, got %d", code)
+		}
+	}
+	if n := count(t, env, `SELECT count(*) FROM conversions`) + count(t, env, `SELECT count(*) FROM jobs`); n != 0 {
+		t.Fatalf("non-deposit credits created %d conversions/jobs", n)
+	}
+}
+
+func TestDepositReversalIsRecordedAndAlertedOnce(t *testing.T) {
+	env := newTestEnv(t)
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
+	cust := customerOf(t, env, "a@x.co")
+
+	rev := map[string]any{"wallet_id": cust, "amount": 500_000, "currency": "NGN", "txn_id": "tx-rev",
+		"reversed_provider_reference": "prov-tx-1", "uncovered_amount": 200_000}
+	for i := 0; i < 3; i++ {
+		if code := env.webhook(t, rev, time.Now(), testWebhookSecret); code != 200 {
+			t.Fatalf("reversal delivery = %d", code)
+		}
+	}
+	if n := count(t, env, `SELECT count(*) FROM deposit_reversals WHERE uncovered_kobo = 200000 AND original_ref = 'prov-tx-1'`); n != 1 {
+		t.Fatalf("reversal rows = %d, want exactly 1 across redeliveries", n)
+	}
+	if got := env.mailer.count("deposit was reversed"); got != 1 {
+		t.Fatalf("operators must be alerted exactly once, got %d", got)
+	}
+	// The customer keeps what they were given: nothing is clawed back.
+	if n := count(t, env, `SELECT count(*) FROM conversions`) + count(t, env, `SELECT count(*) FROM adjustments`); n != 0 {
+		t.Fatal("a reversal must not touch the customer's credit")
+	}
+}
+
+func TestLiquidityShortageHoldsTheConversionThenCompletes(t *testing.T) {
+	env := newTestEnv(t)
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
+	cust := customerOf(t, env, "a@x.co")
+	env.ispend.Deposit(cust, 500_000)
+
+	env.ispend.LiquidityShort = true
+	env.webhook(t, depositEvent("tx-l", cust, 500_000), time.Now(), testWebhookSecret)
+	env.drainWallet(t)
+	if n := count(t, env, `SELECT count(*) FROM conversions WHERE status = 'pending'`); n != 1 {
+		t.Fatal("a conversion refused for iswallet's liquidity must stay pending, not fail")
+	}
+	if bal, _ := env.ispend.Balances(context.Background(), cust); bal.NGNKobo != 500_000 {
+		t.Fatalf("the customer's naira must be untouched: %+v", bal)
+	}
+	if got := env.mailer.count("INSUFFICIENT_LIQUIDITY"); got != 1 {
+		t.Fatalf("operators should be told once, got %d", got)
+	}
+
+	env.ispend.LiquidityShort = false
+	_ = env.srv.Wallet.Sweep(context.Background(), env.srv.Jobs)
+	env.drainWallet(t)
+	if bal, _ := env.ispend.Balances(context.Background(), cust); bal.NGNKobo != 0 || bal.USDTMicro != 3_333_333 {
+		t.Fatalf("after liquidity returns: %+v", bal)
+	}
+}
+
+// The execute call can succeed at iswallet while its answer is lost. The retry must replay the SAME
+// quote under the SAME key (a new quote under that key would be rejected as a different payload).
+func TestLostConvertReplyIsReplayedNotRepeated(t *testing.T) {
+	env := newTestEnv(t)
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
+	cust := customerOf(t, env, "a@x.co")
+	env.ispend.Deposit(cust, 500_000)
+
+	env.ispend.DropConvertReply = true
+	env.webhook(t, depositEvent("tx-r", cust, 500_000), time.Now(), testWebhookSecret)
+	env.drainWallet(t)
+
+	bal, _ := env.ispend.Balances(context.Background(), cust)
+	if bal.NGNKobo != 0 || bal.USDTMicro != 3_333_333 {
+		t.Fatalf("converted exactly once despite the lost reply: %+v", bal)
+	}
+	if n := count(t, env, `SELECT count(*) FROM conversions WHERE status='complete' AND convert_attempt = 1`); n != 1 {
+		t.Fatal("the conversion must complete on the original key, not on a new one")
+	}
+}
+
+// An automatic conversion whose quote expired without executing takes a fresh quote under a NEW key.
+func TestExpiredAutoQuoteIsReplacedUnderANewKey(t *testing.T) {
+	env := newTestEnv(t)
+	verifyEmail(t, env, signupClient(t, env.ts.URL, "a@x.co"))
+	cust := customerOf(t, env, "a@x.co")
+	env.ispend.Deposit(cust, 500_000)
+
+	env.ispend.ExpireNextQuote = true
+	env.webhook(t, depositEvent("tx-e", cust, 500_000), time.Now(), testWebhookSecret)
+	env.drainWallet(t)
+
+	if bal, _ := env.ispend.Balances(context.Background(), cust); bal.NGNKobo != 0 || bal.USDTMicro != 3_333_333 {
+		t.Fatalf("balances: %+v", bal)
+	}
+	var attempt int
+	_ = env.st.Pool.QueryRow(context.Background(), `SELECT convert_attempt FROM conversions`).Scan(&attempt)
+	if attempt != 2 || !env.ispend.Seen("conversion:1:2") || env.ispend.Seen("conversion:1") {
+		t.Fatalf("attempt=%d: the expired quote must never have executed, and the retry must use a new key", attempt)
+	}
+}
+
+func TestManualQuoteExpiresAfterSixtySeconds(t *testing.T) {
+	env := newTestEnv(t)
+	now := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC)
+	env.ispend.Now = func() time.Time { return now }
+	env.srv.Wallet.Now = func() time.Time { return now }
+	c := signupClient(t, env.ts.URL, "a@x.co")
+	verifyEmail(t, env, c)
+	cust := customerOf(t, env, "a@x.co")
+	env.ispend.Deposit(cust, 500_000)
+	env.ispend.SignupCredit = 0
+
+	code, q := c.do("POST", "/v1/wallet/convert", map[string]any{"amount_ngn_kobo": 300_000}, c.csrfHdr())
+	if code != 200 || q["expires_at"] == nil {
+		t.Fatalf("quote = %d %v", code, q)
+	}
+	exp, _ := time.Parse(time.RFC3339, q["expires_at"].(string))
+	if !exp.Equal(now.Add(60 * time.Second)) {
+		t.Fatalf("quote expiry = %v", exp)
+	}
+
+	now = now.Add(61 * time.Second)
+	code, out := c.do("POST", "/v1/wallet/convert", map[string]any{"quote_id": q["quote_id"]}, c.csrfHdr())
+	if code != 409 || !strings.Contains(out["error"].(string), "expired") {
+		t.Fatalf("expired quote = %d %v", code, out)
+	}
+	if n := count(t, env, `SELECT count(*) FROM conversions`); n != 0 {
+		t.Fatal("an expired quote must not even create a conversion")
+	}
+	bal, _ := env.ispend.Balances(context.Background(), cust)
+	if bal.NGNKobo != 500_000 || bal.USDTMicro != 0 {
+		t.Fatalf("nothing should have converted: %+v", bal)
+	}
+}
+
+func TestVirtualAccountIsStoredAndLazilyIssued(t *testing.T) {
+	env := newTestEnv(t)
+	c := signupClient(t, env.ts.URL, "a@x.co")
+	verifyEmail(t, env, c)
+	if n := count(t, env, `SELECT count(*) FROM users WHERE va_account_number IS NOT NULL AND va_bank = 'FakeBank'`); n != 1 {
+		t.Fatal("the account issued at signup must be saved locally")
+	}
+	_, w := c.do("GET", "/v1/wallet", nil, nil)
+	va := w["virtual_account"].(map[string]any)
+	if va["bank"] != "FakeBank" || va["account_name"] != "XENOS CUSTOMER" || w["deposit_limit_kobo"] != float64(5_000_000) {
+		t.Fatalf("wallet = %v", w)
+	}
+
+	// Signup could not issue the account (iswallet was down): the wallet page issues it, once.
+	env.st.Pool.Exec(context.Background(), `UPDATE users SET va_bank=NULL, va_account_number=NULL, va_account_name=NULL`)
+	_, w = c.do("GET", "/v1/wallet", nil, nil)
+	if w["virtual_account"] == nil {
+		t.Fatal("a missing virtual account must be issued on demand")
+	}
+	if n := count(t, env, `SELECT count(*) FROM users WHERE va_account_number IS NOT NULL`); n != 1 {
+		t.Fatal("and saved")
+	}
+}
+
+func TestCardTopUpIsGone(t *testing.T) {
+	env := newTestEnv(t)
+	c := signupClient(t, env.ts.URL, "a@x.co")
+	verifyEmail(t, env, c)
+	if code, _ := c.do("POST", "/v1/wallet/topup/card", map[string]any{"amount_ngn_kobo": 200_000}, c.csrfHdr()); code != 404 {
+		t.Fatalf("iswallet has no card funding; the endpoint must not exist, got %d", code)
 	}
 }

@@ -49,15 +49,28 @@ type Conversion struct {
 	Status           string         `json:"status"`
 	CreatedAt        time.Time      `json:"created_at"`
 	LastError        pgtype.Text    `json:"last_error"`
+	ConvertAttempt   int32          `json:"convert_attempt"`
 }
 
 type ConversionQuote struct {
-	ID            string    `json:"id"`
-	UserID        int64     `json:"user_id"`
-	AmountNgnKobo int64     `json:"amount_ngn_kobo"`
-	AmountUusdt   int64     `json:"amount_uusdt"`
-	Rate          string    `json:"rate"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string             `json:"id"`
+	UserID        int64              `json:"user_id"`
+	AmountNgnKobo int64              `json:"amount_ngn_kobo"`
+	AmountUusdt   int64              `json:"amount_uusdt"`
+	Rate          string             `json:"rate"`
+	CreatedAt     time.Time          `json:"created_at"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+}
+
+type DepositReversal struct {
+	ID            int64       `json:"id"`
+	EventKey      string      `json:"event_key"`
+	UserID        pgtype.Int8 `json:"user_id"`
+	WalletID      string      `json:"wallet_id"`
+	AmountKobo    int64       `json:"amount_kobo"`
+	UncoveredKobo int64       `json:"uncovered_kobo"`
+	OriginalRef   string      `json:"original_ref"`
+	CreatedAt     time.Time   `json:"created_at"`
 }
 
 type EmailVerification struct {
@@ -163,6 +176,9 @@ type User struct {
 	GraceStartedAt       pgtype.Timestamptz `json:"grace_started_at"`
 	LowBalanceNotifiedAt pgtype.Timestamptz `json:"low_balance_notified_at"`
 	AupAcceptedAt        pgtype.Timestamptz `json:"aup_accepted_at"`
+	VaBank               pgtype.Text        `json:"va_bank"`
+	VaAccountNumber      pgtype.Text        `json:"va_account_number"`
+	VaAccountName        pgtype.Text        `json:"va_account_name"`
 }
 
 type Vm struct {

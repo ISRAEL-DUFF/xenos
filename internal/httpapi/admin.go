@@ -263,7 +263,12 @@ func (s *Server) adminAdjust(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusBadGateway
 		msg := "the wallet service rejected or could not complete the adjustment"
 		if errors.Is(err, billing.ErrInsufficientFunds) {
-			status, msg = http.StatusConflict, "the customer's balance is too low for this debit"
+			status = http.StatusConflict
+			if in.AmountUUSDT > 0 {
+				msg = "the Xenos merchant wallet does not hold enough USDT to pay this credit"
+			} else {
+				msg = "the customer's balance is too low for this debit"
+			}
 		}
 		writeErr(w, status, msg)
 		return

@@ -8,6 +8,7 @@ It needs a stack with fake external services and an embedded worker:
 make web
 export XENOS_DATABASE_URL=postgres://…  XENOS_HTTP_ADDR=:8080 XENOS_COOKIE_SECURE=false
 export XENOS_RUN_WORKER=true XENOS_FAKE_ISPEND_CREDIT_UUSDT=5000000   # iSpend and Proxmox are the in-memory fakes
+export XENOS_METER_SPREAD_MINUTES=0   # charge each hour straight away so the test need not wait up to 40 minutes
 go run ./cmd/api > /tmp/xenos-api.log 2>&1 &
 go run ./cmd/xenosctl ip add 203.0.113.10-203.0.113.20 203.0.113.1
 

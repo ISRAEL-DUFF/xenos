@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type Quote } from "./api";
@@ -39,8 +39,6 @@ export function WalletPage() {
       </div>
 
       <FundingCard wallet={wallet} />
-
-      <CardTopUp verified={wallet.email_verified} />
 
       <Card className="space-y-3">
         <div className="flex items-start justify-between gap-3">
@@ -116,12 +114,18 @@ function FundingCard({ wallet }: { wallet: NonNullable<ReturnType<typeof useWall
       <h2 className="font-medium text-slate-900 dark:text-slate-50">Bank transfer</h2>
       {wallet.virtual_account ? (
         <>
-          <p className="text-sm text-slate-500 dark:text-slate-400">Send naira to your personal account below from any bank app. It arrives within minutes and is converted automatically if auto-convert is on.</p>
+          <p className="text-sm text-slate-500 dark:text-slate-400">Send naira to your personal account below from any bank app. It arrives within minutes and is converted automatically if auto-convert is on. This is the only way to fund your wallet.</p>
           <dl className="grid gap-3 text-sm sm:grid-cols-2">
             <div>
               <dt className="text-slate-500 dark:text-slate-400">Bank</dt>
               <dd className="font-medium text-slate-900 dark:text-slate-50">{wallet.virtual_account.bank}</dd>
             </div>
+            {wallet.virtual_account.account_name && (
+              <div>
+                <dt className="text-slate-500 dark:text-slate-400">Account name</dt>
+                <dd className="font-medium text-slate-900 dark:text-slate-50">{wallet.virtual_account.account_name}</dd>
+              </div>
+            )}
             <div>
               <dt className="text-slate-500 dark:text-slate-400">Account number</dt>
               <dd className="flex items-center gap-2 font-mono text-base font-medium text-slate-900 dark:text-slate-50">
@@ -130,40 +134,17 @@ function FundingCard({ wallet }: { wallet: NonNullable<ReturnType<typeof useWall
               </dd>
             </div>
           </dl>
+          {wallet.deposit_limit_kobo > 0 && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Limits: a basic account can receive up to {formatNaira(wallet.deposit_limit_kobo)} per transfer and per day. Larger deposits are rejected by the bank, so split them or contact support.
+            </p>
+          )}
         </>
       ) : (
         <p className="text-sm text-slate-600 dark:text-slate-300">
           {wallet.email_verified ? "Your account number is being set up. Check back shortly." : "Verify your email to see your account number."}
         </p>
       )}
-    </Card>
-  );
-}
-
-function CardTopUp({ verified }: { verified: boolean }) {
-  const [amount, setAmount] = useState("");
-  const kobo = parseNaira(amount);
-  const start = useMutation({
-    mutationFn: () => api<{ checkout_url: string }>("/wallet/topup/card", { json: { amount_ngn_kobo: kobo } }),
-    onSuccess: (r) => {
-      window.location.href = r.checkout_url;
-    },
-  });
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    if (kobo !== null) start.mutate();
-  };
-  return (
-    <Card>
-      <form onSubmit={submit} className="space-y-3">
-        <h2 className="font-medium text-slate-900 dark:text-slate-50">Pay by card</h2>
-        <Field label="Amount (₦)" hint="Minimum ₦100. You will complete the payment on a secure page.">
-          <Input inputMode="decimal" placeholder="5,000" value={amount} onChange={(e) => setAmount(e.target.value)} disabled={!verified} />
-        </Field>
-        {!verified && <p className="text-sm text-amber-700 dark:text-amber-300">Verify your email to top up.</p>}
-        <ErrorText error={start.error} />
-        <Button disabled={!verified || kobo === null || kobo < 10_000 || start.isPending}>{start.isPending ? "Redirecting…" : "Continue to payment"}</Button>
-      </form>
     </Card>
   );
 }
@@ -191,6 +172,18 @@ function AutoConvertToggle({ value, onChanged }: { value: boolean; onChanged: ()
   );
 }
 
+/** Seconds left until an ISO timestamp, ticking twice a second; 0 once it has passed. */
+function useSecondsLeft(iso: string | undefined): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!iso) return;
+    setNow(Date.now());
+    const t = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(t);
+  }, [iso]);
+  return iso ? Math.max(0, Math.ceil((new Date(iso).getTime() - now) / 1000)) : 0;
+}
+
 function ConvertCard({
   ngnKobo,
   verified,
@@ -208,6 +201,14 @@ function ConvertCard({
   const [quote, setQuote] = useState<Quote | null>(null);
   const [message, setMessage] = useState("");
   const kobo = parseNaira(amount);
+  const secondsLeft = useSecondsLeft(quote?.expires_at);
+  // The rate is only valid for 60 seconds; once it lapses the customer must ask again.
+  useEffect(() => {
+    if (quote && secondsLeft === 0) {
+      setQuote(null);
+      setMessage("That quote expired (rates are held for 60 seconds). Get a new one to continue.");
+    }
+  }, [quote, secondsLeft]);
 
   const getQuote = useMutation({
     mutationFn: () => api<Quote>("/wallet/convert", { json: { amount_ngn_kobo: kobo } }),
@@ -234,7 +235,7 @@ function ConvertCard({
   return (
     <Card className="space-y-3">
       <h2 className="font-medium text-slate-900 dark:text-slate-50">Convert naira to compute credit</h2>
-      {message && <Banner tone="ok">{message}</Banner>}
+      {message && <Banner tone={message.startsWith("That quote expired") ? "warn" : "ok"}>{message}</Banner>}
       {!quote ? (
         <form
           className="space-y-3"
@@ -260,11 +261,13 @@ function ConvertCard({
               {days !== null && smallestPlan && ` · about ${days} days of ${smallestPlan.slug}`}
               {quote.added_runway_hours ? ` · adds ${formatRunway(quote.added_runway_hours)} of runway` : ""}
             </p>
-            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">The rate is fixed for this conversion. Later rate changes will not affect credit you already hold.</p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400" role="timer">
+              This rate is held for {secondsLeft}s. Later rate changes will not affect credit you already hold.
+            </p>
           </div>
           <ErrorText error={confirm.error} />
           <div className="flex gap-2">
-            <Button onClick={() => confirm.mutate()} disabled={confirm.isPending}>{confirm.isPending ? "Converting…" : "Confirm conversion"}</Button>
+            <Button onClick={() => confirm.mutate()} disabled={confirm.isPending || secondsLeft === 0}>{confirm.isPending ? "Converting…" : "Confirm conversion"}</Button>
             <Button variant="secondary" onClick={() => setQuote(null)} disabled={confirm.isPending}>Cancel</Button>
           </div>
         </div>

@@ -9,6 +9,7 @@
 //	xenosctl flag clear <vm-id>                        dismiss a flag after review
 //	xenosctl port25 allow|block <vm-id>                exempt a reviewed VM from the outbound SMTP block
 //	xenosctl firewall nft [bridge]                     print the nftables ruleset to load on the Proxmox host
+//	xenosctl ispend subscribe <https-url>              register our webhook endpoint with iswallet (prints the signing secret ONCE)
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/israel-duff/xenos/internal/accounts"
+	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/firewall"
 	"github.com/israel-duff/xenos/internal/jobs"
@@ -83,6 +85,8 @@ func run(args []string) error {
 			}
 			return err
 		})
+	case len(args) == 3 && args[0] == "ispend" && args[1] == "subscribe":
+		return subscribeWebhook(ctx, cfg, args[2])
 	case len(args) >= 2 && args[0] == "firewall" && args[1] == "nft":
 		bridge := cfg.PVEBridge
 		if len(args) > 2 {
@@ -232,5 +236,33 @@ func setLimit(ctx context.Context, st *store.Store, email string, n int) error {
 		return fmt.Errorf("no user with email %s", email)
 	}
 	fmt.Println("ok")
+	return nil
+}
+
+// subscribeWebhook registers the endpoint URL with iswallet. The signing secret is shown once by
+// iswallet, so print it immediately; it belongs in XENOS_ISPEND_WEBHOOK_SECRET.
+func subscribeWebhook(ctx context.Context, cfg config.Config, endpoint string) error {
+	if !strings.HasPrefix(endpoint, "https://") {
+		return fmt.Errorf("the webhook URL must be https://…")
+	}
+	if cfg.ISpendURL == "" {
+		return fmt.Errorf("XENOS_ISPEND_URL is not set (this command talks to the real iswallet API)")
+	}
+	c, err := billing.NewISWallet(billing.ISWalletConfig{BaseURL: cfg.ISpendURL, APIKey: cfg.ISpendAPIKey,
+		MerchantWallet: cfg.ISpendMerchantWallet, OwnerPrefix: cfg.ISpendOwnerPrefix, USDTDecimals: cfg.ISpendUSDTDecimals})
+	if err != nil {
+		return err
+	}
+	// One subscription per environment: the key is stable, so re-running returns the same subscription.
+	id, secret, err := c.SubscribeWebhook(ctx, "xenos:sub:primary", endpoint, "Xenos inbox")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("subscription: %s\n", id)
+	if secret == "" {
+		fmt.Println("no signing secret was returned: it is shown only when the subscription is first created")
+		return nil
+	}
+	fmt.Printf("signing secret (shown once, store it now):\n  XENOS_ISPEND_WEBHOOK_SECRET=%s\n", secret)
 	return nil
 }

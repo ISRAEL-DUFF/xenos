@@ -105,7 +105,8 @@ export interface Wallet {
   email_verified: boolean;
   quoting_paused: boolean;
   grace_ends_at: string | null;
-  virtual_account: { bank: string; account_number: string } | null;
+  virtual_account: { bank: string; account_number: string; account_name: string } | null;
+  deposit_limit_kobo: number;
   conversions: Conversion[];
   charges: Charge[];
 }
@@ -133,6 +134,7 @@ export interface Quote {
   amount_ngn_kobo: number;
   amount_uusdt: number;
   rate: string;
+  expires_at: string; // quotes live 60 seconds
   added_runway_hours?: number;
 }
 

@@ -7,11 +7,16 @@ Run with the iSpend sandbox and test keys first. Switch to live only when every 
 ## Accounts and wallet
 
 - [ ] **auto** New user signs up (AUP required), verifies email, adds an SSH key: `TestAuthFlow`, `TestSignupRequiresAUP`, `TestSSHKeys`
+- [ ] **auto** iswallet deposit webhook is deduped on the transaction id, USDT credits are never re-converted, reversals are recorded and alerted once: `TestDepositDedupedByTransactionNotDeliveryKey`, `TestOnlyNairaBankDepositsAreConverted`, `TestDepositReversalIsRecordedAndAlertedOnce`
+- [ ] **auto** A conversion whose reply was lost replays the same quote and key; an expired automatic quote is replaced under a new key; a customer's expired quote is refused: `TestLostConvertReplyIsReplayedNotRepeated`, `TestExpiredAutoQuoteIsReplacedUnderANewKey`, `TestManualQuoteExpiresAfterSixtySeconds`
+- [ ] **auto** `INSUFFICIENT_LIQUIDITY` holds the conversion without touching the customer's naira, then completes: `TestLiquidityShortageHoldsTheConversionThenCompletes`
+- [ ] **auto** The real client matches the documented API (paths, headers, idempotency, error codes, never rounds a charge, paces itself under 100/min): `internal/billing/iswallet_test.go`
 - [ ] **auto** A ₦5,000 deposit converts once into USDT at the active rate; replaying the event changes nothing: `TestDepositAutoConvertsOnceEvenIfReplayed`
 - [ ] **auto** Deposits made before email verification wait and convert on verification: `TestUnverifiedDepositIsHeldThenConvertedOnVerify`
 - [ ] **auto** Changing the FX rate leaves existing USDT balances unchanged: `TestDepositAutoConvertsOnceEvenIfReplayed`
 - [ ] **auto** Rejected / forged webhooks are refused and counted: `TestWebhookValidation`, `TestWebhookFailuresAreRecorded`
-- [ ] **manual** Against the real iSpend sandbox: a real virtual-account deposit and a card top-up arrive and convert (the real client is not written yet)
+- [ ] **manual** Against the real iswallet sandbox (needs a key and answers to Q1/Q2 in `docs/iswallet-conformance.md`): `POST /v1/sandbox/simulate/deposit` arrives, verifies and converts once; a redelivered event changes nothing; a 61-second-old quote is refused; a charge replayed after an hour has one ledger effect; `simulate/reversal` raises the alert
+- [ ] **manual** The USDT decimal scale is confirmed and `XENOS_ISPEND_USDT_DECIMALS` is set; one real charge of the nano hourly price moves exactly 0.006 USDT
 
 ## VMs
 
@@ -28,6 +33,7 @@ Run with the iSpend sandbox and test keys first. Switch to live only when every 
 - [ ] **auto** An iSpend outage produces catch-up charges, not missed hours: `TestOutageProducesCatchUpNotMissedHours`, `TestDeleteDuringOutageStillCharges`
 - [ ] **auto** Zero balance suspends VMs; top-up within grace restores them; expiry deletes them: `TestOutOfFundsSuspendsThenRestoresOnTopUp`, `TestGraceExpiryDeletesVMs`
 - [ ] **auto** Low-balance warning email, once a day: `TestLowBalanceWarningOncePerDay`
+- [ ] **auto** Hourly charges are spread across the hour and carry a `vm:<id> hour:<…>` narration: `TestChargesAreSpreadAcrossTheHour`, `TestChargeNarrationIdentifiesTheVMAndHour`
 - [ ] **auto** Only one meter runs at a time: `TestOnlyOneMeterRuns`
 
 ## Safety
@@ -46,6 +52,7 @@ Run with the iSpend sandbox and test keys first. Switch to live only when every 
 - [ ] **host** One VM backup restored with `qmrestore` and booted (see `deploy/proxmox/README.md`)
 - [ ] **auto** Alerts fire for a failed job, a full pool and a flagged VM: `TestFailedJobsAlertedOnce`, `TestDiskPoolAndRAMThresholds`, `TestCPUWatchFlagsSustainedMining`
 - [ ] **manual** The real Telegram/email channel receives a test alert (see `deploy/README.md` §8)
+- [ ] **manual** The webhook is registered (`xenosctl ispend subscribe`) for the live environment, its signing secret is in the server's env, and one real deposit is observed end to end
 - [ ] **manual** The uptime monitor alerts when `/readyz` goes red (stop the worker for 4 minutes)
 
 ## Dashboard
