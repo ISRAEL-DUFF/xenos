@@ -140,6 +140,16 @@ func TestSandboxEndToEnd(t *testing.T) {
 	}
 	t.Logf("✓ quote %s: ₦%.2f -> %.6f USDT at ₦%s, expires %s", q.ID, float64(q.AmountNGN)/100, float64(q.AmountUSDT)/1e6, q.Rate, q.ExpiresAt.Format(time.RFC3339))
 	mv, err := c.Convert(ctx, "sbx-conv:"+stamp, cust.ID, q.ID)
+	if errors.Is(err, ErrLiquidity) {
+		// iswallet's own USDT inventory is empty in the sandbox. This is the documented
+		// INSUFFICIENT_LIQUIDITY path (a failure on their side, not the customer's).
+		t.Logf("✓ INSUFFICIENT_LIQUIDITY (the sandbox treasury holds no USDT): %v", err)
+		t.Logf("→ conversion cannot complete, so charge and adjustment checks that need USDT are skipped")
+		sandboxExpiry(t, c, ctx, stamp, cust.ID, credited)
+		sandboxReversal(t, c, ctx, stamp, dep)
+		overcharge(t, c, ctx, stamp, cust.ID)
+		return
+	}
 	if err != nil {
 		report(t, "convert", err)
 		return
@@ -221,5 +231,44 @@ func overcharge(t *testing.T, c *ISWallet, ctx context.Context, stamp, wallet st
 		t.Logf("✓ a customer who never converted gets CURRENCY_MISMATCH, not INSUFFICIENT_FUNDS (%v)", err)
 	default:
 		t.Errorf("overcharge: got %v", err)
+	}
+}
+
+// sandboxExpiry takes a quote, lets it lapse (60 seconds), and executes it: QUOTE_EXPIRED proves it
+// never executed, which is what licenses an automatic conversion to re-quote under a new key.
+func sandboxExpiry(t *testing.T, c *ISWallet, ctx context.Context, stamp, wallet string, kobo int64) {
+	t.Helper()
+	q, err := c.Quote(ctx, wallet, kobo)
+	if err != nil {
+		report(t, "quote for the expiry check", err)
+		return
+	}
+	t.Logf("… waiting 61s for quote %s to expire", q.ID)
+	time.Sleep(61 * time.Second)
+	_, err = c.Convert(ctx, "sbx-exp:"+stamp, wallet, q.ID)
+	switch {
+	case errors.Is(err, ErrQuoteExpired):
+		t.Logf("✓ QUOTE_EXPIRED after 61s")
+	case errors.Is(err, ErrLiquidity):
+		t.Logf("• the expired quote was answered INSUFFICIENT_LIQUIDITY: liquidity is checked before expiry, so QUOTE_EXPIRED could not be observed (%v)", err)
+	default:
+		t.Errorf("an expired quote: got %v, want QUOTE_EXPIRED", err)
+	}
+}
+
+// sandboxReversal tries the (undocumented) reversal simulator with the deposit's provider reference.
+func sandboxReversal(t *testing.T, c *ISWallet, ctx context.Context, stamp string, dep map[string]any) {
+	t.Helper()
+	var out map[string]any
+	err := c.do(ctx, "POST", "/v1/sandbox/simulate/reversal", "sbx-rev:"+stamp, map[string]any{
+		"account_number": dep["account_number"], "provider_reference": dep["provider_reference"]}, &out)
+	if err != nil {
+		t.Logf("• reversal simulator: %v (its request shape is undocumented)", err)
+		return
+	}
+	t.Logf("✓ simulated reversal: %v", out)
+	if wallet, _ := dep["wallet_id"].(string); wallet != "" {
+		b, err := c.Balances(ctx, wallet)
+		t.Logf("  balances after the reversal: %+v %v", b, err)
 	}
 }

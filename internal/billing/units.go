@@ -71,3 +71,15 @@ func NairaPerUSDT(usdtPerNGN string) string {
 	}
 	return new(big.Rat).Inv(r).FloatString(2)
 }
+
+// NairaPerUSDTFromAmounts is the rate a quote actually applied, as "NGN per USDT" to two decimals,
+// derived from the amounts. The quote's own fx_rate is rounded to eight decimals, which on a USDT
+// rate near 0.0007 shifts the displayed naira price by about 0.06%, so it is not used for display.
+func NairaPerUSDTFromAmounts(debitKobo, creditMicro int64) string {
+	if debitKobo <= 0 || creditMicro <= 0 {
+		return ""
+	}
+	// kobo per micro-USDT * 1e6 micro per USDT / 100 kobo per naira
+	r := big.NewRat(debitKobo*1_000_000, creditMicro*100)
+	return r.FloatString(2)
+}

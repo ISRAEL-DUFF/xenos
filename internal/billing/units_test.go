@@ -45,3 +45,14 @@ func TestKoboPerUSDT(t *testing.T) {
 		}
 	}
 }
+
+func TestNairaPerUSDTFromAmounts(t *testing.T) {
+	// The live sandbox: ₦49,300.00 became 35.861363 USDT, i.e. ₦1,374.74 per USDT. The quote's
+	// rounded fx_rate would have displayed ₦1,375.52.
+	if got := NairaPerUSDTFromAmounts(4_930_000, 35_861_363); got != "1374.74" {
+		t.Fatalf("rate = %s", got)
+	}
+	if NairaPerUSDTFromAmounts(0, 1) != "" || NairaPerUSDTFromAmounts(1, 0) != "" {
+		t.Fatal("no rate without both amounts")
+	}
+}

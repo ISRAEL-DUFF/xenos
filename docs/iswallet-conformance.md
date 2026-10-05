@@ -30,13 +30,29 @@ All six blocking questions were answered. What we did with each:
 
 ---
 
+## 1c. Second live run, after FX was enabled (5 October 2026)
+
+FX works: `GET /v1/rates` gives ₦1,374.74 per USDT and quotes succeed. Re-run results:
+
+| # | Result | Request ids |
+|---|---|---|
+| F1 | **Rates and quotes now work.** F1 is resolved. | |
+| F7 **blocking** | **`POST /v1/convert` returns `422 INSUFFICIENT_LIQUIDITY: insufficient treasury liquidity for target currency`.** This is the documented path ("tell us if you see it"): the sandbox treasury holds no USDT. Convert, charge and adjustments all need USDT, so they remain untested. | `req_f1aff63d5dce59861feb5479`, `req_36bb9657d762605f2a55a247` |
+| F8 | `QUOTE_EXPIRED` confirmed: a quote executed 61 s after issue is refused. (Liquidity is evidently checked after expiry, or the order depends on the quote.) | |
+| F9 | **Reversal simulator works, and reverses the GROSS amount.** After a 5,000,000-kobo deposit that credited 4,930,000, `simulate/reversal` left the wallet at **-70,000 kobo**: the 70,000 deposit fee was also clawed back. Is that how live reversals behave (the customer ends up owing the fee)? We show a negative naira balance as-is. | wallet `381d4669-0ed5-4419-8d65-8c663d911b96` |
+| F10 | The quote's `fx_rate` is rounded to 8 decimals, which shifts the naira price we would display by about 0.06% (₦1,375.52 from `fx_rate`, ₦1,374.74 from the amounts and from `/v1/rates`). We now derive the displayed rate from the quote's amounts. No action needed; FYI. | |
+
+**To finish testing we need the sandbox treasury funded with USDT** (or a sandbox endpoint to fund it).
+
+---
+
 ## 1b. Findings from the first live sandbox run (5 October 2026)
 
 We ran `go test -tags sandbox ./internal/billing` against `https://synledger.name.ng/iwallet` with our client key. What worked: wallet creation and its idempotent replay, issuing the virtual account, `IDEMPOTENCY_KEY_REUSED` on a changed payload, `GET …/balance` (scales asserted), `GET /v1/platform/account`, and `POST /v1/sandbox/simulate/deposit`. Where the sandbox differs from the guide, or blocks us, with request ids for your logs:
 
 | # | What we saw | Request ids | What we need |
 |---|---|---|---|
-| F1 **blocking** | **FX is unavailable.** `GET /v1/rates?from=NGN&to=USDT` returns **`500 INTERNAL "fx quote NGN/USDT: not found"`** (the guide documents `503 FX_UNAVAILABLE` for a paused rate), and `POST /v1/convert/quotes` returns `503 FX_UNAVAILABLE "fx rate unavailable, try again"`. Retried over several minutes. | `req_c5be55f4b8e9af159c7a781d`, `req_f14e2934c0c29f14c7a94f61`, `req_bf02c952d4f2101b24106223` (rates); `req_9a092566eb717f99035c87e3`, `req_2cedb0fa8ac40f9ac9611016` (quote) | Seed or enable an NGN/USDT rate in sandbox. Until then we cannot test convert, charge or adjustments, all of which need a USDT balance. |
+| F1 *(resolved)* | **FX was unavailable.** `GET /v1/rates?from=NGN&to=USDT` returns **`500 INTERNAL "fx quote NGN/USDT: not found"`** (the guide documents `503 FX_UNAVAILABLE` for a paused rate), and `POST /v1/convert/quotes` returns `503 FX_UNAVAILABLE "fx rate unavailable, try again"`. Retried over several minutes. | `req_c5be55f4b8e9af159c7a781d`, `req_f14e2934c0c29f14c7a94f61`, `req_bf02c952d4f2101b24106223` (rates); `req_9a092566eb717f99035c87e3`, `req_2cedb0fa8ac40f9ac9611016` (quote) | Seed or enable an NGN/USDT rate in sandbox. Until then we cannot test convert, charge or adjustments, all of which need a USDT balance. |
 | F2 | **`POST /v1/wallets` requires `client_id`** in the body, equal to the API key's (`403 SCOPE_INSUFFICIENT: client_id must match your API key's client_id`). The guide's example omits it. | `req_639d6e209afd0ab76e3b756b` | Add it to the guide. We now send the value from `GET /v1/platform/account` (`"xenos"`). |
 | F3 | **`WALLET_ALREADY_EXISTS` carries an empty wallet** in `error.original_response` (every field blank), not the existing wallet as the guide says. We therefore cannot recover the wallet id from that 409. | `req_d9ddb5e39713c1fbba642d5a`, `req_4517175468fde2865e378faf` | Populate `original_response`, or give us a lookup by `owner_ref` (e.g. `GET /v1/wallets?owner_ref=`). Our stable per-user signup key avoids this path in normal operation, but it is our only recovery if a signup is interrupted after iswallet created the wallet under a *different* key. |
 | F4 | **A deposit fee is deducted.** `simulate/deposit` of 5,000,000 kobo (₦50,000) left **4,930,000 spendable**: a fee of 70,000 kobo, **1.40%**. | wallet `98aef08b-b727-4445-b931-d9dafe10b959` and others | Is this the mock provider's fee only, or what live bank transfers will cost? Customers will see it before our own margin and your 1.5% spread. We reconcile on the credited amount, as you advise. |

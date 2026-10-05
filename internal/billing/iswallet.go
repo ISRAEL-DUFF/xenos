@@ -424,8 +424,12 @@ func (c *ISWallet) Quote(ctx context.Context, customerID string, amountNGN int64
 	if out.QuoteID == "" {
 		return Quote{}, errors.New("iswallet: quote response has no quote_id")
 	}
-	return Quote{ID: out.QuoteID, AmountNGN: out.DebitAmount, AmountUSDT: MinorToMicro(out.CreditAmount, c.USDTDecimals),
-		Rate: NairaPerUSDT(out.FXRate), ExpiresAt: out.ExpiresAt}, nil
+	credit := MinorToMicro(out.CreditAmount, c.USDTDecimals)
+	rate := NairaPerUSDTFromAmounts(out.DebitAmount, credit)
+	if rate == "" {
+		rate = NairaPerUSDT(out.FXRate)
+	}
+	return Quote{ID: out.QuoteID, AmountNGN: out.DebitAmount, AmountUSDT: credit, Rate: rate, ExpiresAt: out.ExpiresAt}, nil
 }
 
 // Convert executes a quote. The idempotency key goes in the header AND the body (iswallet
