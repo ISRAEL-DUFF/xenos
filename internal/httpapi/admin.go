@@ -262,6 +262,9 @@ func (s *Server) adminAdjust(w http.ResponseWriter, r *http.Request) {
 		s.audit(r, "balance.adjust.failed", target.Email, map[string]any{"adjustment": adjID, "amount_uusdt": in.AmountUUSDT, "error": err.Error()})
 		status := http.StatusBadGateway
 		msg := "the wallet service rejected or could not complete the adjustment"
+		if errors.Is(err, billing.ErrCurrencyMismatch) {
+			status, msg = http.StatusConflict, "the wallets involved do not both hold USDT yet (a customer who has never converted, or an operating wallet that has not received any USDT)"
+		}
 		if errors.Is(err, billing.ErrInsufficientFunds) {
 			status = http.StatusConflict
 			if in.AmountUUSDT > 0 {

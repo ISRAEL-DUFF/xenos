@@ -69,6 +69,9 @@ func (s *stubServer) last() stubReq {
 func defaultReply(r stubReq) (int, string) {
 	switch {
 	case r.Path == "/v1/wallets":
+		if r.Body["client_id"] != "xenos" { // as the live sandbox does
+			return 403, `{"error":{"code":"SCOPE_INSUFFICIENT","message":"client_id must match your API key's client_id"}}`
+		}
 		return 201, `{"wallet_id":"wal_1","owner_ref":"` + str(r.Body["owner_ref"]) + `","currency":"NGN","tier":"TIER_1","status":"active"}`
 	case strings.HasSuffix(r.Path, "/virtual-account"):
 		return 200, `{"wallet_id":"wal_1","account_number":"8107536198","account_name":"ADA OKONKWO","bank_name":"Wema Bank","is_permanent":true}`
@@ -124,16 +127,20 @@ func TestCreateCustomer(t *testing.T) {
 	if err != nil || cust.ID != "wal_1" || cust.VirtualAcct != "8107536198" || cust.VirtualBank != "Wema Bank" || cust.VirtualName != "ADA OKONKWO" {
 		t.Fatalf("customer = %+v %v", cust, err)
 	}
-	create := s.reqs[0]
+	if s.reqs[0].Path != "/v1/platform/account" {
+		t.Fatalf("the client_id must be learned from /v1/platform/account first: %+v", s.reqs[0])
+	}
+	create := s.reqs[1]
 	if create.Method != "POST" || create.Path != "/v1/wallets" || create.Auth != "Bearer key_test" || create.IdemKey != "signup:ada@example.com" ||
 		create.Body["owner_ref"] != "xenos-test:user:8821" || create.Body["owner_type"] != "client_end_user" ||
-		create.Body["currency"] != "NGN" || create.Body["initial_tier"] != "TIER_1" || create.Body["email"] != "ada@example.com" {
+		create.Body["currency"] != "NGN" || create.Body["initial_tier"] != "TIER_1" || create.Body["email"] != "ada@example.com" ||
+		create.Body["client_id"] != "xenos" {
 		t.Fatalf("create request: %+v", create)
 	}
 	if _, nested := create.Body["kyc_profile"]; nested {
 		t.Fatal("identity fields must be flat: a nested kyc_profile is rejected by iswallet")
 	}
-	if va := s.reqs[1]; va.Path != "/v1/wallets/wal_1/virtual-account" || va.Body["type"] != "permanent" || va.IdemKey != "va:wal_1" {
+	if va := s.reqs[2]; va.Path != "/v1/wallets/wal_1/virtual-account" || va.Body["type"] != "permanent" || va.IdemKey != "va:wal_1" {
 		t.Fatalf("virtual account request: %+v", va)
 	}
 }
@@ -149,6 +156,23 @@ func TestCreateCustomerExistingWalletIsSuccess(t *testing.T) {
 	cust, err := c.CreateCustomer(context.Background(), "signup:a", "user:1", "a@b.c", "")
 	if err != nil || cust.ID != "wal_existing" {
 		t.Fatalf("a 409 WALLET_ALREADY_EXISTS must be read as success with the nested wallet: %+v %v", cust, err)
+	}
+}
+
+// The live sandbox returns an all-empty wallet in original_response (the guide says it carries the
+// existing one). Trusting an empty id would link a customer to nothing, so it must surface as an error.
+func TestCreateCustomerRefusesAnEmptyOriginalResponse(t *testing.T) {
+	s, c := newStub(t)
+	s.reply = func(r stubReq) (int, string) {
+		if r.Path == "/v1/wallets" {
+			return 409, `{"error":{"code":"WALLET_ALREADY_EXISTS","message":"exists","original_response":{"wallet_id":"","account_number":"","currency":""}}}`
+		}
+		return 0, ""
+	}
+	cust, err := c.CreateCustomer(context.Background(), "signup:a", "user:1", "a@b.c", "")
+	var api *APIError
+	if cust.ID != "" || !errors.As(err, &api) || api.Code != "WALLET_ALREADY_EXISTS" {
+		t.Fatalf("must return the 409, not an empty customer: %+v %v", cust, err)
 	}
 }
 
@@ -218,6 +242,7 @@ func TestErrorCodesMapToSentinels(t *testing.T) {
 		{422, "INSUFFICIENT_LIQUIDITY", ErrLiquidity, func(c *ISWallet) error { _, e := c.Convert(context.Background(), "k", "w", "q"); return e }},
 		{503, "FX_UNAVAILABLE", ErrQuoteUnavailable, func(c *ISWallet) error { _, e := c.Quote(context.Background(), "w", 100); return e }},
 		{503, "FX_UNAVAILABLE", ErrQuoteUnavailable, func(c *ISWallet) error { _, e := c.Rate(context.Background()); return e }},
+		{422, "CURRENCY_MISMATCH", ErrCurrencyMismatch, func(c *ISWallet) error { _, e := c.Charge(context.Background(), "k", "w", 6000, "n"); return e }},
 		{429, "RATE_LIMITED", ErrRateLimited, func(c *ISWallet) error { _, e := c.Charge(context.Background(), "k", "w", 6000, "n"); return e }},
 	}
 	for _, tc := range cases {
@@ -232,7 +257,7 @@ func TestErrorCodesMapToSentinels(t *testing.T) {
 			t.Errorf("%s: the request id must be carried for support: %+v", tc.code, err)
 		}
 		// A different error must not be mistaken for any other sentinel.
-		for _, other := range []error{ErrInsufficientFunds, ErrQuoteExpired, ErrQuoteUsed, ErrLiquidity, ErrQuoteUnavailable, ErrRateLimited} {
+		for _, other := range []error{ErrInsufficientFunds, ErrQuoteExpired, ErrQuoteUsed, ErrLiquidity, ErrQuoteUnavailable, ErrRateLimited, ErrCurrencyMismatch, ErrIdempotencyKeyReused} {
 			if other != tc.want && errors.Is(err, other) {
 				t.Errorf("%s wrongly matches %v", tc.code, other)
 			}

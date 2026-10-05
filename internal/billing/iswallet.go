@@ -41,6 +41,7 @@ type ISWallet struct {
 
 	mu         sync.Mutex
 	operatingW string // resolved from /v1/platform/account when MerchantWallet is empty
+	clientID   string // our tenant's client_id, from /v1/platform/account
 }
 
 // ISWalletConfig builds a client.
@@ -116,6 +117,8 @@ func (e *APIError) Is(target error) bool {
 		return e.Code == "FX_UNAVAILABLE"
 	case ErrIdempotencyKeyReused:
 		return e.Code == "IDEMPOTENCY_KEY_REUSED"
+	case ErrCurrencyMismatch:
+		return e.Code == "CURRENCY_MISMATCH"
 	case ErrRateLimited:
 		return e.Status == http.StatusTooManyRequests || e.Code == "RATE_LIMITED"
 	}
@@ -222,15 +225,21 @@ type walletJSON struct {
 }
 
 func (c *ISWallet) CreateCustomer(ctx context.Context, key, ref, email, phone string) (Customer, error) {
+	// iswallet refuses wallet creation unless client_id matches the API key's (403 SCOPE_INSUFFICIENT).
+	// The guide's example omits it; the value comes from /v1/platform/account.
+	clientID, err := c.tenantClientID(ctx)
+	if err != nil {
+		return Customer{}, err
+	}
 	in := map[string]string{
 		"owner_type": "client_end_user", "owner_ref": c.OwnerPrefix + ":" + ref,
-		"currency": "NGN", "initial_tier": "TIER_1", "email": email,
+		"currency": "NGN", "initial_tier": "TIER_1", "email": email, "client_id": clientID,
 	}
 	if phone != "" {
 		in["phone"] = phone
 	}
 	var w walletJSON
-	err := c.do(ctx, http.MethodPost, "/v1/wallets", key, in, &w)
+	err = c.do(ctx, http.MethodPost, "/v1/wallets", key, in, &w)
 	var api *APIError
 	if errors.As(err, &api) && api.Code == "WALLET_ALREADY_EXISTS" {
 		// A re-run: the existing wallet is nested in the error. Treat it as success.
@@ -318,26 +327,43 @@ func (c *ISWallet) Balances(ctx context.Context, id string) (Balances, error) {
 	return b, nil
 }
 
+// loadAccount resolves (once) and caches the tenant's identity from GET /v1/platform/account:
+// its client_id and its operating wallet. Both are stable.
+func (c *ISWallet) loadAccount(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.clientID != "" && c.operatingW != "" {
+		return nil
+	}
+	acct, err := c.platformAccount(ctx)
+	if err != nil {
+		return err
+	}
+	if acct.ClientID == "" || acct.OperatingWalletID == "" {
+		return errors.New("iswallet: /v1/platform/account returned no client_id or operating_wallet_id")
+	}
+	c.clientID, c.operatingW = acct.ClientID, acct.OperatingWalletID
+	return nil
+}
+
 // merchantWallet returns the wallet charges are paid into: the configured override, else the
-// tenant's operating wallet from GET /v1/platform/account (stable, so resolved once).
+// tenant's operating wallet.
 func (c *ISWallet) merchantWallet(ctx context.Context) (string, error) {
 	if c.MerchantWallet != "" {
 		return c.MerchantWallet, nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.operatingW != "" {
-		return c.operatingW, nil
-	}
-	acct, err := c.platformAccount(ctx)
-	if err != nil {
+	if err := c.loadAccount(ctx); err != nil {
 		return "", err
 	}
-	if acct.OperatingWalletID == "" {
-		return "", errors.New("iswallet: /v1/platform/account returned no operating_wallet_id")
-	}
-	c.operatingW = acct.OperatingWalletID
 	return c.operatingW, nil
+}
+
+// tenantClientID is the client_id iswallet requires on wallet creation: it must match the API key's.
+func (c *ISWallet) tenantClientID(ctx context.Context) (string, error) {
+	if err := c.loadAccount(ctx); err != nil {
+		return "", err
+	}
+	return c.clientID, nil
 }
 
 type platformAccount struct {

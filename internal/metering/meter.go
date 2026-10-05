@@ -200,12 +200,26 @@ func (t *tick) attempt(ctx context.Context, c charge) error {
 		t.m.Cache.Invalidate(c.customer)
 		return t.m.Store.Q.MarkChargePaid(ctx, db.MarkChargePaidParams{ID: c.id, IspendMovementID: textOf(mv.ID)})
 	case errors.Is(err, billing.ErrInsufficientFunds):
-		if c.status != "unpaid" {
-			if err := t.m.Store.Q.MarkChargeUnpaid(ctx, c.id); err != nil {
-				return err
-			}
+		return t.unpaid(ctx, c)
+	case errors.Is(err, billing.ErrCurrencyMismatch):
+		// iswallet answers CURRENCY_MISMATCH (not INSUFFICIENT_FUNDS) when a customer has never
+		// converted and so holds no USDT at all. That customer cannot pay: same as being out of funds.
+		// If they DO hold enough USDT the mismatch is on our side (e.g. the operating wallet): alert,
+		// and leave the charge open without blocking everyone else's.
+		bal, berr := t.m.ISpend.Balances(ctx, c.customer)
+		if berr != nil {
+			t.fail("balances", berr)
+			return nil
 		}
-		return t.startGrace(ctx, c.userID)
+		if bal.USDTMicro < c.amount {
+			return t.unpaid(ctx, c)
+		}
+		t.m.Log.Error("charge refused as CURRENCY_MISMATCH although the customer holds USDT", "vm_id", c.vmID, "err", err)
+		if t.m.Alerts != nil {
+			t.m.Alerts.Notify(ctx, "charge-currency-mismatch", time.Hour,
+				"iswallet refused a charge as CURRENCY_MISMATCH although the customer holds enough USDT. The Xenos operating wallet may not hold a USDT balance yet; check with iswallet. The charge stays open.")
+		}
+		return nil
 	case errors.Is(err, billing.ErrIdempotencyKeyReused):
 		// Cannot succeed on retry: this charge's key was used with different details. Alert (rate
 		// limited) and leave the charge open for a human; other charges are unaffected.
@@ -219,6 +233,16 @@ func (t *tick) attempt(ctx context.Context, c charge) error {
 		t.fail("charge", err)
 		return nil
 	}
+}
+
+// unpaid records a charge the customer cannot cover and starts the out-of-funds path.
+func (t *tick) unpaid(ctx context.Context, c charge) error {
+	if c.status != "unpaid" {
+		if err := t.m.Store.Q.MarkChargeUnpaid(ctx, c.id); err != nil {
+			return err
+		}
+	}
+	return t.startGrace(ctx, c.userID)
 }
 
 // startGrace begins the out-of-funds countdown the first time a charge fails.

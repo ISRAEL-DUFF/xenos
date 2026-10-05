@@ -546,3 +546,75 @@ func TestKeyReusedChargeIsAlertedNotRetriedAsTransient(t *testing.T) {
 		t.Fatalf("the charge stays open for a human, pending rows = %d", n)
 	}
 }
+
+// mismatchFake answers every charge with CURRENCY_MISMATCH, as iswallet does for a customer who
+// has never converted and so holds no USDT.
+type mismatchFake struct{ *billing.Fake }
+
+func (mismatchFake) Charge(context.Context, string, string, int64, string) (billing.Movement, error) {
+	return billing.Movement{}, billing.ErrCurrencyMismatch
+}
+
+func TestCurrencyMismatchForAnEmptyWalletIsOutOfFundsNotAnOutage(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	uid, _ := e.user("a@x.co", 0) // never converted: holds no USDT
+	e.runningVM(uid)
+	e.meter.ISpend = mismatchFake{e.is}
+	e.tickAt(at(10, 21))
+
+	if n := e.n(`SELECT count(*) FROM usage_charges WHERE status='unpaid'`); n != 1 {
+		t.Fatalf("the charge must be unpaid, not left pending: %d", n)
+	}
+	if n := e.n(`SELECT count(*) FROM users WHERE grace_started_at IS NOT NULL`); n != 1 {
+		t.Fatal("a customer with no USDT cannot pay: the out-of-funds path must start")
+	}
+}
+
+func TestCurrencyMismatchDoesNotBlockOtherCustomers(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	e.meter.Alerts = &alerts{}
+	empty, _ := e.user("empty@x.co", 0)
+	funded, _ := e.user("funded@x.co", 1_000_000)
+	e.runningVM(empty)
+	vmOK := e.runningVM(funded)
+	// Only the customer with no USDT gets the mismatch; the other is charged normally.
+	e.meter.ISpend = selectiveMismatch{Fake: e.is, bad: map[string]bool{custOf(t, e, empty): true}}
+	e.tickAt(at(10, 21))
+	if n := e.n(`SELECT count(*) FROM usage_charges WHERE vm_id=$1 AND status='paid'`, vmOK); n != 1 {
+		t.Fatal("one customer's CURRENCY_MISMATCH must not stop the rest of the tick")
+	}
+}
+
+func custOf(t *testing.T, e *env, uid int64) string {
+	var c string
+	must(t, e.st.Pool.QueryRow(context.Background(), `SELECT ispend_customer_id FROM users WHERE id=$1`, uid).Scan(&c))
+	return c
+}
+
+type selectiveMismatch struct {
+	*billing.Fake
+	bad map[string]bool
+}
+
+func (s selectiveMismatch) Charge(ctx context.Context, key, cust string, amt int64, n string) (billing.Movement, error) {
+	if s.bad[cust] {
+		return billing.Movement{}, billing.ErrCurrencyMismatch
+	}
+	return s.Fake.Charge(ctx, key, cust, amt, n)
+}
+
+func TestCurrencyMismatchDespiteFundsIsAlertedNotSuspended(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	al := &alerts{}
+	e.meter.Alerts = al
+	uid, _ := e.user("a@x.co", 1_000_000) // holds plenty of USDT
+	e.runningVM(uid)
+	e.meter.ISpend = mismatchFake{e.is}
+	e.tickAt(at(10, 21))
+	if len(al.sent) != 1 || !strings.Contains(al.sent[0], "CURRENCY_MISMATCH") {
+		t.Fatalf("operators must be told: %v", al.sent)
+	}
+	if n := e.n(`SELECT count(*) FROM users WHERE grace_started_at IS NOT NULL`); n != 0 {
+		t.Fatal("a funded customer must never be suspended for iswallet's mismatch")
+	}
+}

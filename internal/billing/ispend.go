@@ -24,6 +24,10 @@ var (
 	// ErrIdempotencyKeyReused: the key was already used with a different payload (422
 	// IDEMPOTENCY_KEY_REUSED). Never retryable: it means a key-generation bug on our side.
 	ErrIdempotencyKeyReused = errors.New("billing: idempotency key reused with a different payload")
+	// ErrCurrencyMismatch: iswallet refuses a transfer because the wallets do not both hold USDT
+	// (CURRENCY_MISMATCH). In practice a customer who has never converted has no USDT balance to
+	// transfer from, which means they cannot pay: callers check the balance to tell the two apart.
+	ErrCurrencyMismatch = errors.New("billing: wallets do not share currency")
 	// ErrScaleMismatch: iswallet reports a currency scale we are not configured for. We refuse to
 	// act on balances rather than risk a power-of-ten error.
 	ErrScaleMismatch = errors.New("billing: unexpected currency scale")

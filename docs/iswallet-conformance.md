@@ -13,7 +13,7 @@ All six blocking questions were answered. What we did with each:
 
 | Q | Answer | What we did |
 |---|---|---|
-| Q1 balances | `GET /v1/wallets/{id}/balance`; read `balances[]`, use `available`; an absent currency is zero | Implemented. We read `available` and refuse any response whose `scale` is not what we expect (NGN 2, USDT 6). |
+| Q1 balances (verified live) | `GET /v1/wallets/{id}/balance`; read `balances[]`, use `available`; an absent currency is zero | Implemented. We read `available` and refuse any response whose `scale` is not what we expect (NGN 2, USDT 6). |
 | Q2 USDT scale | 6 decimals (micro-USDT); the guide's quote example was wrong | Setting kept as a guard with default 6. Their own correction of the quote example confirms our reading; the 6,000 micro-USDT charge example was right all along. |
 | Q3 webhook type | Envelope: `event_type` and stable `id` in the body, payload under `data` | Parser rewritten to the envelope. **The type-inference code is deleted**: a signed body with no `event_type` is rejected (400), never guessed at. |
 | Q4 which credits | Posted fires for `pull_inflow`, `wallet_transfer` (our adjustments) and legacy `va_deposit`; convert emits `convert.completed` instead | We convert only `NGN` + `pull_inflow`; everything else is acknowledged and ignored (tested for USDT, `wallet_transfer`, `va_deposit`). |
@@ -30,6 +30,23 @@ All six blocking questions were answered. What we did with each:
 
 ---
 
+## 1b. Findings from the first live sandbox run (5 October 2026)
+
+We ran `go test -tags sandbox ./internal/billing` against `https://synledger.name.ng/iwallet` with our client key. What worked: wallet creation and its idempotent replay, issuing the virtual account, `IDEMPOTENCY_KEY_REUSED` on a changed payload, `GET …/balance` (scales asserted), `GET /v1/platform/account`, and `POST /v1/sandbox/simulate/deposit`. Where the sandbox differs from the guide, or blocks us, with request ids for your logs:
+
+| # | What we saw | Request ids | What we need |
+|---|---|---|---|
+| F1 **blocking** | **FX is unavailable.** `GET /v1/rates?from=NGN&to=USDT` returns **`500 INTERNAL "fx quote NGN/USDT: not found"`** (the guide documents `503 FX_UNAVAILABLE` for a paused rate), and `POST /v1/convert/quotes` returns `503 FX_UNAVAILABLE "fx rate unavailable, try again"`. Retried over several minutes. | `req_c5be55f4b8e9af159c7a781d`, `req_f14e2934c0c29f14c7a94f61`, `req_bf02c952d4f2101b24106223` (rates); `req_9a092566eb717f99035c87e3`, `req_2cedb0fa8ac40f9ac9611016` (quote) | Seed or enable an NGN/USDT rate in sandbox. Until then we cannot test convert, charge or adjustments, all of which need a USDT balance. |
+| F2 | **`POST /v1/wallets` requires `client_id`** in the body, equal to the API key's (`403 SCOPE_INSUFFICIENT: client_id must match your API key's client_id`). The guide's example omits it. | `req_639d6e209afd0ab76e3b756b` | Add it to the guide. We now send the value from `GET /v1/platform/account` (`"xenos"`). |
+| F3 | **`WALLET_ALREADY_EXISTS` carries an empty wallet** in `error.original_response` (every field blank), not the existing wallet as the guide says. We therefore cannot recover the wallet id from that 409. | `req_d9ddb5e39713c1fbba642d5a`, `req_4517175468fde2865e378faf` | Populate `original_response`, or give us a lookup by `owner_ref` (e.g. `GET /v1/wallets?owner_ref=`). Our stable per-user signup key avoids this path in normal operation, but it is our only recovery if a signup is interrupted after iswallet created the wallet under a *different* key. |
+| F4 | **A deposit fee is deducted.** `simulate/deposit` of 5,000,000 kobo (₦50,000) left **4,930,000 spendable**: a fee of 70,000 kobo, **1.40%**. | wallet `98aef08b-b727-4445-b931-d9dafe10b959` and others | Is this the mock provider's fee only, or what live bank transfers will cost? Customers will see it before our own margin and your 1.5% spread. We reconcile on the credited amount, as you advise. |
+| F5 | **Charging a wallet with no USDT returns `422 CURRENCY_MISMATCH` ("wallets must share currency USDT"), not `INSUFFICIENT_FUNDS`.** A customer who has never converted has no USDT balance. | `req_c452dc8136271ecd8cc0098c`, `req_1e66984e57072281bba02806` | Confirm this is intended. We now treat it as "cannot pay" when the customer's USDT is below the charge and alert otherwise. **Related:** does a transfer *into* an operating wallet that holds no USDT balance yet also return `CURRENCY_MISMATCH`? The first hourly charge would hit it. We can only test that once F1 is fixed. |
+| F6 | The simulator's reply and `/v1/sandbox/simulate/reversal` are undocumented beyond their paths. | | Request and response shapes for `simulate/reversal`. We have not called it. |
+
+Not yet exercised (blocked by F1, or needing a public webhook URL): quote, convert and replay, `QUOTE_EXPIRED`, `QUOTE_ALREADY_USED`, charge and replay, adjustments in both directions, the real webhook delivery and signature, reversals, the first charge into the operating wallet.
+
+---
+
 ## 2. Changes we made because of the guide
 
 | Guide | What we did |
@@ -39,7 +56,7 @@ All six blocking questions were answered. What we did with each:
 | §0.3 no card | Removed card top-up end to end (API, interface, dashboard). The wallet page offers bank transfer only and states the account name, bank and limits. |
 | §3 idempotency, forever | We rely on it. Keys are `signup:<email>`, `conversion:<id>[:<attempt>]`, `vm:<id>:hour:<yyyymmddhh>`, `adjustment:<id>`, `va:<wallet>`, `xenos:sub:primary`. Convert sends the key in the header **and** as `client_idempotency_key`. |
 | §4 namespace `owner_ref` | `owner_ref = <prefix>:user:<id>`, prefix configurable (`XENOS_ISPEND_OWNER_PREFIX`, default `xenos`). Use a different prefix in sandbox: sandbox is never reset, so a rebuilt dev database would otherwise reuse refs. |
-| §4 `409 WALLET_ALREADY_EXISTS` | Read as success; the nested wallet is used. |
+| §4 `409 WALLET_ALREADY_EXISTS` | We would read the nested wallet as success, but the sandbox returns it empty (F3), so this surfaces as an error. |
 | §4.1 virtual account | Issued at signup; the account details are **stored in our database** (re-issuing is idempotent, so we do that lazily if signup could not). Shown to the customer only after email verification. |
 | §6.1 quotes last 60 s | The quote's `expires_at` is saved and shown as a live countdown; confirming an expired quote is refused locally without calling you. |
 | §6.2 replay after expiry | Every conversion **persists its quote and key before executing**, and a retry replays the *same* quote under the *same* key (a new quote under an old key would be a different payload and rejected). Only when the replay returns `QUOTE_EXPIRED`, which means it never executed, does an automatic conversion take a fresh quote under a new key (`conversion:<id>:2`). A customer's own quote is never silently replaced. |
