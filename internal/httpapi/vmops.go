@@ -289,3 +289,88 @@ func (s *Server) snapshotJob(w http.ResponseWriter, r *http.Request, v db.GetUse
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "action": verb})
 }
+
+// ---- rebuild ----
+
+// rebuildVM reinstalls the VM from a template. Everything on its disk, snapshots included, is erased, so the
+// caller must confirm. The IP, plan and hostname stay. Customers who lost SSH access use this with new keys.
+func (s *Server) rebuildVM(w http.ResponseWriter, r *http.Request) {
+	v, ok := s.ownedVM(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Template  string  `json:"template"`
+		SSHKeyIDs []int64 `json:"ssh_key_ids"`
+		Confirm   bool    `json:"confirm"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if !in.Confirm {
+		writeErr(w, http.StatusBadRequest, "confirm the rebuild: everything on the VM's disk, including its snapshots, will be erased")
+		return
+	}
+	ctx := r.Context()
+	user := principalFrom(ctx).User
+	if !s.rebuildLimit.Allow(strconvID(user.ID)) {
+		writeErr(w, http.StatusTooManyRequests, "too many rebuilds, try again later")
+		return
+	}
+	slug := in.Template
+	if slug == "" {
+		slug = v.TemplateSlug
+	}
+	tpl, err := s.Store.Q.GetActiveTemplateBySlug(ctx, slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, http.StatusBadRequest, "unknown template")
+		return
+	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	keys := ""
+	if ids := uniqueIDs(in.SSHKeyIDs); len(ids) > 0 {
+		list, err := s.Store.Q.GetSSHKeysByIDs(ctx, db.GetSSHKeysByIDsParams{UserID: user.ID, Column2: ids})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if len(list) != len(ids) {
+			writeErr(w, http.StatusBadRequest, "unknown SSH key")
+			return
+		}
+		keys = strings.Join(list, "\n")
+	} else { // keep the keys the VM already has
+		work, err := s.Store.Q.GetVMForWork(ctx, v.ID)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		keys = work.AuthorizedKeys
+	}
+	if strings.TrimSpace(keys) == "" {
+		writeErr(w, http.StatusBadRequest, "choose at least one SSH key")
+		return
+	}
+
+	err = s.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		n, err := q.ClaimVMRebuild(ctx, db.ClaimVMRebuildParams{ID: v.ID, UserID: user.ID,
+			RebuildTemplateID: pgtype.Int8{Int64: tpl.ID, Valid: true}, RebuildKeys: pgtype.Text{String: keys, Valid: true}})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errAbort
+		}
+		return jobs.EnqueueTx(ctx, tx, vm.JobRebuild, vm.Payload{VMID: v.ID})
+	})
+	if errors.Is(err, errAbort) {
+		writeErr(w, http.StatusConflict, busyConflict)
+		return
+	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "template": tpl.Slug})
+}

@@ -5,7 +5,7 @@ import { api, type Plan, type VM, type Wallet } from "./api";
 import { useAuth } from "./auth";
 import { formatDate, formatNaira, formatUSDT, koboForUSDT, memLabel, usdtToKobo } from "./format";
 import { usePlans, useSSHKeys, useTemplates, useVM, useVMs, useWallet } from "./hooks";
-import { BusyBanner, ResizeCard, SnapshotsCard, useSnapshots } from "./pages-vmops";
+import { BusyBanner, RebuildCard, ResizeCard, SnapshotsCard, useSnapshots } from "./pages-vmops";
 import { Banner, Button, Card, CodeLine, ConfirmDialog, Empty, ErrorText, Field, Input, Loading, PageHeader, StateBadge, cx } from "./ui";
 
 const MIN_RUNWAY_HOURS = 24; // keep in step with the server's create check
@@ -284,7 +284,7 @@ const stateNotes: Partial<Record<VM["state"], { tone: "info" | "warn" | "danger"
   provisioning: { tone: "info", text: "Provisioning. This usually takes under two minutes; this page updates by itself." },
   suspended: { tone: "warn", text: "This VM was suspended because your wallet ran out. Top up to bring it back, otherwise it will be deleted after the grace period." },
   deleting: { tone: "warn", text: "This VM is being deleted." },
-  error: { tone: "danger", text: "Provisioning failed. You were not charged. Delete this VM and try again; contact support if it keeps happening." },
+  error: { tone: "danger", text: "Setting up this VM failed (creating or rebuilding it). Billing has stopped. Delete it and create a new one; contact support if it keeps happening." },
 };
 
 export function VMDetail() {
@@ -417,6 +417,7 @@ export function VMDetail() {
 
       <SnapshotsCard vm={v} list={snaps.data} />
       <ResizeCard vm={v} snapshotCount={snaps.data?.snapshots.length ?? 0} />
+      <RebuildCard vm={v} />
 
       {confirmDelete && (
         <ConfirmDialog

@@ -90,7 +90,7 @@ UPDATE vms SET busy = $3, resize_plan_id = $4
 WHERE id = $1 AND user_id = $2 AND busy IS NULL AND state IN ('running', 'stopped') AND deleted_at IS NULL;
 
 -- name: ReleaseVMBusy :exec
-UPDATE vms SET busy = NULL, resize_plan_id = NULL WHERE id = $1;
+UPDATE vms SET busy = NULL, resize_plan_id = NULL, rebuild_template_id = NULL, rebuild_keys = NULL WHERE id = $1;
 
 -- name: FinishResize :execrows
 UPDATE vms SET plan_id = resize_plan_id, resize_plan_id = NULL, busy = NULL
@@ -123,3 +123,31 @@ UPDATE snapshots SET status = $2, last_error = $3 WHERE id = $1;
 
 -- name: DeleteSnapshotRow :exec
 DELETE FROM snapshots WHERE id = $1;
+
+-- name: ClaimVMRebuild :execrows
+-- Claims an idle running or stopped VM for a rebuild and records the template and keys to rebuild with.
+UPDATE vms SET busy = 'rebuilding', rebuild_template_id = $3, rebuild_keys = $4
+WHERE id = $1 AND user_id = $2 AND busy IS NULL AND state IN ('running', 'stopped') AND deleted_at IS NULL;
+
+-- name: GetRebuildWork :one
+SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys,
+       p.vcpu, p.ram_mb, p.disk_gb,
+       COALESCE(t.proxmox_template_id, 0)::int AS template_vmid, COALESCE(t.ci_user, 'root')::text AS ci_user,
+       COALESCE(host(ip.address), '')::text AS ipv4, COALESCE(host(ip.gateway), '')::text AS gateway
+FROM vms v
+JOIN plans p ON p.id = v.plan_id
+LEFT JOIN templates t ON t.id = v.rebuild_template_id
+LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
+WHERE v.id = $1;
+
+-- name: FinishRebuild :execrows
+-- The VM now runs the new template; its old snapshots went with the old disk.
+UPDATE vms SET template_id = rebuild_template_id, authorized_keys = rebuild_keys, state = 'running',
+       rebuild_template_id = NULL, rebuild_keys = NULL, busy = NULL
+WHERE id = $1 AND busy = 'rebuilding' AND rebuild_template_id IS NOT NULL;
+
+-- name: DeleteVMSnapshots :exec
+DELETE FROM snapshots WHERE vm_id = $1;
+
+-- name: MarkVMError :exec
+UPDATE vms SET state = 'error', busy = NULL, rebuild_template_id = NULL, rebuild_keys = NULL WHERE id = $1;

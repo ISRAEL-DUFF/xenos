@@ -220,3 +220,97 @@ func TestClaimIsOneAtATime(t *testing.T) {
 }
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
+
+func (e *env) claimRebuild(id int64, tpl, keys string) {
+	e.t.Helper()
+	ctx := context.Background()
+	var userID int64
+	must(e.t, e.st.Pool.QueryRow(ctx, `SELECT user_id FROM vms WHERE id=$1`, id).Scan(&userID))
+	t, err := e.st.Q.GetActiveTemplateBySlug(ctx, tpl)
+	must(e.t, err)
+	n, err := e.st.Q.ClaimVMRebuild(ctx, db.ClaimVMRebuildParams{ID: id, UserID: userID,
+		RebuildTemplateID: pgtype.Int8{Int64: t.ID, Valid: true}, RebuildKeys: pgtype.Text{String: keys, Valid: true}})
+	must(e.t, err)
+	if n != 1 {
+		e.t.Fatalf("claim rebuild = %d rows", n)
+	}
+}
+
+func TestRebuildReinstallsKeepingIPAndPlan(t *testing.T) {
+	e := newEnv(t)
+	id, vmid := e.running("203.0.113.40")
+	ctx := context.Background()
+
+	// A snapshot exists and the VM is stopped: the rebuild erases the snapshot and brings the VM up.
+	sid, _ := e.st.Q.CreateSnapshot(ctx, db.CreateSnapshotParams{VmID: id, Name: "old"})
+	must(t, e.st.Q.SetSnapshotPVEName(ctx, db.SetSnapshotPVENameParams{ID: sid, PveName: SnapshotName(sid)}))
+	must(t, e.st.Q.SetSnapshotStatus(ctx, db.SetSnapshotStatusParams{ID: sid, Status: "ready"}))
+	e.pve.VMs[vmid].Snapshots = []string{SnapshotName(sid)}
+	must(t, e.call(e.prov, JobPower, id, "stop", 1))
+
+	e.claimRebuild(id, "debian-12", "ssh-ed25519 NEWKEY")
+	must(t, e.call(e.prov, JobRebuild, id, "", 1))
+
+	g := e.pve.VMs[vmid]
+	if g == nil || !g.Running || g.Template != 9001 || g.Config.IPConfig0 != "ip=203.0.113.40/32,gw=203.0.113.1" ||
+		g.Config.SSHKeys != "ssh-ed25519 NEWKEY" || g.DiskGB != 20 || len(g.Snapshots) != 0 {
+		t.Fatalf("guest after rebuild: %+v", g)
+	}
+	var tpl, keys, state string
+	var busy *string
+	must(t, e.st.Pool.QueryRow(ctx, `SELECT t.slug, v.authorized_keys, v.state, v.busy FROM vms v JOIN templates t ON t.id=v.template_id WHERE v.id=$1`, id).Scan(&tpl, &keys, &state, &busy))
+	if tpl != "debian-12" || keys != "ssh-ed25519 NEWKEY" || state != "running" || busy != nil {
+		t.Fatalf("row: %s %s %s busy=%v", tpl, keys, state, busy)
+	}
+	if rows, _ := e.st.Q.ListVMSnapshots(ctx, id); len(rows) != 0 {
+		t.Fatalf("snapshot rows survived the rebuild: %+v", rows)
+	}
+	if h := e.ipHolder("203.0.113.40"); h == nil || *h != id {
+		t.Fatal("the VM must keep its IP")
+	}
+}
+
+func TestRebuildRetryStartsFromACleanSlate(t *testing.T) {
+	e := newEnv(t)
+	id, vmid := e.running("203.0.113.41")
+	e.claimRebuild(id, "ubuntu-24.04", "ssh-ed25519 K")
+	e.pve.Fail["start"] = errors.New("boom")
+	if err := e.call(e.prov, JobRebuild, id, "", 1); err == nil {
+		t.Fatal("expected the start failure")
+	}
+	if busy, _ := e.busy(id); busy != "rebuilding" {
+		t.Fatalf("a retried attempt keeps the claim: %q", busy)
+	}
+	delete(e.pve.Fail, "start")
+	must(t, e.call(e.prov, JobRebuild, id, "", 2)) // the half-built guest is replaced, not "already exists"
+	if !e.pve.VMs[vmid].Running {
+		t.Fatal("not running after the retry")
+	}
+	if busy, _ := e.busy(id); busy != "" {
+		t.Fatal("not released")
+	}
+}
+
+func TestRebuildFinalFailureMarksTheVMErroredAndStopsBilling(t *testing.T) {
+	e := newEnv(t)
+	id, vmid := e.running("203.0.113.42")
+	e.claimRebuild(id, "ubuntu-24.04", "ssh-ed25519 K")
+	e.pve.Fail["clone"] = errors.New("pool full")
+	if err := e.call(e.prov, JobRebuild, id, "", jobs.MaxAttempts); err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := e.state(id); got != "error" {
+		t.Fatalf("state %s, want error", got)
+	}
+	var until *string
+	must(t, e.st.Pool.QueryRow(context.Background(), `SELECT billing_until::text FROM vms WHERE id=$1`, id).Scan(&until))
+	if until == nil {
+		t.Fatal("billing must stop for a VM the rebuild destroyed")
+	}
+	if _, ok := e.pve.VMs[vmid]; ok {
+		t.Fatal("no half-built guest may be left on the host")
+	}
+	if busy, _ := e.busy(id); busy != "" {
+		t.Fatal("released")
+	}
+}

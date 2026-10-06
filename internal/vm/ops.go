@@ -256,3 +256,64 @@ func (p *Provisioner) restore(ctx context.Context, j *jobs.Job, in Payload) erro
 	}
 	return err
 }
+
+// ---- rebuild ----
+
+// rebuild reinstalls a VM from a template: the guest and its disk are destroyed and a fresh one is cloned
+// into the same VMID with the same IP, plan and hostname. Everything on the old disk, snapshots included, is
+// gone. Each attempt starts from a clean slate, so a retry or a crashed worker is safe.
+func (p *Provisioner) rebuild(ctx context.Context, j *jobs.Job, in Payload) error {
+	w, err := p.Store.Q.GetRebuildWork(ctx, in.VMID)
+	if err != nil {
+		return err
+	}
+	if !w.Busy.Valid || w.Busy.String != "rebuilding" || !w.RebuildTemplateID.Valid {
+		return nil // nothing claimed: a stale job
+	}
+	if !operable(w.State) { // suspended or deleted while queued
+		p.release(ctx, w.ID)
+		return nil
+	}
+	err = p.doRebuild(ctx, w)
+	if err == nil {
+		return nil
+	}
+	if finalFailure(ctx, j) {
+		// The old guest is already gone, so the VM cannot be put back: mark it errored (which stops its
+		// billing), remove whatever half-built guest exists and leave it to the customer to delete or retry.
+		bg := context.WithoutCancel(ctx)
+		p.Log.Error("rebuild failed permanently; the VM is marked errored", "vm_id", w.ID, "err", err)
+		if e := p.destroyIfPresent(bg, int(w.ProxmoxVmid.Int32)); e != nil {
+			p.Log.Error("cleanup after failed rebuild", "vm_id", w.ID, "err", e)
+		}
+		if e := p.Store.Q.MarkVMError(bg, w.ID); e != nil {
+			p.Log.Error("mark error", "vm_id", w.ID, "err", e)
+		}
+		if e := p.Store.Q.StopBilling(bg, db.StopBillingParams{ID: w.ID, BillingUntil: tsOf(p.now())}); e != nil {
+			p.Log.Error("stop billing", "vm_id", w.ID, "err", e)
+		}
+	}
+	return err
+}
+
+func (p *Provisioner) doRebuild(ctx context.Context, w db.GetRebuildWorkRow) error {
+	vmid := int(w.ProxmoxVmid.Int32)
+	if err := p.destroyIfPresent(ctx, vmid); err != nil {
+		return fmt.Errorf("remove old guest: %w", err)
+	}
+	if err := p.Store.Q.DeleteVMSnapshots(ctx, w.ID); err != nil {
+		return err
+	}
+	if err := p.createGuest(ctx, guestSpec{
+		VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.TemplateVmid), CIUser: w.CiUser, Keys: w.RebuildKeys.String,
+		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: w.Ipv6.String, Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
+		return err
+	}
+	if n, err := p.Store.Q.FinishRebuild(ctx, w.ID); err != nil {
+		return err
+	} else if n == 0 {
+		return errors.New("rebuild claim was lost")
+	}
+	p.Log.Info("vm rebuilt", "vm_id", w.ID, "vmid", vmid)
+	return nil
+}

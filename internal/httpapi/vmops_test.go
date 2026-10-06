@@ -161,3 +161,39 @@ func TestSnapshotsAPI(t *testing.T) {
 		t.Errorf("snapshot as a suspended user = %d, want 403", code)
 	}
 }
+
+func TestRebuildAPI(t *testing.T) {
+	env := newTestEnv(t)
+	u, path := runningVM(t, env, "a@x.co", 100*nanoDay)
+	other := newVMUser(t, env, "b@x.co", 100*nanoDay)
+
+	if code, _ := u.c.do("POST", path+"/rebuild", map[string]any{"template": "debian-12"}, u.c.csrfHdr()); code != 400 {
+		t.Errorf("rebuild without confirm = %d, want 400", code)
+	}
+	if code, _ := u.c.do("POST", path+"/rebuild", map[string]any{"template": "nope", "confirm": true}, u.c.csrfHdr()); code != 400 {
+		t.Errorf("unknown template = %d, want 400", code)
+	}
+	if code, _ := u.c.do("POST", path+"/rebuild", map[string]any{"ssh_key_ids": []int64{other.key}, "confirm": true}, u.c.csrfHdr()); code != 400 {
+		t.Errorf("another user's SSH key = %d, want 400", code)
+	}
+	if code, _ := other.c.do("POST", path+"/rebuild", map[string]any{"confirm": true}, other.c.csrfHdr()); code != 404 {
+		t.Errorf("another user's rebuild = %d, want 404", code)
+	}
+	// Default template and keys: the VM's own.
+	if code, out := u.c.do("POST", path+"/rebuild", map[string]any{"template": "debian-12", "ssh_key_ids": []int64{u.key}, "confirm": true}, u.c.csrfHdr()); code != 202 {
+		t.Fatalf("rebuild = %d %v", code, out)
+	}
+	if code, _ := u.c.do("POST", path+"/rebuild", map[string]any{"confirm": true}, u.c.csrfHdr()); code != 409 {
+		t.Errorf("a second rebuild while busy = %d, want 409", code)
+	}
+	if code, _ := u.c.do("POST", path+"/stop", nil, u.c.csrfHdr()); code != 409 {
+		t.Errorf("stop while rebuilding = %d, want 409", code)
+	}
+	if n := count(t, env, `SELECT count(*) FROM jobs WHERE kind='vm.rebuild'`); n != 1 {
+		t.Errorf("rebuild jobs: %d", n)
+	}
+	// Nothing changes on the VM row until the worker finishes.
+	if n := count(t, env, `SELECT count(*) FROM vms v JOIN templates t ON t.id=v.template_id WHERE t.slug='ubuntu-24.04'`); n != 1 {
+		t.Errorf("the template must not change before the worker finishes")
+	}
+}

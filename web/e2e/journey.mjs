@@ -159,6 +159,18 @@ const noOverflow = async (page, where) => {
   await page.getByText("running", { exact: true }).waitFor({ timeout: 30_000 });
   await shot(page, "05c-resized");
 
+  step("rebuild from another template (typing the name confirms)");
+  await page.getByRole("button", { name: "Rebuild…" }).click();
+  const rebuildOk = page.getByRole("dialog").getByRole("button", { name: "Erase and rebuild" });
+  check(await rebuildOk.isDisabled(), "rebuild must stay disabled until the VM name is typed");
+  await page.getByRole("dialog").getByRole("combobox").selectOption("debian-12");
+  await page.getByRole("dialog").getByRole("textbox").fill("web-1");
+  await rebuildOk.click();
+  await page.getByText(/Rebuilding\./).waitFor({ timeout: 20_000 });
+  await page.getByText(/ · debian-12 · /).waitFor({ timeout: 60_000 });
+  await page.getByText("running", { exact: true }).waitFor({ timeout: 30_000 });
+  await shot(page, "05d-rebuilt");
+
   step("browser console connects through our server (the fake host speaks no real VNC, so only the transport is checked)");
   const before = problems.length;
   await page.getByRole("link", { name: "Console" }).click();

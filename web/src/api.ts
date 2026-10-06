@@ -84,7 +84,7 @@ export interface VM {
   created_at: string;
   month_cost_uusdt?: number;
   /** Set while the worker resizes, snapshots or restores the VM. */
-  busy?: "resizing" | "snapshotting" | "restoring";
+  busy?: "resizing" | "snapshotting" | "restoring" | "rebuilding";
 }
 
 export interface SSHKey {

@@ -38,6 +38,7 @@ type Server struct {
 
 	consoles     consoleStore
 	consoleLimit *auth.Limiter
+	rebuildLimit *auth.Limiter
 
 	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit, resetTokenLimit, webhookFailLimit *auth.Limiter
 }
@@ -54,6 +55,7 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 		resendLimit:      auth.NewLimiter(3, time.Hour),
 		webhookFailLimit: auth.NewLimiter(30, time.Minute),
 		consoleLimit:     auth.NewLimiter(10, time.Minute),
+		rebuildLimit:     auth.NewLimiter(5, time.Hour),
 		resetLimit:       auth.NewLimiter(5, time.Hour),
 		resetTokenLimit:  auth.NewLimiter(20, 15*time.Minute),
 	}
@@ -104,6 +106,7 @@ func (s *Server) Router() http.Handler {
 			r.With(s.requireActive).Post("/vms/{id}/console", s.createConsole)
 			r.Get("/vms/{id}/console/ws", s.consoleSocket)
 			r.With(s.requireActive).Post("/vms/{id}/resize", s.resizeVM)
+			r.With(s.requireActive).Post("/vms/{id}/rebuild", s.rebuildVM)
 			r.Get("/vms/{id}/snapshots", s.listSnapshots)
 			r.With(s.requireActive).Post("/vms/{id}/snapshots", s.createSnapshot)
 			r.Delete("/vms/{id}/snapshots/{sid}", s.deleteSnapshot)

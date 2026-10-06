@@ -33,6 +33,7 @@ const (
 	JobSnapshot       = "vm.snapshot"        // take a customer snapshot
 	JobSnapshotDelete = "vm.snapshot_delete" // remove a customer snapshot
 	JobRestore        = "vm.restore"         // roll the disk back to a snapshot
+	JobRebuild        = "vm.rebuild"         // reinstall from a template, keeping the VM's IP and plan
 )
 
 // Power actions accepted by JobPower.
@@ -113,6 +114,7 @@ func (p *Provisioner) Handlers() map[string]jobs.Handler {
 		JobSnapshot:       p.handle(p.snapshotCreate),
 		JobSnapshotDelete: p.handle(p.snapshotDelete),
 		JobRestore:        p.handle(p.restore),
+		JobRebuild:        p.handle(p.rebuild),
 	}
 }
 
@@ -188,33 +190,9 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 		}
 	}
 
-	upid, err := p.PVE.Clone(ctx, proxmox.CloneParams{
-		TemplateID: int(w.ProxmoxTemplateID), NewID: vmid, Name: w.Hostname, Storage: p.Cfg.Storage})
-	if err != nil {
-		return fmt.Errorf("clone: %w", err)
-	}
-	if err := p.PVE.WaitTask(ctx, upid); err != nil {
-		return fmt.Errorf("clone task: %w", err)
-	}
-	if err := p.PVE.Configure(ctx, vmid, proxmox.ConfigParams{
-		Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), CIUser: w.CiUser,
-		SSHKeys:    w.AuthorizedKeys,
-		IPConfig0:  ipConfig(w.Ipv4, p.Cfg.IPv4PrefixLen, w.Gateway, ipv6, p.Cfg.IPv6Gateway),
-		Nameserver: p.Cfg.Nameservers,
-		DisableKVM: p.Cfg.DisableKVM,
-	}); err != nil {
-		return fmt.Errorf("configure: %w", err)
-	}
-	if err := p.PVE.ResizeDisk(ctx, vmid, p.Cfg.Disk, int(w.DiskGb)); err != nil {
-		return fmt.Errorf("resize: %w", err)
-	}
-	if upid, err = p.PVE.Power(ctx, vmid, "start"); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-	if err := p.PVE.WaitTask(ctx, upid); err != nil {
-		return fmt.Errorf("start task: %w", err)
-	}
-	if err := p.waitAgent(ctx, vmid); err != nil {
+	if err := p.createGuest(ctx, guestSpec{
+		VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.ProxmoxTemplateID), CIUser: w.CiUser, Keys: w.AuthorizedKeys,
+		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: ipv6, Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
 		return err
 	}
 	// Billing starts now, at the top of the current hour (hours are charged in advance).
@@ -224,6 +202,46 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 	}
 	p.Log.Info("vm running", "vm_id", w.ID, "vmid", vmid)
 	return nil
+}
+
+// guestSpec is everything needed to clone, configure and start a guest from a template.
+type guestSpec struct {
+	VMID, TemplateVMID      int
+	Name, CIUser, Keys      string
+	IPv4, Gateway, IPv6     string
+	Cores, MemoryMB, DiskGB int
+}
+
+// createGuest clones the template into spec.VMID, configures it, grows the disk, starts it and waits for the
+// guest agent. The VMID must be free. Provisioning and rebuilds share it.
+func (p *Provisioner) createGuest(ctx context.Context, g guestSpec) error {
+	upid, err := p.PVE.Clone(ctx, proxmox.CloneParams{
+		TemplateID: g.TemplateVMID, NewID: g.VMID, Name: g.Name, Storage: p.Cfg.Storage})
+	if err != nil {
+		return fmt.Errorf("clone: %w", err)
+	}
+	if err := p.PVE.WaitTask(ctx, upid); err != nil {
+		return fmt.Errorf("clone task: %w", err)
+	}
+	if err := p.PVE.Configure(ctx, g.VMID, proxmox.ConfigParams{
+		Cores: g.Cores, MemoryMB: g.MemoryMB, CIUser: g.CIUser,
+		SSHKeys:    g.Keys,
+		IPConfig0:  ipConfig(g.IPv4, p.Cfg.IPv4PrefixLen, g.Gateway, g.IPv6, p.Cfg.IPv6Gateway),
+		Nameserver: p.Cfg.Nameservers,
+		DisableKVM: p.Cfg.DisableKVM,
+	}); err != nil {
+		return fmt.Errorf("configure: %w", err)
+	}
+	if err := p.PVE.ResizeDisk(ctx, g.VMID, p.Cfg.Disk, g.DiskGB); err != nil {
+		return fmt.Errorf("resize: %w", err)
+	}
+	if upid, err = p.PVE.Power(ctx, g.VMID, "start"); err != nil {
+		return fmt.Errorf("start: %w", err)
+	}
+	if err := p.PVE.WaitTask(ctx, upid); err != nil {
+		return fmt.Errorf("start task: %w", err)
+	}
+	return p.waitAgent(ctx, g.VMID)
 }
 
 func (p *Provisioner) waitAgent(ctx context.Context, vmid int) error {

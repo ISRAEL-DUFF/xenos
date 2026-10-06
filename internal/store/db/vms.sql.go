@@ -74,6 +74,32 @@ func (q *Queries) ClaimVMBusy(ctx context.Context, arg ClaimVMBusyParams) (int64
 	return result.RowsAffected(), nil
 }
 
+const claimVMRebuild = `-- name: ClaimVMRebuild :execrows
+UPDATE vms SET busy = 'rebuilding', rebuild_template_id = $3, rebuild_keys = $4
+WHERE id = $1 AND user_id = $2 AND busy IS NULL AND state IN ('running', 'stopped') AND deleted_at IS NULL
+`
+
+type ClaimVMRebuildParams struct {
+	ID                int64       `json:"id"`
+	UserID            int64       `json:"user_id"`
+	RebuildTemplateID pgtype.Int8 `json:"rebuild_template_id"`
+	RebuildKeys       pgtype.Text `json:"rebuild_keys"`
+}
+
+// Claims an idle running or stopped VM for a rebuild and records the template and keys to rebuild with.
+func (q *Queries) ClaimVMRebuild(ctx context.Context, arg ClaimVMRebuildParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimVMRebuild,
+		arg.ID,
+		arg.UserID,
+		arg.RebuildTemplateID,
+		arg.RebuildKeys,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const countActiveVMs = `-- name: CountActiveVMs :one
 SELECT count(*) FROM vms WHERE user_id = $1 AND state NOT IN ('deleted', 'error')
 `
@@ -150,6 +176,30 @@ func (q *Queries) DeleteSnapshotRow(ctx context.Context, id int64) error {
 	return err
 }
 
+const deleteVMSnapshots = `-- name: DeleteVMSnapshots :exec
+DELETE FROM snapshots WHERE vm_id = $1
+`
+
+func (q *Queries) DeleteVMSnapshots(ctx context.Context, vmID int64) error {
+	_, err := q.db.Exec(ctx, deleteVMSnapshots, vmID)
+	return err
+}
+
+const finishRebuild = `-- name: FinishRebuild :execrows
+UPDATE vms SET template_id = rebuild_template_id, authorized_keys = rebuild_keys, state = 'running',
+       rebuild_template_id = NULL, rebuild_keys = NULL, busy = NULL
+WHERE id = $1 AND busy = 'rebuilding' AND rebuild_template_id IS NOT NULL
+`
+
+// The VM now runs the new template; its old snapshots went with the old disk.
+func (q *Queries) FinishRebuild(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.Exec(ctx, finishRebuild, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const finishResize = `-- name: FinishResize :execrows
 UPDATE vms SET plan_id = resize_plan_id, resize_plan_id = NULL, busy = NULL
 WHERE id = $1 AND busy = 'resizing' AND resize_plan_id IS NOT NULL
@@ -197,6 +247,59 @@ func (q *Queries) GetActiveTemplateBySlug(ctx context.Context, slug string) (Tem
 		&i.ProxmoxTemplateID,
 		&i.Active,
 		&i.CiUser,
+	)
+	return i, err
+}
+
+const getRebuildWork = `-- name: GetRebuildWork :one
+SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys,
+       p.vcpu, p.ram_mb, p.disk_gb,
+       COALESCE(t.proxmox_template_id, 0)::int AS template_vmid, COALESCE(t.ci_user, 'root')::text AS ci_user,
+       COALESCE(host(ip.address), '')::text AS ipv4, COALESCE(host(ip.gateway), '')::text AS gateway
+FROM vms v
+JOIN plans p ON p.id = v.plan_id
+LEFT JOIN templates t ON t.id = v.rebuild_template_id
+LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
+WHERE v.id = $1
+`
+
+type GetRebuildWorkRow struct {
+	ID                int64       `json:"id"`
+	State             string      `json:"state"`
+	Busy              pgtype.Text `json:"busy"`
+	ProxmoxVmid       pgtype.Int4 `json:"proxmox_vmid"`
+	Hostname          string      `json:"hostname"`
+	Ipv6              pgtype.Text `json:"ipv6"`
+	RebuildTemplateID pgtype.Int8 `json:"rebuild_template_id"`
+	RebuildKeys       pgtype.Text `json:"rebuild_keys"`
+	Vcpu              int32       `json:"vcpu"`
+	RamMb             int32       `json:"ram_mb"`
+	DiskGb            int32       `json:"disk_gb"`
+	TemplateVmid      int32       `json:"template_vmid"`
+	CiUser            string      `json:"ci_user"`
+	Ipv4              string      `json:"ipv4"`
+	Gateway           string      `json:"gateway"`
+}
+
+func (q *Queries) GetRebuildWork(ctx context.Context, id int64) (GetRebuildWorkRow, error) {
+	row := q.db.QueryRow(ctx, getRebuildWork, id)
+	var i GetRebuildWorkRow
+	err := row.Scan(
+		&i.ID,
+		&i.State,
+		&i.Busy,
+		&i.ProxmoxVmid,
+		&i.Hostname,
+		&i.Ipv6,
+		&i.RebuildTemplateID,
+		&i.RebuildKeys,
+		&i.Vcpu,
+		&i.RamMb,
+		&i.DiskGb,
+		&i.TemplateVmid,
+		&i.CiUser,
+		&i.Ipv4,
+		&i.Gateway,
 	)
 	return i, err
 }
@@ -543,6 +646,15 @@ func (q *Queries) MarkVMDeleted(ctx context.Context, id int64) error {
 	return err
 }
 
+const markVMError = `-- name: MarkVMError :exec
+UPDATE vms SET state = 'error', busy = NULL, rebuild_template_id = NULL, rebuild_keys = NULL WHERE id = $1
+`
+
+func (q *Queries) MarkVMError(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, markVMError, id)
+	return err
+}
+
 const releaseIPForVM = `-- name: ReleaseIPForVM :exec
 UPDATE ip_addresses SET vm_id = NULL WHERE vm_id = $1
 `
@@ -553,7 +665,7 @@ func (q *Queries) ReleaseIPForVM(ctx context.Context, vmID pgtype.Int8) error {
 }
 
 const releaseVMBusy = `-- name: ReleaseVMBusy :exec
-UPDATE vms SET busy = NULL, resize_plan_id = NULL WHERE id = $1
+UPDATE vms SET busy = NULL, resize_plan_id = NULL, rebuild_template_id = NULL, rebuild_keys = NULL WHERE id = $1
 `
 
 func (q *Queries) ReleaseVMBusy(ctx context.Context, id int64) error {

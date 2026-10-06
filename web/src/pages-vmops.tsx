@@ -2,13 +2,14 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Plan, type VM } from "./api";
 import { formatDate, formatUSDT, memLabel } from "./format";
-import { usePlans } from "./hooks";
+import { usePlans, useSSHKeys, useTemplates } from "./hooks";
 import { Banner, Button, Card, ConfirmDialog, ErrorText, Input } from "./ui";
 
 const busyText: Record<string, string> = {
   resizing: "Resizing. The VM restarts when it finishes; this page updates by itself.",
   snapshotting: "Working on a snapshot. This page updates by itself.",
   restoring: "Restoring a snapshot. The VM restarts when it finishes; this page updates by itself.",
+  rebuilding: "Rebuilding. The VM is being reinstalled and will be running again in a couple of minutes; this page updates by itself.",
 };
 
 /** What the worker is doing to the VM right now, if anything. */
@@ -182,6 +183,76 @@ export function SnapshotsCard({ vm, list }: { vm: VM; list: SnapshotList | undef
             The disk goes back to how it was on {formatDate(restoring.created_at)}. Everything written since then is lost.
             {vm.state === "running" && " The VM is stopped and started again."}
           </p>
+        </ConfirmDialog>
+      )}
+    </Card>
+  );
+}
+
+/** Reinstall from a template. Erases the disk; keeps the IP, plan and name. Also how to regain access after losing a key. */
+export function RebuildCard({ vm }: { vm: VM }) {
+  const qc = useQueryClient();
+  const templates = useTemplates();
+  const keys = useSSHKeys();
+  const [open, setOpen] = useState(false);
+  const [template, setTemplate] = useState(vm.template);
+  const [chosen, setChosen] = useState<number[]>([]);
+  const rebuild = useMutation({
+    mutationFn: () => api(`/vms/${vm.id}/rebuild`, { json: { template, ssh_key_ids: chosen, confirm: true } }),
+    onSuccess: () => {
+      setOpen(false);
+      qc.invalidateQueries({ queryKey: ["vm", String(vm.id)] });
+      qc.invalidateQueries({ queryKey: ["snapshots", String(vm.id)] });
+    },
+  });
+  const settled = (vm.state === "running" || vm.state === "stopped") && !vm.busy;
+  const toggle = (id: number) => setChosen((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]));
+
+  return (
+    <Card className="space-y-3">
+      <h2 className="font-medium text-slate-900 dark:text-slate-50">Rebuild</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400">
+        Reinstall the operating system from a clean template. Everything on the disk is erased, snapshots included. The IP address, plan and name stay.
+        Use it to start over, switch system, or get back in after losing your SSH key.
+      </p>
+      <Button variant="secondary" disabled={!settled} onClick={() => setOpen(true)}>
+        Rebuild…
+      </Button>
+      {open && (
+        <ConfirmDialog
+          title={`Rebuild ${vm.hostname}?`}
+          confirmLabel="Erase and rebuild"
+          typeToConfirm={vm.hostname}
+          busy={rebuild.isPending}
+          error={rebuild.error}
+          onConfirm={() => rebuild.mutate()}
+          onCancel={() => setOpen(false)}
+        >
+          <p>All data on this VM is erased and cannot be recovered. The VM is off for a couple of minutes.</p>
+          <label className="block space-y-1">
+            <span className="text-slate-700 dark:text-slate-200">System</span>
+            <select
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+              value={template}
+              onChange={(e) => setTemplate(e.target.value)}
+            >
+              {(templates.data ?? []).map((t) => (
+                <option key={t.slug} value={t.slug}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <fieldset className="space-y-1">
+            <legend className="text-slate-700 dark:text-slate-200">SSH keys</legend>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Leave all unticked to keep the keys the VM already has.</p>
+            {(keys.data ?? []).map((k) => (
+              <label key={k.id} className="flex items-center gap-2">
+                <input type="checkbox" checked={chosen.includes(k.id)} onChange={() => toggle(k.id)} />
+                <span>{k.name}</span>
+              </label>
+            ))}
+          </fieldset>
         </ConfirmDialog>
       )}
     </Card>

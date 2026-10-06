@@ -193,28 +193,30 @@ type User struct {
 }
 
 type Vm struct {
-	ID              int64              `json:"id"`
-	UserID          int64              `json:"user_id"`
-	Region          string             `json:"region"`
-	PlanID          int64              `json:"plan_id"`
-	TemplateID      int64              `json:"template_id"`
-	ProxmoxVmid     pgtype.Int4        `json:"proxmox_vmid"`
-	Hostname        string             `json:"hostname"`
-	Ipv4ID          pgtype.Int8        `json:"ipv4_id"`
-	Ipv6            pgtype.Text        `json:"ipv6"`
-	State           string             `json:"state"`
-	SuspendedAt     pgtype.Timestamptz `json:"suspended_at"`
-	Port25Unblocked bool               `json:"port25_unblocked"`
-	CreatedAt       time.Time          `json:"created_at"`
-	DeletedAt       pgtype.Timestamptz `json:"deleted_at"`
-	AuthorizedKeys  string             `json:"authorized_keys"`
-	BillingFrom     pgtype.Timestamptz `json:"billing_from"`
-	BillingUntil    pgtype.Timestamptz `json:"billing_until"`
-	CpuHighSince    pgtype.Timestamptz `json:"cpu_high_since"`
-	FlaggedAt       pgtype.Timestamptz `json:"flagged_at"`
-	FlagReason      pgtype.Text        `json:"flag_reason"`
-	Busy            pgtype.Text        `json:"busy"`
-	ResizePlanID    pgtype.Int8        `json:"resize_plan_id"`
+	ID                int64              `json:"id"`
+	UserID            int64              `json:"user_id"`
+	Region            string             `json:"region"`
+	PlanID            int64              `json:"plan_id"`
+	TemplateID        int64              `json:"template_id"`
+	ProxmoxVmid       pgtype.Int4        `json:"proxmox_vmid"`
+	Hostname          string             `json:"hostname"`
+	Ipv4ID            pgtype.Int8        `json:"ipv4_id"`
+	Ipv6              pgtype.Text        `json:"ipv6"`
+	State             string             `json:"state"`
+	SuspendedAt       pgtype.Timestamptz `json:"suspended_at"`
+	Port25Unblocked   bool               `json:"port25_unblocked"`
+	CreatedAt         time.Time          `json:"created_at"`
+	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
+	AuthorizedKeys    string             `json:"authorized_keys"`
+	BillingFrom       pgtype.Timestamptz `json:"billing_from"`
+	BillingUntil      pgtype.Timestamptz `json:"billing_until"`
+	CpuHighSince      pgtype.Timestamptz `json:"cpu_high_since"`
+	FlaggedAt         pgtype.Timestamptz `json:"flagged_at"`
+	FlagReason        pgtype.Text        `json:"flag_reason"`
+	Busy              pgtype.Text        `json:"busy"`
+	ResizePlanID      pgtype.Int8        `json:"resize_plan_id"`
+	RebuildTemplateID pgtype.Int8        `json:"rebuild_template_id"`
+	RebuildKeys       pgtype.Text        `json:"rebuild_keys"`
 }
 
 type WebhookEvent struct {
