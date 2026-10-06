@@ -215,7 +215,22 @@
 
 ---
 
-## Open questions for your review
+## Decisions made (review answers)
+
+| # | Item | Decision |
+|---|---|---|
+| 4 | Closing with a balance above dust (0.50 USDT) | **Refuse and settle by hand**: closure is blocked with a message; after you pay the customer back through iswallet, `xenosctl user close --settle` finishes it. |
+| 4 | Retention of financial records | **6 years**, as a setting (`XENOS_FINANCIAL_RETENTION_YEARS`, default 6); personal data is removed after the 30-day grace. Confirm the number with your accountant before launch. |
+| 3 | Statements | **Printable page plus CSV.** No server-generated PDF invoices now; those are a separate later item. |
+| 5 | Metrics | **Loopback listeners, Prometheus on the same server.** |
+| 6 | Anti-spoofing | **Enable the Proxmox VM firewall (ipfilter and macfilter) for every VM.** The Proxmox firewall must be switched on at datacenter and node level on each host; the preflight check will say so. |
+| 6 | Floating IP price | **Billed hourly, attached or not**, one price you set with the plan prices. |
+| 7 | Second host | **Same provider**, so the routed-subnet model is the same; **secrets in a hosts file** on the control plane, non-secret state in the database. |
+| 8 | Private networks | **Same-host networks now**, with the cross-host tunnel recipe documented; the tunnel itself is yours to set up on the hosts. |
+| 1 | Plan price changes | **Apply to existing VMs from the next charged hour**; the command shows the affected VM count and needs `--yes`. Telling customers in advance is a policy step, not code. |
+| 2 | CI | GitHub Actions assumed (not asked; say so if the repository is elsewhere). |
+
+## Open questions for your review (answered above except where noted)
 
 1. **Deletion (#4):** forfeit, refuse, or settle-by-hand for balances above dust? Retention period for financial records?
 2. **Statements (#3):** is a printable page enough, or do business customers need server-generated PDF invoices (that is a larger item with VAT and numbering, closer to PGDock's invoice work)?
