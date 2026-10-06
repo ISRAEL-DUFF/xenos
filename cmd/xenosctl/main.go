@@ -9,12 +9,14 @@
 //	xenosctl flag clear <vm-id>                        dismiss a flag after review
 //	xenosctl port25 allow|block <vm-id>                exempt a reviewed VM from the outbound SMTP block
 //	xenosctl firewall nft [bridge]                     print the nftables ruleset to load on the Proxmox host
+//	xenosctl preflight [--send-test <email>]           check config, database, iswallet, Proxmox, email and the worker before launch (exit 1 on any FAIL)
 //	xenosctl ispend subscribe <https-url>              register our webhook endpoint with iswallet (prints the signing secret ONCE)
 package main
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"strconv"
@@ -25,8 +27,11 @@ import (
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/firewall"
 	"github.com/israel-duff/xenos/internal/jobs"
+	"github.com/israel-duff/xenos/internal/mail"
+	"github.com/israel-duff/xenos/internal/preflight"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
+	"github.com/israel-duff/xenos/internal/worker"
 )
 
 func main() {
@@ -39,6 +44,9 @@ func main() {
 func run(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: xenosctl ip add|list | admin grant <email> | user limit|ban|unban ... | flagged | flag clear <id> | port25 allow|block <id> | firewall nft")
+	}
+	if args[0] == "preflight" {
+		return preflightCmd(context.Background(), args[1:])
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -264,5 +272,61 @@ func subscribeWebhook(ctx context.Context, cfg config.Config, endpoint string) e
 		return nil
 	}
 	fmt.Printf("signing secret (shown once, store it now):\n  XENOS_ISPEND_WEBHOOK_SECRET=%s\n", secret)
+	return nil
+}
+
+// preflightCmd runs every deployment check and prints one line each. A configuration that would not even
+// start the services is reported as a failed check rather than an abort, so the rest still runs.
+func preflightCmd(ctx context.Context, args []string) error {
+	var sendTo string
+	if len(args) == 2 && args[0] == "--send-test" {
+		sendTo = args[1]
+	} else if len(args) != 0 {
+		return fmt.Errorf("usage: xenosctl preflight [--send-test <email>]")
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	cfg, err := config.Load()
+	if err != nil {
+		// Keep going with what loaded: the problem is the first line of the report.
+		fmt.Printf("FAIL  config                 %v\n\n", err)
+		cfg, _ = config.LoadUnchecked()
+	}
+	d := preflight.Deps{Cfg: cfg}
+	if cfg.DatabaseURL != "" {
+		if st, err := store.Open(ctx, cfg.DatabaseURL); err == nil {
+			defer st.Close()
+			d.Store = st
+		}
+	}
+	if is, err := billing.FromConfig(cfg, log); err == nil {
+		d.ISpend = is
+	}
+	d.PVE = worker.NewProxmox(cfg, log)
+	d.Mailer, _ = mail.New(cfg, log)
+	if sendTo != "" {
+		if d.Mailer == nil {
+			return fmt.Errorf("no mailer is configured")
+		}
+		if err := d.Mailer.Send(ctx, sendTo, "Xenos preflight test", "If you can read this, Xenos can send email."); err != nil {
+			fmt.Printf("FAIL  email test send        %v\n", err)
+		} else {
+			fmt.Printf("ok    email test send        delivered to the provider for %s: check that it arrives\n", sendTo)
+		}
+	}
+
+	results := preflight.Run(ctx, d)
+	group := ""
+	for _, r := range results {
+		if r.Group != group {
+			group = r.Group
+			fmt.Printf("\n%s\n", strings.ToUpper(group))
+		}
+		fmt.Printf("  %-5s %-26s %s\n", r.Status, r.Name, r.Detail)
+	}
+	ok, warn, fail := preflight.Summary(results)
+	fmt.Printf("\n%d ok, %d warnings, %d failures\n", ok, warn, fail)
+	if fail > 0 {
+		os.Exit(1)
+	}
 	return nil
 }

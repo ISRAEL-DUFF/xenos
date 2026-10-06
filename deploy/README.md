@@ -114,3 +114,7 @@ Set up the Storage Box SSH key (port 23) and create the `xenos-db/` directory on
 - Deploy: replace binaries, `systemctl restart xenos-api xenos-worker`. Stopping the worker lets the current provisioning step finish (up to 60s); an interrupted job is requeued, not lost.
 - Abuse: `xenosctl flagged`, `xenosctl user ban <email>`, `xenosctl port25 allow <vm-id>` (then reload the firewall, see the Proxmox README).
 - The worker requeues every job left `running` at startup. That is only correct with a single worker; never start a second one.
+
+## Before launch
+
+`xenosctl preflight [--send-test <email>]` checks the deployment end to end (config, database and IP pool, iswallet, Proxmox and templates, SMTP, worker heartbeat) and exits 1 on any failure. Run it after every config change.

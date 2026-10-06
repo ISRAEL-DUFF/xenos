@@ -2,7 +2,7 @@
 
 This is the plan's acceptance checklist. Items marked **auto** are covered by tests in this repository and run with `go test ./...` (the integration tests need `XENOS_TEST_DATABASE_URL`, see the README). Items marked **host** or **manual** can only be proven on the real systems and must be ticked by a person.
 
-Run with the iSpend sandbox and test keys first. Switch to live only when every box is ticked.
+Run `xenosctl preflight` on the server first (add `--send-test you@example.com` to send a real email): it checks configuration, database, iswallet, Proxmox, email and the worker, and exits 1 on any failure. Then run with the iSpend sandbox and test keys first. Switch to live only when every box is ticked.
 
 ## Accounts and wallet
 

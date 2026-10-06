@@ -54,7 +54,13 @@ type Config struct {
 	FakeISpendCredit     int64  // dev only: USDT (micro) given to each new customer of the fake iSpend
 }
 
-func Load() (Config, error) {
+// LoadUnchecked is Load without the production checks, for tools (preflight) that report problems instead of
+// refusing to start.
+func LoadUnchecked() (Config, error) { return load(false) }
+
+func Load() (Config, error) { return load(true) }
+
+func load(check bool) (Config, error) {
 	c := Config{
 		Env:          get("XENOS_ENV", "development"),
 		HTTPAddr:     get("XENOS_HTTP_ADDR", "127.0.0.1:8080"),
@@ -132,8 +138,10 @@ func Load() (Config, error) {
 		}
 		c.TrustedProxies = append(c.TrustedProxies, p)
 	}
-	if err := c.checkProduction(); err != nil {
-		return c, err
+	if check {
+		if err := c.checkProduction(); err != nil {
+			return c, err
+		}
 	}
 	return c, nil
 }

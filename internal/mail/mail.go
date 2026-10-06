@@ -132,3 +132,45 @@ func checkHeader(vals ...string) error {
 	}
 	return nil
 }
+
+// Verify connects, negotiates TLS and authenticates without sending anything: a deployment check.
+func (m *SMTPMailer) Verify(ctx context.Context) error {
+	timeout := m.Timeout
+	if timeout == 0 {
+		timeout = 20 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	d := net.Dialer{}
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(m.Host, m.Port))
+	if err != nil {
+		return err
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+	tlsCfg := &tls.Config{ServerName: m.Host, MinVersion: tls.VersionTLS12}
+	if m.Port == "465" {
+		conn = tls.Client(conn, tlsCfg)
+	}
+	c, err := smtp.NewClient(conn, m.Host)
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	defer c.Close()
+	if m.Port != "465" {
+		if ok, _ := c.Extension("STARTTLS"); !ok {
+			return errors.New("server does not offer STARTTLS")
+		}
+		if err := c.StartTLS(tlsCfg); err != nil {
+			return err
+		}
+	}
+	if m.User != "" {
+		if err := c.Auth(smtp.PlainAuth("", m.User, m.Pass, m.Host)); err != nil {
+			return err
+		}
+	}
+	return c.Quit()
+}
