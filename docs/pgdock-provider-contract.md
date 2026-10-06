@@ -111,7 +111,7 @@ Check `runway_hours` before creating servers: a create needs the balance to cove
 | PGDock V3 expects | Xenos today | Plan |
 |---|---|---|
 | **HA on different physical hosts** (§2.2, placement group) | One Proxmox host. Two VMs share a host, so a host failure takes both. | A second host and a placement rule are on the Xenos backlog. **Until then do not sell the HA SLA on Xenos-backed nodes.** |
-| **Floating IP** for the pooler pair (§2.1) | Each VM has one fixed routed address; VRRP on a routed /32 does not work. | Needs reassignable IPs in Xenos (not built). Workaround for now: DNS-based failover for the pooler, with the health checker updating a low-TTL record. |
+| **Floating IP** for the pooler pair (§2.1) | Each VM has one fixed routed address. VRRP between two VMs on the **same host's bridge** may work (they share layer 2) but is untested and nothing stops other tenants spoofing the address; across hosts it cannot work. | Reassignable, billed floating IPs with anti-spoofing are planned (docs/build-plan-next.md #6). Workaround for now: DNS-based failover for the pooler, with the health checker updating a low-TTL record. |
 | **Volumes** (`CreateVolume`/`AttachVolume`) | None. Disk is part of the plan and can grow by resizing the plan. | Use larger plans for storage-heavy nodes. Separate volumes are not planned for V1. |
 | **Private network** between nodes (§5.1 cloud-init joins one) | VMs have public addresses only, on the same bridge. | Use WireGuard between PGDock nodes, or restrict by firewall to the known addresses. A private network is a Xenos backlog item. |
 | **cloud-init user data** | Boot script via the guest agent (§4). | As §4. |
