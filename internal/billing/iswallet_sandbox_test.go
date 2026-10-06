@@ -106,14 +106,12 @@ func TestSandboxEndToEnd(t *testing.T) {
 	} else {
 		t.Logf("✓ create customer is idempotent (same key, same payload)")
 	}
-	// A new key for the same owner_ref is WALLET_ALREADY_EXISTS. The guide says original_response
-	// carries the existing wallet; the live sandbox returns an EMPTY one, so we cannot recover the id
-	// and surface the 409. (Our stable per-user signup key avoids this path.)
-	var api *APIError
-	if again, err := c.CreateCustomer(ctx, "sbx-signup-b:"+stamp, "user:"+stamp, email, "+2348030000000"); !errors.As(err, &api) || api.Code != "WALLET_ALREADY_EXISTS" || again.ID != "" {
-		t.Errorf("same owner_ref under a new key: got %+v %v, want the WALLET_ALREADY_EXISTS error", again, err)
+	// A new key for the same owner_ref is WALLET_ALREADY_EXISTS; iswallet now returns the existing wallet
+	// in original_response, so the client treats it as success and gets the same wallet back.
+	if again, err := c.CreateCustomer(ctx, "sbx-signup-b:"+stamp, "user:"+stamp, email, "+2348030000000"); err != nil || again.ID != cust.ID {
+		t.Errorf("same owner_ref under a new key must recover the existing wallet: %+v %v", again, err)
 	} else {
-		t.Logf("✓ WALLET_ALREADY_EXISTS surfaced (its original_response is empty in the sandbox, contrary to the guide)")
+		t.Logf("✓ WALLET_ALREADY_EXISTS recovers the existing wallet")
 	}
 	// The same key with a different payload is refused.
 	if _, err := c.CreateCustomer(ctx, "sbx-signup:"+stamp, "user:"+stamp, email, ""); !errors.Is(err, ErrIdempotencyKeyReused) {
@@ -255,11 +253,31 @@ func TestSandboxEndToEnd(t *testing.T) {
 			sandboxExpiry(t, c, ctx, stamp, cust.ID, b.NGNKobo)
 		}
 	}
-	if d3 := sandboxDeposit(t, c, ctx, "sbx-dep3:"+stamp, cust, 700_000); d3 != nil {
+	// The reversal bug only showed with two customers in the sandbox: reverse one's deposit and check the
+	// other's balance is untouched.
+	other, err := c.CreateCustomer(ctx, "sbx-signup2:"+stamp, "user2:"+stamp, "sbx2-"+stamp+"@example.com", "")
+	if err != nil {
+		report(t, "second customer", err)
+	} else if d3 := sandboxDeposit(t, c, ctx, "sbx-dep3:"+stamp, cust, 700_000); d3 != nil {
+		sandboxDeposit(t, c, ctx, "sbx-dep4:"+stamp, other, 700_000)
 		before, _ := c.Balances(ctx, cust.ID)
+		otherBefore, _ := c.Balances(ctx, other.ID)
 		sandboxReversal(t, c, ctx, stamp, d3)
-		after, err := c.Balances(ctx, cust.ID)
-		t.Logf("  NGN before the reversal %d, after %d (%v)", before.NGNKobo, after.NGNKobo, err)
+		var after Balances
+		for i := 0; i < 10; i++ {
+			if after, _ = c.Balances(ctx, cust.ID); after.NGNKobo != before.NGNKobo {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		otherAfter, _ := c.Balances(ctx, other.ID)
+		t.Logf("  NGN before the reversal %d, after %d; the other customer %d -> %d", before.NGNKobo, after.NGNKobo, otherBefore.NGNKobo, otherAfter.NGNKobo)
+		if after.NGNKobo != before.NGNKobo-690_200 {
+			t.Errorf("reversal did not take back the net 690,200 kobo from the right wallet")
+		}
+		if otherAfter.NGNKobo != otherBefore.NGNKobo {
+			t.Errorf("the reversal touched another customer's wallet")
+		}
 	}
 	fmt.Println()
 }

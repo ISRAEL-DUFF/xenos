@@ -30,7 +30,22 @@ All six blocking questions were answered. What we did with each:
 
 ---
 
+## 1e. Fixes deployed by iswallet, re-verified (6 October 2026)
+
+iswallet confirmed F11–F13 and the empty `original_response` as defects and fixed them; the 1.4% deposit fee (F4) is real (Flutterwave, capped at ₦2,000; `pass_through` by default, `absorb` available on request). Verified live, with our three workarounds **removed**:
+
+- A conversion credits the customer's own wallet: USDT appears in its `balances[]`. The `owner_ref` sibling lookup is deleted.
+- Charges and adjustments use `operating_wallet_id` directly, both directions. The USDT wallet we had created for the operating account is no longer used or created.
+- `WALLET_ALREADY_EXISTS` returns the existing wallet in `original_response`; the client recovers it (tested live).
+- Reversal with two customers: only the reversed customer's wallet changes, by the net amount, within seconds.
+
+Left over on iswallet's side: the per-currency wallets our earlier sandbox runs created (`acc998fc-…` and others) and `f0c01a29-…` still hold balances. Sandbox only; we have asked for them to be swept. Still outstanding from iswallet: error catalogue, **lookup by idempotency key** (they call it the top item), `Retry-After`, USDT limits, per-client rate limit and batch charge. Decision for the business: keep fee `pass_through` (customers see ₦49,300 of ₦50,000) or ask for `absorb`.
+
+---
+
 ## 1d. Third live run, after the funding addendum (6 October 2026)
+
+*The three workarounds this section describes were removed after iswallet fixed them: see §1e.*
 
 Followed the addendum (liquidity seed, crypto-deposit). `TestSandboxEndToEnd` now passes in full. Verified live:
 
