@@ -104,5 +104,5 @@ Auth for the dashboard is the httpOnly session cookie with a CSRF header; bearer
 ## Status
 
 All five phases are code-complete and tested against fakes. What is **not** verified: anything on a real Proxmox host (provisioning, cloud-init networking, the SMTP block, `vzdump`), the real iswallet service (the client passes its contract tests and the live sandbox end-to-end run; the real webhook is untested because we have no public webhook URL), and the real Telegram/email alert channel.
-Not built: BVN / TIER_2 upgrade, card funding (iswallet has none), email delivery (emails are logged), and the browser console and other backlog items from the plan.
+Not built: BVN / TIER_2 upgrade, card funding (iswallet has none), and the browser console and other backlog items from the plan.
 Plan prices in the seed migration are placeholders.
