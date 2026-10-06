@@ -68,6 +68,18 @@ func (s *stubServer) last() stubReq {
 
 func defaultReply(r stubReq) (int, string) {
 	switch {
+	case r.Method == "GET" && r.Path == "/v1/wallets": // as the live sandbox: conversion adds a sibling USDT wallet
+		if strings.Contains(r.Query, "owner_ref=op") {
+			return 200, `{"wallets":[{"wallet_id":"wal_op","owner_ref":"op","currency":"NGN"},{"wallet_id":"wal_opusdt","owner_ref":"op","currency":"USDT"}],"total":2}`
+		}
+		return 200, `{"wallets":[{"wallet_id":"wal_usdt","owner_ref":"o","currency":"USDT"},{"wallet_id":"wal_cust","owner_ref":"o","currency":"NGN"}],"total":2}`
+	case r.Method == "GET" && strings.HasPrefix(r.Path, "/v1/wallets/") && strings.Count(r.Path, "/") == 3:
+		id := strings.TrimPrefix(r.Path, "/v1/wallets/")
+		ref := "o"
+		if id == "wal_op" {
+			ref = "op"
+		}
+		return 200, `{"wallet_id":"` + id + `","owner_ref":"` + ref + `","owner_type":"client","currency":"NGN"}`
 	case r.Path == "/v1/wallets":
 		if r.Body["client_id"] != "xenos" { // as the live sandbox does
 			return 403, `{"error":{"code":"SCOPE_INSUFFICIENT","message":"client_id must match your API key's client_id"}}`
@@ -283,8 +295,8 @@ func TestChargeAndAdjust(t *testing.T) {
 	}
 	r := s.last()
 	// 6,000 micro-USDT is 6,000 minor units; the destination is the operating wallet from /v1/platform/account.
-	if r.Path != "/v1/transfers" || r.IdemKey != "vm:42:hour:2026100514" || r.Body["from_wallet_id"] != "wal_cust" ||
-		r.Body["to_wallet_id"] != "wal_op" || r.Body["amount"] != float64(6000) || r.Body["currency"] != "USDT" ||
+	if r.Path != "/v1/transfers" || r.IdemKey != "vm:42:hour:2026100514" || r.Body["from_wallet_id"] != "wal_usdt" ||
+		r.Body["to_wallet_id"] != "wal_opusdt" || r.Body["amount"] != float64(6000) || r.Body["currency"] != "USDT" ||
 		r.Body["narration"] != "vm:42 hour:2026100514" {
 		t.Fatalf("charge request: %+v", r)
 	}
@@ -293,13 +305,13 @@ func TestChargeAndAdjust(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = s.last()
-	if r.Body["from_wallet_id"] != "wal_op" || r.Body["to_wallet_id"] != "wal_cust" || r.Body["amount"] != float64(2_000_000) || r.Body["narration"] != "adjustment: goodwill" {
+	if r.Body["from_wallet_id"] != "wal_opusdt" || r.Body["to_wallet_id"] != "wal_usdt" || r.Body["amount"] != float64(2_000_000) || r.Body["narration"] != "adjustment: goodwill" {
 		t.Fatalf("a credit is paid from the merchant wallet: %+v", r)
 	}
 	if _, err := c.Adjust(ctx, "adjustment:2", "wal_cust", -1_000_000, "correction"); err != nil {
 		t.Fatal(err)
 	}
-	if r = s.last(); r.Body["from_wallet_id"] != "wal_cust" || r.Body["to_wallet_id"] != "wal_op" || r.Body["amount"] != float64(1_000_000) {
+	if r = s.last(); r.Body["from_wallet_id"] != "wal_usdt" || r.Body["to_wallet_id"] != "wal_opusdt" || r.Body["amount"] != float64(1_000_000) {
 		t.Fatalf("a debit is collected into the merchant wallet: %+v", r)
 	}
 }
@@ -408,7 +420,13 @@ func TestMerchantWalletComesFromPlatformAccountAndIsCached(t *testing.T) {
 }
 
 func TestMerchantBalance(t *testing.T) {
-	_, c := newStub(t)
+	s, c := newStub(t)
+	s.reply = func(r stubReq) (int, string) {
+		if r.Path == "/v1/wallets/wal_opusdt/balance" {
+			return 200, `{"balances":[{"currency":"USDT","available":8000000,"scale":6}]}`
+		}
+		return 0, ""
+	}
 	if b, err := c.MerchantBalance(context.Background()); err != nil || b != 8_000_000 {
 		t.Fatalf("operating wallet available USDT = %d %v", b, err)
 	}
@@ -463,5 +481,81 @@ func TestOwnClientSideRateLimit(t *testing.T) {
 	}
 	if d := time.Since(start); d < 800*time.Millisecond {
 		t.Fatalf("3 calls took %v: the client must pace itself under iswallet's 100/min limit", d)
+	}
+}
+
+// The live sandbox keeps a customer's USDT in a sibling wallet that conversion creates: balances of the
+// NGN wallet never list it, so Balances reads the sibling too, and charges are taken from it.
+func TestUSDTLivesInASiblingWallet(t *testing.T) {
+	s, c := newStub(t)
+	s.reply = func(r stubReq) (int, string) {
+		switch r.Path {
+		case "/v1/wallets/wal_cust/balance":
+			return 200, `{"balances":[{"currency":"NGN","available":100,"scale":2}]}`
+		case "/v1/wallets/wal_usdt/balance":
+			return 200, `{"balances":[{"currency":"USDT","available":35842347,"scale":6}]}`
+		}
+		return 0, ""
+	}
+	b, err := c.Balances(context.Background(), "wal_cust")
+	if err != nil || b.NGNKobo != 100 || b.USDTMicro != 35_842_347 {
+		t.Fatalf("balances = %+v %v", b, err)
+	}
+}
+
+// Before the first conversion there is no USDT wallet: the charge goes to iswallet with the NGN wallet
+// and is answered CURRENCY_MISMATCH, which metering already treats as "not an outage".
+func TestNoUSDTWalletYet(t *testing.T) {
+	s, c := newStub(t)
+	s.reply = func(r stubReq) (int, string) {
+		switch {
+		case r.Method == "GET" && r.Path == "/v1/wallets":
+			return 200, `{"wallets":[{"wallet_id":"wal_cust","owner_ref":"o","currency":"NGN"}],"total":1}`
+		case r.Path == "/v1/transfers":
+			return 422, `{"error":{"code":"CURRENCY_MISMATCH","message":"wallets must share currency USDT"}}`
+		}
+		return 0, ""
+	}
+	if _, err := c.Charge(context.Background(), "k", "wal_cust", 6000, "n"); !errors.Is(err, ErrCurrencyMismatch) {
+		t.Fatalf("got %v, want ErrCurrencyMismatch", err)
+	}
+}
+
+// The operating wallet is NGN-currency; transfers need a USDT wallet of its own, which is created once
+// (under a stable idempotency key) when it does not exist yet.
+func TestOperatingUSDTWalletIsCreatedWhenMissing(t *testing.T) {
+	s, c := newStub(t)
+	s.reply = func(r stubReq) (int, string) {
+		if r.Method == "GET" && r.Path == "/v1/wallets" {
+			return 200, `{"wallets":[{"wallet_id":"wal_op","owner_ref":"op","currency":"NGN"}],"total":1}`
+		}
+		if r.Method == "POST" && r.Path == "/v1/wallets" {
+			if r.Body["currency"] != "USDT" || r.Body["owner_ref"] != "op" || r.Body["owner_type"] != "client" || r.Body["client_id"] != "xenos" {
+				t.Errorf("create body: %+v", r.Body)
+			}
+			return 201, `{"wallet_id":"wal_new_usdt","currency":"USDT"}`
+		}
+		return 0, ""
+	}
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		if _, err := c.Charge(ctx, "k"+string(rune('a'+i)), "wal_cust", 6000, "n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := s.last().Body["to_wallet_id"]; got != "wal_new_usdt" {
+		t.Fatalf("charged into %v", got)
+	}
+	creates := 0
+	for _, r := range s.reqs {
+		if r.Method == "POST" && r.Path == "/v1/wallets" {
+			creates++
+			if r.IdemKey != "usdt-wallet:wal_op" {
+				t.Errorf("idempotency key %q", r.IdemKey)
+			}
+		}
+	}
+	if creates != 1 {
+		t.Fatalf("created %d times, want once", creates)
 	}
 }

@@ -39,9 +39,10 @@ type ISWallet struct {
 
 	limiter *rate.Limiter
 
-	mu         sync.Mutex
-	operatingW string // resolved from /v1/platform/account when MerchantWallet is empty
-	clientID   string // our tenant's client_id, from /v1/platform/account
+	mu          sync.Mutex
+	usdtWallets map[string]string // customer wallet id -> sibling USDT wallet id
+	operatingW  string            // resolved from /v1/platform/account when MerchantWallet is empty
+	clientID    string            // our tenant's client_id, from /v1/platform/account
 }
 
 // ISWalletConfig builds a client.
@@ -310,6 +311,7 @@ func (c *ISWallet) Balances(ctx context.Context, id string) (Balances, error) {
 		return Balances{}, err
 	}
 	var b Balances
+	hasUSDT := false
 	for _, e := range out.Balances {
 		switch e.Currency {
 		case "NGN":
@@ -322,9 +324,98 @@ func (c *ISWallet) Balances(ctx context.Context, id string) (Balances, error) {
 				return Balances{}, fmt.Errorf("%w: USDT scale %d, expected %d", ErrScaleMismatch, *e.Scale, c.USDTDecimals)
 			}
 			b.USDTMicro = MinorToMicro(e.Available, c.USDTDecimals)
+			hasUSDT = true
+		}
+	}
+	if !hasUSDT {
+		// The live sandbox keeps USDT in a SIBLING wallet (same owner_ref, currency USDT) that conversion
+		// creates; the NGN wallet's balances[] never lists it. Read that wallet too.
+		usdt, err := c.usdtWallet(ctx, id)
+		if err != nil {
+			return Balances{}, err
+		}
+		if usdt != id {
+			sub, err := c.Balances(ctx, usdt)
+			if err != nil {
+				return Balances{}, err
+			}
+			b.USDTMicro = sub.USDTMicro
 		}
 	}
 	return b, nil
+}
+
+// usdtWallet resolves the wallet that holds a customer's USDT. Conversion creates it as a second wallet
+// under the same owner_ref (found via GET /v1/wallets?owner_ref=); until then the customer has none and
+// the given id is returned unchanged (iswallet then answers CURRENCY_MISMATCH, which callers handle).
+// Only a found sibling is cached: it never changes.
+func (c *ISWallet) usdtWallet(ctx context.Context, id string) (string, error) {
+	return c.usdtWalletFor(ctx, id, false)
+}
+
+// usdtWalletFor is usdtWallet, optionally creating the sibling when there is none. Only the operating
+// wallet needs that: it is NGN-currency with a USDT balance entry, and transfers refuse it ("wallets must
+// share currency USDT") until it has a USDT wallet of its own.
+func (c *ISWallet) usdtWalletFor(ctx context.Context, id string, create bool) (string, error) {
+	c.mu.Lock()
+	cached, ok := c.usdtWallets[id]
+	c.mu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	var w struct {
+		OwnerType string `json:"owner_type"`
+		OwnerRef  string `json:"owner_ref"`
+		Currency  string `json:"currency"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/wallets/"+url.PathEscape(id), "", nil, &w); err != nil {
+		return "", err
+	}
+	if w.Currency == "USDT" || w.OwnerRef == "" {
+		return id, nil
+	}
+	var list struct {
+		Wallets []struct {
+			WalletID string `json:"wallet_id"`
+			Currency string `json:"currency"`
+		} `json:"wallets"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/wallets?owner_ref="+url.QueryEscape(w.OwnerRef), "", nil, &list); err != nil {
+		return "", err
+	}
+	for _, x := range list.Wallets {
+		if x.Currency == "USDT" {
+			c.mu.Lock()
+			if c.usdtWallets == nil {
+				c.usdtWallets = map[string]string{}
+			}
+			c.usdtWallets[id] = x.WalletID
+			c.mu.Unlock()
+			return x.WalletID, nil
+		}
+	}
+	if !create {
+		return id, nil
+	}
+	clientID, err := c.tenantClientID(ctx)
+	if err != nil {
+		return "", err
+	}
+	var made walletJSON
+	in := map[string]string{"owner_type": w.OwnerType, "owner_ref": w.OwnerRef, "currency": "USDT", "client_id": clientID}
+	if err := c.do(ctx, http.MethodPost, "/v1/wallets", "usdt-wallet:"+id, in, &made); err != nil {
+		return "", err
+	}
+	if made.WalletID == "" {
+		return "", errors.New("iswallet: creating the USDT wallet returned no wallet_id")
+	}
+	c.mu.Lock()
+	if c.usdtWallets == nil {
+		c.usdtWallets = map[string]string{}
+	}
+	c.usdtWallets[id] = made.WalletID
+	c.mu.Unlock()
+	return made.WalletID, nil
 }
 
 // loadAccount resolves (once) and caches the tenant's identity from GET /v1/platform/account:
@@ -355,7 +446,7 @@ func (c *ISWallet) merchantWallet(ctx context.Context) (string, error) {
 	if err := c.loadAccount(ctx); err != nil {
 		return "", err
 	}
-	return c.operatingW, nil
+	return c.usdtWalletFor(ctx, c.operatingW, true)
 }
 
 // tenantClientID is the client_id iswallet requires on wallet creation: it must match the API key's.
@@ -381,18 +472,14 @@ func (c *ISWallet) platformAccount(ctx context.Context) (platformAccount, error)
 	return a, err
 }
 
-// MerchantBalance is the available USDT in the Xenos operating wallet.
+// MerchantBalance is the available USDT in the Xenos operating USDT wallet.
 func (c *ISWallet) MerchantBalance(ctx context.Context) (int64, error) {
-	a, err := c.platformAccount(ctx)
+	w, err := c.merchantWallet(ctx)
 	if err != nil {
 		return 0, err
 	}
-	for _, b := range a.Balances {
-		if b.Currency == "USDT" {
-			return MinorToMicro(b.Available, c.USDTDecimals), nil
-		}
-	}
-	return 0, nil
+	b, err := c.Balances(ctx, w)
+	return b.USDTMicro, err
 }
 
 // ---- rates and conversion ----
@@ -482,7 +569,11 @@ func (c *ISWallet) Charge(ctx context.Context, key, customerID string, uusdt int
 	if err != nil {
 		return Movement{}, err
 	}
-	return c.transfer(ctx, key, customerID, merchant, uusdt, narration)
+	from, err := c.usdtWallet(ctx, customerID)
+	if err != nil {
+		return Movement{}, err
+	}
+	return c.transfer(ctx, key, from, merchant, uusdt, narration)
 }
 
 // Adjust is a transfer between the customer and the Xenos operating wallet, in either direction
@@ -497,10 +588,14 @@ func (c *ISWallet) Adjust(ctx context.Context, key, customerID string, uusdt int
 	if err != nil {
 		return Movement{}, err
 	}
-	if uusdt >= 0 {
-		return c.transfer(ctx, key, merchant, customerID, uusdt, "adjustment: "+note)
+	cust, err := c.usdtWallet(ctx, customerID)
+	if err != nil {
+		return Movement{}, err
 	}
-	return c.transfer(ctx, key, customerID, merchant, -uusdt, "adjustment: "+note)
+	if uusdt >= 0 {
+		return c.transfer(ctx, key, merchant, cust, uusdt, "adjustment: "+note)
+	}
+	return c.transfer(ctx, key, cust, merchant, -uusdt, "adjustment: "+note)
 }
 
 // ---- webhooks ----

@@ -24,9 +24,35 @@ All six blocking questions were answered. What we did with each:
 
 ## 1a. Still open
 
-1. **§7.2 example still shows `credit_amount: 30781`** in the *execute response*, although v1.1 corrected the *quote* to 30,781,000. If the response really reports micro-USDT, that example is a typo; if it is accurate it contradicts the quote by 1,000×. We treat the **quote** as the binding amount, record it, and **raise an operator alert if the execute response disagrees** (tested). Please confirm which is right.
+1. *(Resolved in §1d: a typo.)* **§7.2 example still shows `credit_amount: 30781`** in the *execute response*, although v1.1 corrected the *quote* to 30,781,000. If the response really reports micro-USDT, that example is a typo; if it is accurate it contradicts the quote by 1,000×. We treat the **quote** as the binding amount, record it, and **raise an operator alert if the execute response disagrees** (tested). Please confirm which is right.
 2. **`GET /v1/wallets/{id}/virtual-accounts`** exists but the guide shows no response shape. We do not call it; we keep our own copy of the account issued at signup and re-issue idempotently if it is missing. Tell us the shape and we will use it to reconcile.
 3. Awaiting from you: the **sandbox key**, the **error catalogue**, **lookup by idempotency key**, **`Retry-After`**, **USDT limits**, and later the per-client rate limit and batch charge.
+
+---
+
+## 1d. Third live run, after the funding addendum (6 October 2026)
+
+Followed the addendum (liquidity seed, crypto-deposit). `TestSandboxEndToEnd` now passes in full. Verified live:
+
+| Check | Result |
+|---|---|
+| Convert (₦49,300 → 35.845933 USDT) | Works. Execute `credit_amount` equals the quote's, in micro-USDT. §1a.1 is resolved: the guide's `30781` example was a typo. |
+| Convert replay (same key) | Returns the original. A used quote under a new key is `QUOTE_ALREADY_USED`. |
+| Charge 0.006 USDT, replay, changed amount | Moves exactly 6,000 micro-USDT; replay returns the original; changed amount is `IDEMPOTENCY_KEY_REUSED`. |
+| Overcharge | `INSUFFICIENT_FUNDS` (once the customer holds USDT). |
+| Adjustments, both directions | Work, via the operating wallet's USDT wallet (see F11 and F12). |
+| `QUOTE_EXPIRED` after 61 s | Confirmed again, now that liquidity exists. |
+| Reversal | Run 1 of this session: reversed the net amount, leaving ₦0 (F9 resolved). See F13. |
+
+Two behaviours differ from the guide and cost us time. We adapted the client to both:
+
+| # | Finding |
+|---|---|
+| F11 | **A customer's USDT lives in a separate wallet.** `owner_ref` is the same but `currency` is `USDT` and the id differs; conversion creates it. The NGN wallet's `balances[]` never lists the USDT, so the guide's "one wallet, NGN + USDT balances" reading is wrong for customers. `Balances`, `Charge` and `Adjust` now find the sibling with `GET /v1/wallets?owner_ref=` (cached). Please confirm this is intended and stable. |
+| F12 | **The operating wallet is NGN-currency with a USDT balance entry, and transfers to or from it are refused** (`CURRENCY_MISMATCH: wallets must share currency USDT`), both directions. A USDT wallet is needed under the same `owner_ref`; we create it once (`POST /v1/wallets`, `owner_type` `client`, `currency` `USDT`, key `usdt-wallet:<operating id>`) and charge into that. A crypto deposit made earlier into the operating wallet itself (100 USDT, `bacc15af-…`) is stranded there. Is creating that sibling the intended path, or should `/v1/platform/account` expose a USDT wallet id? |
+| F13 | In the third run `simulate/reversal` answered `emitted` but the deposit stayed credited after more than a minute (runs 1 and 2 applied it within seconds). Same request shape. Is the reversal asynchronous, or can it be refused silently? Wallet `6fe69805-27d9-4f84-baf1-f9d03aeb5f72`. |
+
+Not yet verifiable: real webhook delivery (needs a public HTTPS URL), and whether the 1.4% deposit fee (F4) exists in production.
 
 ---
 

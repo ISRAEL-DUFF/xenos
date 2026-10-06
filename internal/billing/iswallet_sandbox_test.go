@@ -46,10 +46,49 @@ func report(t *testing.T, what string, err error) {
 	t.Logf("✗ %s: %v", what, err)
 }
 
+// sandboxSeed gives the platform USDT inventory (convert needs it) and the operating wallet USDT (so
+// adjustments can be paid). Both are idempotent: the seed by key, the crypto deposit because it omits
+// tx_hash and iswallet derives a deterministic one.
+func sandboxSeed(t *testing.T, c *ISWallet, ctx context.Context) {
+	t.Helper()
+	var out map[string]any
+	if err := c.do(ctx, "POST", "/v1/sandbox/simulate/liquidity", "xenos-seed-usdt-v1",
+		map[string]any{"currency": "USDT", "amount": 10_000_000_000}, &out); err != nil {
+		report(t, "liquidity seed", err)
+	} else {
+		t.Logf("✓ platform liquidity seeded: %v", out)
+	}
+	w, err := c.merchantWallet(ctx)
+	if err != nil {
+		report(t, "operating wallet", err)
+		return
+	}
+	if err := c.do(ctx, "POST", "/v1/sandbox/simulate/crypto-deposit", "", map[string]any{
+		"wallet_id": w, "currency": "USDT", "amount": 100_000_000}, &out); err != nil {
+		report(t, "operating wallet crypto deposit", err)
+	} else {
+		t.Logf("✓ operating wallet funded: %v", out)
+	}
+}
+
+// sandboxDeposit simulates a customer sending naira to their virtual account.
+func sandboxDeposit(t *testing.T, c *ISWallet, ctx context.Context, key string, cust Customer, kobo int64) map[string]any {
+	t.Helper()
+	var dep map[string]any
+	if err := c.do(ctx, "POST", "/v1/sandbox/simulate/deposit", key, map[string]any{
+		"wallet_id": cust.ID, "amount": kobo, "currency": "NGN", "sender_name": "Test Payer"}, &dep); err != nil {
+		report(t, "simulate deposit", err)
+		return nil
+	}
+	return dep
+}
+
 func TestSandboxEndToEnd(t *testing.T) {
 	c := sandboxClient(t)
 	ctx := context.Background()
 	stamp := strconv.FormatInt(time.Now().UnixNano(), 36)
+
+	sandboxSeed(t, c, ctx)
 
 	// 1. Customer and virtual account.
 	cust, err := c.CreateCustomer(ctx, "sbx-signup:"+stamp, "user:"+stamp, "sbx-"+stamp+"@example.com", "+2348030000000")
@@ -107,14 +146,8 @@ func TestSandboxEndToEnd(t *testing.T) {
 	}
 
 	// 5. Simulate a deposit.
-	var dep map[string]any
-	err = c.do(ctx, "POST", "/v1/sandbox/simulate/deposit", "sbx-dep:"+stamp, map[string]any{
-		"account_number": cust.VirtualAcct, "amount": 5_000_000, "currency": "NGN", "sender_name": "Test Payer"}, &dep)
-	if err != nil {
-		report(t, "simulate deposit", err)
-	} else {
-		t.Logf("✓ simulated deposit: %v", dep)
-	}
+	dep := sandboxDeposit(t, c, ctx, "sbx-dep:"+stamp, cust, 5_000_000)
+	t.Logf("✓ simulated deposit: %v", dep)
 	var credited int64
 	if b, err := c.Balances(ctx, cust.ID); err != nil {
 		report(t, "balances after deposit", err)
@@ -134,20 +167,12 @@ func TestSandboxEndToEnd(t *testing.T) {
 	}
 	if err != nil {
 		report(t, "quote", err)
-		t.Logf("→ skipping conversion, charge and adjustment checks that need USDT")
-		overcharge(t, c, ctx, stamp, cust.ID)
-		return
+		t.FailNow()
 	}
 	t.Logf("✓ quote %s: ₦%.2f -> %.6f USDT at ₦%s, expires %s", q.ID, float64(q.AmountNGN)/100, float64(q.AmountUSDT)/1e6, q.Rate, q.ExpiresAt.Format(time.RFC3339))
 	mv, err := c.Convert(ctx, "sbx-conv:"+stamp, cust.ID, q.ID)
 	if errors.Is(err, ErrLiquidity) {
-		// iswallet's own USDT inventory is empty in the sandbox. This is the documented
-		// INSUFFICIENT_LIQUIDITY path (a failure on their side, not the customer's).
-		t.Logf("✓ INSUFFICIENT_LIQUIDITY (the sandbox treasury holds no USDT): %v", err)
-		t.Logf("→ conversion cannot complete, so charge and adjustment checks that need USDT are skipped")
-		sandboxExpiry(t, c, ctx, stamp, cust.ID, credited)
-		sandboxReversal(t, c, ctx, stamp, dep)
-		overcharge(t, c, ctx, stamp, cust.ID)
+		t.Errorf("INSUFFICIENT_LIQUIDITY even after the liquidity seed: %v", err)
 		return
 	}
 	if err != nil {
@@ -215,6 +240,26 @@ func TestSandboxEndToEnd(t *testing.T) {
 		} else {
 			t.Logf("✓ credit of 0.5 USDT paid from the operating wallet")
 		}
+	}
+
+	// 10. First charge into the operating wallet and its balance.
+	if m, err := c.MerchantBalance(ctx); err != nil {
+		report(t, "operating balance", err)
+	} else {
+		t.Logf("✓ operating wallet now holds %d micro-USDT", m)
+	}
+
+	// 11. Expiry and reversal, each on a fresh deposit (the main flow spent the first one).
+	if d2 := sandboxDeposit(t, c, ctx, "sbx-dep2:"+stamp, cust, 2_000_000); d2 != nil {
+		if b, err := c.Balances(ctx, cust.ID); err == nil {
+			sandboxExpiry(t, c, ctx, stamp, cust.ID, b.NGNKobo)
+		}
+	}
+	if d3 := sandboxDeposit(t, c, ctx, "sbx-dep3:"+stamp, cust, 700_000); d3 != nil {
+		before, _ := c.Balances(ctx, cust.ID)
+		sandboxReversal(t, c, ctx, stamp, d3)
+		after, err := c.Balances(ctx, cust.ID)
+		t.Logf("  NGN before the reversal %d, after %d (%v)", before.NGNKobo, after.NGNKobo, err)
 	}
 	fmt.Println()
 }
