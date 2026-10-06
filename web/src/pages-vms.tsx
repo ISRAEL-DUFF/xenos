@@ -5,6 +5,7 @@ import { api, type Plan, type VM, type Wallet } from "./api";
 import { useAuth } from "./auth";
 import { formatDate, formatNaira, formatUSDT, koboForUSDT, memLabel, usdtToKobo } from "./format";
 import { usePlans, useSSHKeys, useTemplates, useVM, useVMs, useWallet } from "./hooks";
+import { BusyBanner, ResizeCard, SnapshotsCard, useSnapshots } from "./pages-vmops";
 import { Banner, Button, Card, CodeLine, ConfirmDialog, Empty, ErrorText, Field, Input, Loading, PageHeader, StateBadge, cx } from "./ui";
 
 const MIN_RUNWAY_HOURS = 24; // keep in step with the server's create check
@@ -291,6 +292,7 @@ export function VMDetail() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const vmq = useVM(id);
+  const snaps = useSnapshots(Number(id));
   const wallet = useWallet();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [sent, setSent] = useState("");
@@ -328,7 +330,7 @@ export function VMDetail() {
   const v = vmq.data;
   const rate = wallet.data?.rate_kobo_per_usdt;
   const note = stateNotes[v.state];
-  const busy = act.isPending || sent !== "";
+  const busy = act.isPending || sent !== "" || !!v.busy;
 
   return (
     <div className="space-y-5">
@@ -347,6 +349,8 @@ export function VMDetail() {
           )}
         </Banner>
       )}
+
+      <BusyBanner vm={v} />
 
       <Card className="space-y-3">
         <h2 className="font-medium text-slate-900 dark:text-slate-50">Connect</h2>
@@ -393,6 +397,16 @@ export function VMDetail() {
           <Button variant="secondary" disabled={v.state !== "running" || busy} onClick={() => act.mutate("reboot")}>
             Reboot
           </Button>
+          <Link
+            to={`/vms/${v.id}/console`}
+            className={cx(
+              "inline-flex items-center rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800",
+              (v.state !== "running" || busy) && "pointer-events-none opacity-50",
+            )}
+            aria-disabled={v.state !== "running" || busy}
+          >
+            Console
+          </Link>
           <Button variant="danger" className="sm:ml-auto" disabled={v.state === "deleting"} onClick={() => setConfirmDelete(true)}>
             Delete
           </Button>
@@ -400,6 +414,9 @@ export function VMDetail() {
         {sent && <p className="text-sm text-slate-500 dark:text-slate-400" role="status">Request sent. The state updates in a few seconds.</p>}
         <ErrorText error={act.error} />
       </Card>
+
+      <SnapshotsCard vm={v} list={snaps.data} />
+      <ResizeCard vm={v} snapshotCount={snaps.data?.snapshots.length ?? 0} />
 
       {confirmDelete && (
         <ConfirmDialog

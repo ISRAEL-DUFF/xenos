@@ -27,10 +27,28 @@ type API interface {
 	SnapshotRollback(ctx context.Context, vmid int, name string) (string, error)
 	SnapshotDelete(ctx context.Context, vmid int, name string) (string, error)
 
+	// Console: Console asks the host for a one-time VNC session on a running guest; DialConsole opens its
+	// websocket. The ticket is the VNC password and never leaves the control plane except to the guest's owner.
+	Console(ctx context.Context, vmid int) (ConsoleTicket, error)
+	DialConsole(ctx context.Context, vmid int, t ConsoleTicket) (ConsoleConn, error)
+
 	// Monitoring.
 	Guests(ctx context.Context) ([]Guest, error)
 	StoragePool(ctx context.Context, storage string) (Usage, error)
 	NodeInfo(ctx context.Context) (NodeInfo, error)
+}
+
+// ConsoleTicket is a one-time VNC session on the host.
+type ConsoleTicket struct {
+	Port   int
+	Ticket string
+}
+
+// ConsoleConn is a binary message stream to a guest's VNC server (RFB over a websocket).
+type ConsoleConn interface {
+	ReadMessage() ([]byte, error)
+	WriteMessage([]byte) error
+	Close() error
 }
 
 // VMStatus is a guest's presence and power state on the node.

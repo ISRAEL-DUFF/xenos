@@ -31,8 +31,12 @@ const (
 
 // Run blocks until ctx is cancelled.
 func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger) error {
-	pve := NewProxmox(cfg, log)
+	return RunWith(ctx, cfg, st, is, mailer, log, NewProxmox(cfg, log))
+}
 
+// RunWith is Run with the Proxmox client supplied, so a process that also serves the API (development, with
+// the in-memory fake) can share one host between the worker and the console.
+func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger, pve proxmox.API) error {
 	var v6 netip.Prefix
 	if cfg.IPv6Prefix != "" {
 		var err error

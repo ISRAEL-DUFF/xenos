@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 type recorded struct {
@@ -147,5 +149,109 @@ func TestMonitoringEndpoints(t *testing.T) {
 	}
 	if (Usage{}).Fraction() != 0 {
 		t.Fatal("empty usage must not divide by zero")
+	}
+}
+
+func TestResizeAndSnapshotRequestShapes(t *testing.T) {
+	c, got := testClient(t, func(r recorded) string {
+		switch {
+		case r.method == "GET" && strings.HasSuffix(r.path, "/config"):
+			return `{"scsi0":"vmdata:vm-105-disk-0,size=20G","cores":1}`
+		case r.method == "GET" && strings.HasSuffix(r.path, "/snapshot"):
+			return `[{"name":"xs1"},{"name":"current"}]`
+		}
+		return `"UPID:pve1:abc"`
+	})
+	ctx := context.Background()
+
+	if err := c.SetResources(ctx, 105, 2, 2048); err != nil {
+		t.Fatal(err)
+	}
+	if r := (*got)[0]; r.method != "PUT" || r.path != "/api2/json/nodes/pve1/qemu/105/config" || r.form.Get("cores") != "2" || r.form.Get("memory") != "2048" {
+		t.Fatalf("set resources: %+v", r)
+	}
+	if n, err := c.DiskSizeGB(ctx, 105, "scsi0"); err != nil || n != 20 {
+		t.Fatalf("disk size = %d %v", n, err)
+	}
+	if _, err := c.SnapshotCreate(ctx, 105, "xs2"); err != nil {
+		t.Fatal(err)
+	}
+	if r := (*got)[2]; r.method != "POST" || r.path != "/api2/json/nodes/pve1/qemu/105/snapshot" || r.form.Get("snapname") != "xs2" {
+		t.Fatalf("snapshot create: %+v", r)
+	}
+	if names, err := c.SnapshotList(ctx, 105); err != nil || len(names) != 1 || names[0] != "xs1" {
+		t.Fatalf("snapshot list = %v %v (the pseudo entry \"current\" must be hidden)", names, err)
+	}
+	if _, err := c.SnapshotRollback(ctx, 105, "xs1"); err != nil {
+		t.Fatal(err)
+	}
+	if r := (*got)[4]; r.method != "POST" || r.path != "/api2/json/nodes/pve1/qemu/105/snapshot/xs1/rollback" {
+		t.Fatalf("rollback: %+v", r)
+	}
+	if _, err := c.SnapshotDelete(ctx, 105, "xs1"); err != nil {
+		t.Fatal(err)
+	}
+	if r := (*got)[5]; r.method != "DELETE" || r.path != "/api2/json/nodes/pve1/qemu/105/snapshot/xs1" {
+		t.Fatalf("delete: %+v", r)
+	}
+}
+
+func TestParseDiskSize(t *testing.T) {
+	for in, want := range map[string]int{
+		"vmdata:vm-1-disk-0,size=20G":                  20,
+		"vmdata:vm-1-disk-0,discard=on,size=40G,ssd=1": 40,
+		"vmdata:vm-1-disk-0,size=512M":                 1,
+		"vmdata:vm-1-disk-0,size=1T":                   1024,
+		"vmdata:vm-1-disk-0,size=20.5G":                21,
+	} {
+		if got, err := parseDiskSize(in); err != nil || got != want {
+			t.Errorf("%q = %d %v, want %d", in, got, err, want)
+		}
+	}
+	if _, err := parseDiskSize(""); err == nil {
+		t.Error("a config without that disk must be an error")
+	}
+}
+
+// The console opens a VNC session with websocket=1, then dials the host's websocket with the API token.
+func TestConsoleTicketAndWebsocket(t *testing.T) {
+	var auth, query string
+	up := websocket.Upgrader{Subprotocols: []string{"binary"}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api2/json/nodes/pve1/qemu/105/vncproxy":
+			_ = r.ParseForm()
+			if r.Form.Get("websocket") != "1" {
+				t.Errorf("vncproxy form: %v", r.Form)
+			}
+			_, _ = w.Write([]byte(`{"data":{"port":"5901","ticket":"PVEVNC:abc","upid":"x"}}`))
+		case r.URL.Path == "/api2/json/nodes/pve1/qemu/105/vncwebsocket":
+			auth, query = r.Header.Get("Authorization"), r.URL.RawQuery
+			conn, err := up.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_ = conn.WriteMessage(websocket.BinaryMessage, []byte("RFB 003.008\n"))
+		}
+	}))
+	defer ts.Close()
+	c := New(ts.URL, "pve1", "xenos@pve!control", "s3cret", false)
+	ctx := context.Background()
+
+	tk, err := c.Console(ctx, 105)
+	if err != nil || tk.Port != 5901 || tk.Ticket != "PVEVNC:abc" {
+		t.Fatalf("ticket %+v %v", tk, err)
+	}
+	conn, err := c.DialConsole(ctx, 105, tk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if msg, err := conn.ReadMessage(); err != nil || string(msg) != "RFB 003.008\n" {
+		t.Fatalf("message %q %v", msg, err)
+	}
+	if auth != "PVEAPIToken=xenos@pve!control=s3cret" || !strings.Contains(query, "port=5901") || !strings.Contains(query, "vncticket=PVEVNC%3Aabc") {
+		t.Fatalf("websocket request: auth=%q query=%q", auth, query)
 	}
 }

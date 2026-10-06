@@ -133,6 +133,43 @@ const noOverflow = async (page, where) => {
   await page.getByRole("button", { name: "Start", exact: true }).click();
   await page.getByText("running", { exact: true }).waitFor({ timeout: 30_000 });
 
+  step("snapshot: take one, restore it, delete it");
+  await page.getByLabel("Snapshot name").fill("before upgrade");
+  await page.getByRole("button", { name: "Take snapshot" }).click();
+  await page.getByText("before upgrade").waitFor();
+  const restore = page.getByRole("button", { name: "Restore" });
+  await restore.waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll("li button")].some((b) => b.textContent === "Restore" && !b.disabled), null, { timeout: 40_000 });
+  await restore.click();
+  const restoreOk = page.getByRole("dialog").getByRole("button", { name: "Restore" });
+  check(await restoreOk.isDisabled(), "restore must stay disabled until the VM name is typed");
+  await page.getByRole("dialog").getByRole("textbox").fill("web-1");
+  await restoreOk.click();
+  await page.getByText(/Restoring a snapshot/).waitFor({ timeout: 20_000 });
+  await page.getByText(/Restoring a snapshot/).waitFor({ state: "detached", timeout: 40_000 });
+  await page.locator("li").getByRole("button", { name: "Delete", exact: true }).click();
+  await page.getByText("before upgrade").waitFor({ state: "detached", timeout: 40_000 });
+  await shot(page, "05b-snapshots");
+
+  step("resize to a larger plan");
+  await page.getByRole("button", { name: /^medium:/ }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Resize" }).click();
+  await page.getByText(/Resizing\./).waitFor({ timeout: 20_000 });
+  await page.getByText(/^medium · /).waitFor({ timeout: 60_000 });
+  await page.getByText("running", { exact: true }).waitFor({ timeout: 30_000 });
+  await shot(page, "05c-resized");
+
+  step("browser console connects through our server (the fake host speaks no real VNC, so only the transport is checked)");
+  const before = problems.length;
+  await page.getByRole("link", { name: "Console" }).click();
+  await page.getByRole("heading", { name: /^Console: web-1/ }).waitFor();
+  await page.getByText(/Connecting…|Connected|Disconnected|Could not connect/).first().waitFor({ timeout: 20_000 });
+  await new Promise((r) => setTimeout(r, 1000));
+  const fresh = problems.splice(before); // noVNC logs protocol errors against the fake; a CSP block would be ours
+  check(!fresh.some((m) => /Content.Security|Refused to/i.test(m)), `console blocked by CSP:\n    ${fresh.join("\n    ")}`);
+  await page.goto(page.url().replace(/\/console$/, ""));
+  await page.getByRole("heading", { name: "web-1" }).waitFor();
+
   step("wallet charge for the running hour appears");
   await page.goto(`${base}/wallet`);
   await page.getByText("web-1").first().waitFor({ timeout: 90_000 });

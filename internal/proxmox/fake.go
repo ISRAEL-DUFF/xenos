@@ -20,6 +20,8 @@ type Fake struct {
 	Pool     Usage
 	MemTotal int64
 	CPUs     int
+	// Consoles lists the console connections opened so far.
+	Consoles []*FakeConsole
 	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
 	BeforeOp func(op string, vmid int)
 }
@@ -285,4 +287,77 @@ func (f *Fake) SnapshotDelete(_ context.Context, vmid int, name string) (string,
 		}
 	}
 	return "", fmt.Errorf("proxmox fake: no snapshot %q", name)
+}
+
+// ConsolePeer is what a fake console connection talks to: it records what the browser sent and replies with
+// an RFB banner, enough to prove the bridge moves bytes both ways.
+func (f *Fake) Console(_ context.Context, vmid int) (ConsoleTicket, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("console", vmid); err != nil {
+		return ConsoleTicket{}, err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ConsoleTicket{}, ErrFakeNotFound
+	}
+	if !vm.Running {
+		return ConsoleTicket{}, errors.New("proxmox fake: vm is not running")
+	}
+	return ConsoleTicket{Port: 5900 + vmid%100, Ticket: fmt.Sprintf("PVEVNC:fake-%d", vmid)}, nil
+}
+
+func (f *Fake) DialConsole(_ context.Context, vmid int, t ConsoleTicket) (ConsoleConn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("dialconsole", vmid); err != nil {
+		return nil, err
+	}
+	if t.Ticket != fmt.Sprintf("PVEVNC:fake-%d", vmid) {
+		return nil, errors.New("proxmox fake: bad console ticket")
+	}
+	c := &FakeConsole{in: make(chan []byte, 16), Sent: nil}
+	c.in <- []byte("RFB 003.008\n")
+	f.Consoles = append(f.Consoles, c)
+	return c, nil
+}
+
+// FakeConsole is the in-memory guest end of a console. Everything written to it is kept in Sent and echoed back.
+type FakeConsole struct {
+	mu     sync.Mutex
+	in     chan []byte
+	Sent   [][]byte
+	Closed bool
+}
+
+func (c *FakeConsole) ReadMessage() ([]byte, error) {
+	b, ok := <-c.in
+	if !ok {
+		return nil, errors.New("closed")
+	}
+	return b, nil
+}
+
+func (c *FakeConsole) WriteMessage(b []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Closed {
+		return errors.New("closed")
+	}
+	c.Sent = append(c.Sent, append([]byte(nil), b...))
+	select {
+	case c.in <- append([]byte("echo:"), b...):
+	default:
+	}
+	return nil
+}
+
+func (c *FakeConsole) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.Closed {
+		c.Closed = true
+		close(c.in)
+	}
+	return nil
 }

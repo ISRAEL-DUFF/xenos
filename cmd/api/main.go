@@ -58,8 +58,9 @@ func run(log *slog.Logger) error {
 	}
 
 	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mailer, log, web.Dist())
-	if cfg.PVEURL != "" { // the admin capacity view reads host usage; without a host it reports it unreachable
-		srv.PVE = worker.NewProxmox(cfg, log)
+	pve := worker.NewProxmox(cfg, log)
+	if cfg.PVEURL != "" || cfg.RunWorker { // capacity view and console need a host (the fake, in development)
+		srv.PVE = pve
 	}
 	hs := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Router(), ReadHeaderTimeout: 10 * time.Second}
 
@@ -67,7 +68,7 @@ func run(log *slog.Logger) error {
 		// Development convenience: the fake iSpend only lives inside one process.
 		log.Warn("XENOS_RUN_WORKER=true: running the worker inside the API process")
 		go func() {
-			if err := worker.Run(ctx, cfg, st, ispend, mailer, log); err != nil {
+			if err := worker.RunWith(ctx, cfg, st, ispend, mailer, log, pve); err != nil {
 				log.Error("worker stopped", "err", err)
 			}
 		}()

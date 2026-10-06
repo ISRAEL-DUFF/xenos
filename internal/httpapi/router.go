@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -35,6 +36,9 @@ type Server struct {
 	Cache   *billing.BalanceCache
 	PVE     proxmox.API // optional; the admin capacity view reports the host as unreachable without it
 
+	consoles     consoleStore
+	consoleLimit *auth.Limiter
+
 	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit, resetTokenLimit, webhookFailLimit *auth.Limiter
 }
 
@@ -49,6 +53,7 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 		loginAcctLimit:   auth.NewLimiter(8, 15*time.Minute),
 		resendLimit:      auth.NewLimiter(3, time.Hour),
 		webhookFailLimit: auth.NewLimiter(30, time.Minute),
+		consoleLimit:     auth.NewLimiter(10, time.Minute),
 		resetLimit:       auth.NewLimiter(5, time.Hour),
 		resetTokenLimit:  auth.NewLimiter(20, 15*time.Minute),
 	}
@@ -57,7 +62,7 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.Recoverer)
-	r.Use(s.logRequests, securityHeaders)
+	r.Use(s.logRequests, s.securityHeaders)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 
@@ -96,6 +101,8 @@ func (s *Server) Router() http.Handler {
 			r.Post("/vms/{id}/stop", s.powerAction("stop", "running"))
 			r.With(s.requireActive).Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
 
+			r.With(s.requireActive).Post("/vms/{id}/console", s.createConsole)
+			r.Get("/vms/{id}/console/ws", s.consoleSocket)
 			r.With(s.requireActive).Post("/vms/{id}/resize", s.resizeVM)
 			r.Get("/vms/{id}/snapshots", s.listSnapshots)
 			r.With(s.requireActive).Post("/vms/{id}/snapshots", s.createSnapshot)
@@ -218,13 +225,20 @@ func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 
 // securityHeaders sets conservative defaults. The dashboard is a same-origin
 // bundle with no inline scripts or styles, so a strict CSP fits.
-func securityHeaders(next http.Handler) http.Handler {
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	// The browser console is a same-origin websocket. Some browsers do not treat 'self' as covering ws:
+	// and wss:, so name our own origin explicitly.
+	connect := "'self'"
+	if u, err := url.Parse(s.Cfg.PublicURL); err == nil && u.Host != "" {
+		connect += " " + map[string]string{"https": "wss", "http": "ws"}[u.Scheme] + "://" + u.Host
+	}
+	csp := "default-src 'self'; connect-src " + connect + "; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		h.Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)
 	})
 }

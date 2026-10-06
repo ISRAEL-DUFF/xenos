@@ -29,6 +29,11 @@ Run `xenosctl preflight` on the server first (add `--send-test you@example.com` 
 - [ ] **auto** Delete removes the VM from Proxmox and returns its IP: `TestDelete`
 - [ ] **auto** Killing the worker mid-provision leaves no orphaned VM or leaked IP: `TestCrashMidProvisionRecovers`, `TestProvisionRetriesThenCleansUp`
 - [ ] **host** A created VM reaches `running` in under 2 minutes on real hardware and accepts SSH on IPv4 and IPv6
+- [ ] **auto** Resize, snapshots and restore: the claim is one-at-a-time, retries are idempotent, a permanently failed job releases the VM, a resize never shrinks and is blocked while snapshots exist: `internal/vm/ops_test.go`, `TestResizeValidation`, `TestSnapshotsAPI`
+- [ ] **auto** The browser console works only for the owner, once per session, from our own origin, and closes when the account stops qualifying: `internal/httpapi/console_test.go`
+- [ ] **host** Resize a running VM to a larger plan: it comes back with the new CPU and memory, the disk is larger and the filesystem has grown (cloud-init `growpart`; if not, the template needs it), and the next hourly charge uses the new price
+- [ ] **host** Take two snapshots, change a file, restore the first: the file change is gone and the VM comes back. Check the API token role has the snapshot privileges
+- [ ] **host** The browser console shows the login prompt of a running VM and accepts typing (the host's VNC password handshake and `vncwebsocket` authentication with the API token are only proven against the real host)
 - [ ] **host** The `root` login works over SSH with the injected key (Ubuntu cloud images may refuse direct root login; confirm and adjust `templates.ci_user`)
 
 ## Billing

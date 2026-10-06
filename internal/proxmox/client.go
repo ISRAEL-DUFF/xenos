@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type Client struct {
@@ -308,4 +310,53 @@ func (c *Client) SnapshotDelete(ctx context.Context, vmid int, name string) (str
 	var upid string
 	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s", c.node, vmid, url.PathEscape(name)), nil, &upid)
 	return upid, err
+}
+
+// Console starts a VNC proxy for a running guest (websocket mode). With websocket=1 the returned ticket is
+// both the websocket's vncticket and the VNC password the client must present.
+func (c *Client) Console(ctx context.Context, vmid int) (ConsoleTicket, error) {
+	var out struct {
+		Port   json.RawMessage `json:"port"`
+		Ticket string          `json:"ticket"`
+	}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/vncproxy", c.node, vmid), url.Values{"websocket": {"1"}}, &out); err != nil {
+		return ConsoleTicket{}, err
+	}
+	port, err := strconv.Atoi(strings.Trim(string(out.Port), `"`))
+	if err != nil || out.Ticket == "" {
+		return ConsoleTicket{}, fmt.Errorf("proxmox: unexpected vncproxy reply (port %s)", out.Port)
+	}
+	return ConsoleTicket{Port: port, Ticket: out.Ticket}, nil
+}
+
+type wsConn struct{ c *websocket.Conn }
+
+func (w wsConn) ReadMessage() ([]byte, error) {
+	_, b, err := w.c.ReadMessage()
+	return b, err
+}
+func (w wsConn) WriteMessage(b []byte) error { return w.c.WriteMessage(websocket.BinaryMessage, b) }
+func (w wsConn) Close() error                { return w.c.Close() }
+
+// DialConsole opens the host's VNC websocket, authenticating with the same API token as every other call.
+func (c *Client) DialConsole(ctx context.Context, vmid int, t ConsoleTicket) (ConsoleConn, error) {
+	u, err := url.Parse(c.base)
+	if err != nil {
+		return nil, err
+	}
+	u.Scheme = map[string]string{"https": "wss", "http": "ws"}[u.Scheme]
+	u.Path += fmt.Sprintf("/nodes/%s/qemu/%d/vncwebsocket", c.node, vmid)
+	u.RawQuery = url.Values{"port": {fmt.Sprint(t.Port)}, "vncticket": {t.Ticket}}.Encode()
+	d := websocket.Dialer{HandshakeTimeout: 15 * time.Second, Subprotocols: []string{"binary"}}
+	if tr, ok := c.http.Transport.(*http.Transport); ok {
+		d.TLSClientConfig = tr.TLSClientConfig
+	}
+	conn, resp, err := d.DialContext(ctx, u.String(), http.Header{"Authorization": {"PVEAPIToken=" + c.token}})
+	if err != nil {
+		if resp != nil {
+			return nil, fmt.Errorf("proxmox console: %s", resp.Status)
+		}
+		return nil, fmt.Errorf("proxmox console: %w", err)
+	}
+	return wsConn{conn}, nil
 }

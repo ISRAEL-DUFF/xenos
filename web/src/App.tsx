@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
 import { Layout, RequireAdmin, RequireAuth } from "./Layout";
 import { AdminCapacity, AdminJobs, AdminLayout, AdminRevenue, AdminUserDetail, AdminUsers, AdminVMs } from "./pages-admin";
@@ -7,6 +8,8 @@ import { AUP, Home, NotFound } from "./pages-misc";
 import { SSHKeys } from "./pages-sshkeys";
 import { VMCreate, VMDetail, VMList } from "./pages-vms";
 import { WalletPage } from "./pages-wallet";
+
+const ConsolePage = lazy(() => import("./pages-console")); // pulls in noVNC only when opened
 
 export default function App() {
   return (
@@ -24,6 +27,7 @@ export default function App() {
           <Route path="/vms" element={<VMList />} />
           <Route path="/vms/new" element={<VMCreate />} />
           <Route path="/vms/:id" element={<VMDetail />} />
+          <Route path="/vms/:id/console" element={<Suspense fallback={null}><ConsolePage /></Suspense>} />
           <Route path="/ssh-keys" element={<SSHKeys />} />
           <Route path="/wallet" element={<WalletPage />} />
           <Route path="/account" element={<AccountPage />} />
