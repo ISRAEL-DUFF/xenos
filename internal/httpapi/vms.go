@@ -37,13 +37,15 @@ type vmJSON struct {
 	SSHCommand  string    `json:"ssh_command,omitempty"`
 	HourlyUUSDT int64     `json:"price_uusdt_hourly"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Busy is set while the worker resizes, snapshots or restores the VM; power actions wait until it clears.
+	Busy string `json:"busy,omitempty"`
 	// Detail view only: what this VM has cost so far this UTC month.
 	MonthCostUUSDT *int64 `json:"month_cost_uusdt,omitempty"`
 }
 
-func newVMJSON(id int64, hostname, region, plan, tpl, state, ipv4 string, ipv6 pgtype.Text, user string, hourly int64, created time.Time) vmJSON {
+func newVMJSON(id int64, hostname, region, plan, tpl, state, ipv4 string, ipv6 pgtype.Text, user string, hourly int64, created time.Time, busy pgtype.Text) vmJSON {
 	v := vmJSON{ID: id, Hostname: hostname, Region: region, Plan: plan, Template: tpl, State: state,
-		IPv4: ipv4, SSHUser: user, HourlyUUSDT: hourly, CreatedAt: created}
+		IPv4: ipv4, SSHUser: user, HourlyUUSDT: hourly, CreatedAt: created, Busy: busy.String}
 	if ipv6.Valid {
 		v.IPv6 = ipv6.String
 	}
@@ -199,7 +201,7 @@ func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]vmJSON, 0, len(rows))
 	for _, v := range rows {
-		out = append(out, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt))
+		out = append(out, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -218,7 +220,7 @@ func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt)
+	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy)
 	now := time.Now().UTC()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	cost, err := s.Store.Q.MonthChargedForVM(r.Context(), db.MonthChargedForVMParams{VmID: id, Hour: monthStart, Hour_2: monthStart.AddDate(0, 1, 0)})
@@ -240,7 +242,7 @@ func (s *Server) respondVM(w http.ResponseWriter, r *http.Request, id, userID in
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, status, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt))
+	writeJSON(w, status, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy))
 }
 
 // powerAction validates the request against the VM's current state and queues
@@ -257,6 +259,10 @@ func (s *Server) powerAction(action string, allowedFrom string) http.HandlerFunc
 			return
 		} else if err != nil {
 			s.fail(w, r, err)
+			return
+		}
+		if v.Busy.Valid {
+			writeErr(w, http.StatusConflict, fmt.Sprintf("cannot %s a VM that is being %s: try again in a moment", action, v.Busy.String))
 			return
 		}
 		if v.State != allowedFrom {

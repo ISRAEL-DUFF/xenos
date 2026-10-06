@@ -133,6 +133,16 @@ type Session struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type Snapshot struct {
+	ID        int64       `json:"id"`
+	VmID      int64       `json:"vm_id"`
+	Name      string      `json:"name"`
+	PveName   string      `json:"pve_name"`
+	Status    string      `json:"status"`
+	LastError pgtype.Text `json:"last_error"`
+	CreatedAt time.Time   `json:"created_at"`
+}
+
 type SshKey struct {
 	ID          int64     `json:"id"`
 	UserID      int64     `json:"user_id"`
@@ -203,6 +213,8 @@ type Vm struct {
 	CpuHighSince    pgtype.Timestamptz `json:"cpu_high_since"`
 	FlaggedAt       pgtype.Timestamptz `json:"flagged_at"`
 	FlagReason      pgtype.Text        `json:"flag_reason"`
+	Busy            pgtype.Text        `json:"busy"`
+	ResizePlanID    pgtype.Int8        `json:"resize_plan_id"`
 }
 
 type WebhookEvent struct {

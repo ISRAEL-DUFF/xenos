@@ -15,6 +15,18 @@ type API interface {
 	WaitTask(ctx context.Context, upid string) error
 	Status(ctx context.Context, vmid int) (VMStatus, error)
 
+	// Resizing: SetResources changes cores and memory (effective after a full stop and start);
+	// DiskSizeGB reads a disk's current size so a disk grow can be retried safely.
+	SetResources(ctx context.Context, vmid int, cores, memoryMB int) error
+	DiskSizeGB(ctx context.Context, vmid int, disk string) (int, error)
+
+	// Snapshots (disk only, no RAM state). Names are ours; "current" is Proxmox's own pseudo entry and is
+	// never returned. Delete and rollback return the task UPID.
+	SnapshotCreate(ctx context.Context, vmid int, name string) (string, error)
+	SnapshotList(ctx context.Context, vmid int) ([]string, error)
+	SnapshotRollback(ctx context.Context, vmid int, name string) (string, error)
+	SnapshotDelete(ctx context.Context, vmid int, name string) (string, error)
+
 	// Monitoring.
 	Guests(ctx context.Context) ([]Guest, error)
 	StoragePool(ctx context.Context, storage string) (Usage, error)

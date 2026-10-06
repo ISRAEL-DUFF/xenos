@@ -31,6 +31,10 @@ type FakeVM struct {
 	Config   ConfigParams
 	DiskGB   int
 	Template int
+	// Snapshots lists snapshot names in creation order.
+	Snapshots []string
+	Cores     int
+	MemoryMB  int
 }
 
 func NewFake() *Fake {
@@ -188,4 +192,97 @@ func (f *Fake) NodeInfo(context.Context) (NodeInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return NodeInfo{CPUs: f.CPUs, MemTotal: f.MemTotal}, f.Fail["memory"]
+}
+
+func (f *Fake) SetResources(_ context.Context, vmid int, cores, memoryMB int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("setresources", vmid); err != nil {
+		return err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ErrFakeNotFound
+	}
+	vm.Cores, vm.MemoryMB = cores, memoryMB
+	return nil
+}
+
+func (f *Fake) DiskSizeGB(_ context.Context, vmid int, _ string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return 0, ErrFakeNotFound
+	}
+	return vm.DiskGB, nil
+}
+
+func (f *Fake) SnapshotCreate(_ context.Context, vmid int, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("snapshot", vmid); err != nil {
+		return "", err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return "", ErrFakeNotFound
+	}
+	for _, s := range vm.Snapshots {
+		if s == name {
+			return "", fmt.Errorf("proxmox fake: snapshot %q already exists", name)
+		}
+	}
+	vm.Snapshots = append(vm.Snapshots, name)
+	return "UPID:snapshot", nil
+}
+
+func (f *Fake) SnapshotList(_ context.Context, vmid int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return nil, ErrFakeNotFound
+	}
+	return append([]string(nil), vm.Snapshots...), nil
+}
+
+func (f *Fake) SnapshotRollback(_ context.Context, vmid int, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("rollback", vmid); err != nil {
+		return "", err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return "", ErrFakeNotFound
+	}
+	if vm.Running {
+		return "", errors.New("proxmox fake: rollback needs a stopped vm")
+	}
+	for _, s := range vm.Snapshots {
+		if s == name {
+			return "UPID:rollback", nil
+		}
+	}
+	return "", fmt.Errorf("proxmox fake: no snapshot %q", name)
+}
+
+func (f *Fake) SnapshotDelete(_ context.Context, vmid int, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("snapshot-delete", vmid); err != nil {
+		return "", err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return "", ErrFakeNotFound
+	}
+	for i, s := range vm.Snapshots {
+		if s == name {
+			vm.Snapshots = append(vm.Snapshots[:i], vm.Snapshots[i+1:]...)
+			return "UPID:snapshot-delete", nil
+		}
+	}
+	return "", fmt.Errorf("proxmox fake: no snapshot %q", name)
 }

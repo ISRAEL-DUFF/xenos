@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -229,4 +231,81 @@ func (c *Client) WaitTask(ctx context.Context, upid string) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// SetResources changes cores and memory. The new values apply after the guest is fully stopped and started.
+func (c *Client) SetResources(ctx context.Context, vmid int, cores, memoryMB int) error {
+	f := url.Values{"cores": {fmt.Sprint(cores)}, "memory": {fmt.Sprint(memoryMB)}}
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/config", c.node, vmid), f, nil)
+}
+
+// DiskSizeGB reads the size of a disk (e.g. scsi0) from the VM config, where it appears as
+// "vmdata:vm-100-disk-0,size=20G". Sizes are rounded up to whole GiB.
+func (c *Client) DiskSizeGB(ctx context.Context, vmid int, disk string) (int, error) {
+	var cfg map[string]any
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/config", c.node, vmid), nil, &cfg); err != nil {
+		return 0, err
+	}
+	v, _ := cfg[disk].(string)
+	return parseDiskSize(v)
+}
+
+func parseDiskSize(v string) (int, error) {
+	for _, part := range strings.Split(v, ",") {
+		val, ok := strings.CutPrefix(part, "size=")
+		if !ok || val == "" {
+			continue
+		}
+		unit := val[len(val)-1]
+		n, err := strconv.ParseFloat(val[:len(val)-1], 64)
+		if err != nil {
+			break
+		}
+		switch unit {
+		case 'T':
+			n *= 1024
+		case 'G':
+		case 'M':
+			n /= 1024
+		default:
+			return 0, fmt.Errorf("proxmox: unknown disk size unit in %q", v)
+		}
+		return int(math.Ceil(n)), nil
+	}
+	return 0, fmt.Errorf("proxmox: no disk size in %q", v)
+}
+
+func (c *Client) SnapshotCreate(ctx context.Context, vmid int, name string) (string, error) {
+	var upid string
+	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot", c.node, vmid),
+		url.Values{"snapname": {name}, "description": {"xenos customer snapshot"}}, &upid)
+	return upid, err
+}
+
+func (c *Client) SnapshotList(ctx context.Context, vmid int) ([]string, error) {
+	var raw []struct {
+		Name string `json:"name"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot", c.node, vmid), nil, &raw); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, s := range raw {
+		if s.Name != "current" {
+			out = append(out, s.Name)
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) SnapshotRollback(ctx context.Context, vmid int, name string) (string, error) {
+	var upid string
+	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s/rollback", c.node, vmid, url.PathEscape(name)), url.Values{}, &upid)
+	return upid, err
+}
+
+func (c *Client) SnapshotDelete(ctx context.Context, vmid int, name string) (string, error) {
+	var upid string
+	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s", c.node, vmid, url.PathEscape(name)), nil, &upid)
+	return upid, err
 }

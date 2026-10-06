@@ -136,7 +136,7 @@ func (s *Server) adminGetUser(w http.ResponseWriter, r *http.Request) {
 	}
 	vmOut := make([]vmJSON, 0, len(vms))
 	for _, v := range vms {
-		vmOut = append(vmOut, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt))
+		vmOut = append(vmOut, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy))
 	}
 	adj, err := s.Store.Q.ListUserAdjustments(ctx, id)
 	if err != nil {

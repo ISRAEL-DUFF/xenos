@@ -44,8 +44,8 @@ UPDATE vms SET ipv6 = $2 WHERE id = $1;
 UPDATE ip_addresses SET vm_id = NULL WHERE vm_id = $1;
 
 -- name: ListUserVMs :many
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at,
-       p.slug AS plan_slug, p.price_uusdt_hourly,
+SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id,
+       p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
 FROM vms v
@@ -56,8 +56,8 @@ WHERE v.user_id = $1 AND v.deleted_at IS NULL
 ORDER BY v.id DESC;
 
 -- name: GetUserVM :one
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at,
-       p.slug AS plan_slug, p.price_uusdt_hourly,
+SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id,
+       p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
 FROM vms v
@@ -83,3 +83,43 @@ UPDATE vms SET state = $3 WHERE id = $1 AND state = ANY($2::text[]);
 
 -- name: MarkVMDeleted :exec
 UPDATE vms SET state = 'deleted', deleted_at = now() WHERE id = $1;
+
+-- name: ClaimVMBusy :execrows
+-- The one-at-a-time claim: succeeds only for the owner's idle running or stopped VM.
+UPDATE vms SET busy = $3, resize_plan_id = $4
+WHERE id = $1 AND user_id = $2 AND busy IS NULL AND state IN ('running', 'stopped') AND deleted_at IS NULL;
+
+-- name: ReleaseVMBusy :exec
+UPDATE vms SET busy = NULL, resize_plan_id = NULL WHERE id = $1;
+
+-- name: FinishResize :execrows
+UPDATE vms SET plan_id = resize_plan_id, resize_plan_id = NULL, busy = NULL
+WHERE id = $1 AND busy = 'resizing' AND resize_plan_id IS NOT NULL;
+
+-- name: GetResizeWork :one
+SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.resize_plan_id,
+       np.vcpu AS new_vcpu, np.ram_mb AS new_ram_mb, np.disk_gb AS new_disk_gb
+FROM vms v LEFT JOIN plans np ON np.id = v.resize_plan_id
+WHERE v.id = $1;
+
+-- name: CreateSnapshot :one
+INSERT INTO snapshots (vm_id, name, pve_name) VALUES ($1, $2, 'pending') RETURNING id;
+
+-- name: SetSnapshotPVEName :exec
+UPDATE snapshots SET pve_name = $2 WHERE id = $1;
+
+-- name: ListVMSnapshots :many
+SELECT id, vm_id, name, pve_name, status, COALESCE(last_error, '')::text AS last_error, created_at
+FROM snapshots WHERE vm_id = $1 AND status <> 'error' ORDER BY id DESC;
+
+-- name: CountVMSnapshots :one
+SELECT count(*) FROM snapshots WHERE vm_id = $1 AND status IN ('creating', 'ready', 'deleting');
+
+-- name: GetVMSnapshot :one
+SELECT id, vm_id, name, pve_name, status FROM snapshots WHERE id = $1 AND vm_id = $2;
+
+-- name: SetSnapshotStatus :exec
+UPDATE snapshots SET status = $2, last_error = $3 WHERE id = $1;
+
+-- name: DeleteSnapshotRow :exec
+DELETE FROM snapshots WHERE id = $1;

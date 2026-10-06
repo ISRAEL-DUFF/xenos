@@ -28,6 +28,11 @@ const (
 	JobDelete    = "vm.delete"
 	JobSuspend   = "vm.suspend" // out of funds: stop the guest, keep its disk
 	JobResume    = "vm.resume"  // funded again: back to stopped; the customer starts it
+
+	JobResize         = "vm.resize"          // move to a larger plan (stop, resize, start)
+	JobSnapshot       = "vm.snapshot"        // take a customer snapshot
+	JobSnapshotDelete = "vm.snapshot_delete" // remove a customer snapshot
+	JobRestore        = "vm.restore"         // roll the disk back to a snapshot
 )
 
 // Power actions accepted by JobPower.
@@ -40,6 +45,8 @@ const (
 type Payload struct {
 	VMID   int64  `json:"vm_id"`
 	Action string `json:"action,omitempty"`
+	// SnapshotID is the snapshots row a snapshot, delete or restore job works on.
+	SnapshotID int64 `json:"snapshot_id,omitempty"`
 }
 
 type Config struct {
@@ -101,6 +108,11 @@ func (p *Provisioner) Handlers() map[string]jobs.Handler {
 		JobDelete:    p.handle(p.delete),
 		JobSuspend:   p.handle(p.suspend),
 		JobResume:    p.handle(p.resume),
+
+		JobResize:         p.handle(p.resize),
+		JobSnapshot:       p.handle(p.snapshotCreate),
+		JobSnapshotDelete: p.handle(p.snapshotDelete),
+		JobRestore:        p.handle(p.restore),
 	}
 }
 

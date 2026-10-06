@@ -48,6 +48,32 @@ func (q *Queries) ClaimFreeIP(ctx context.Context, region string) (ClaimFreeIPRo
 	return i, err
 }
 
+const claimVMBusy = `-- name: ClaimVMBusy :execrows
+UPDATE vms SET busy = $3, resize_plan_id = $4
+WHERE id = $1 AND user_id = $2 AND busy IS NULL AND state IN ('running', 'stopped') AND deleted_at IS NULL
+`
+
+type ClaimVMBusyParams struct {
+	ID           int64       `json:"id"`
+	UserID       int64       `json:"user_id"`
+	Busy         pgtype.Text `json:"busy"`
+	ResizePlanID pgtype.Int8 `json:"resize_plan_id"`
+}
+
+// The one-at-a-time claim: succeeds only for the owner's idle running or stopped VM.
+func (q *Queries) ClaimVMBusy(ctx context.Context, arg ClaimVMBusyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, claimVMBusy,
+		arg.ID,
+		arg.UserID,
+		arg.Busy,
+		arg.ResizePlanID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const countActiveVMs = `-- name: CountActiveVMs :one
 SELECT count(*) FROM vms WHERE user_id = $1 AND state NOT IN ('deleted', 'error')
 `
@@ -57,6 +83,33 @@ func (q *Queries) CountActiveVMs(ctx context.Context, userID int64) (int64, erro
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const countVMSnapshots = `-- name: CountVMSnapshots :one
+SELECT count(*) FROM snapshots WHERE vm_id = $1 AND status IN ('creating', 'ready', 'deleting')
+`
+
+func (q *Queries) CountVMSnapshots(ctx context.Context, vmID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countVMSnapshots, vmID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createSnapshot = `-- name: CreateSnapshot :one
+INSERT INTO snapshots (vm_id, name, pve_name) VALUES ($1, $2, 'pending') RETURNING id
+`
+
+type CreateSnapshotParams struct {
+	VmID int64  `json:"vm_id"`
+	Name string `json:"name"`
+}
+
+func (q *Queries) CreateSnapshot(ctx context.Context, arg CreateSnapshotParams) (int64, error) {
+	row := q.db.QueryRow(ctx, createSnapshot, arg.VmID, arg.Name)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const createVM = `-- name: CreateVM :one
@@ -86,6 +139,28 @@ func (q *Queries) CreateVM(ctx context.Context, arg CreateVMParams) (int64, erro
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const deleteSnapshotRow = `-- name: DeleteSnapshotRow :exec
+DELETE FROM snapshots WHERE id = $1
+`
+
+func (q *Queries) DeleteSnapshotRow(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, deleteSnapshotRow, id)
+	return err
+}
+
+const finishResize = `-- name: FinishResize :execrows
+UPDATE vms SET plan_id = resize_plan_id, resize_plan_id = NULL, busy = NULL
+WHERE id = $1 AND busy = 'resizing' AND resize_plan_id IS NOT NULL
+`
+
+func (q *Queries) FinishResize(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.Exec(ctx, finishResize, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getActivePlanBySlug = `-- name: GetActivePlanBySlug :one
@@ -126,6 +201,40 @@ func (q *Queries) GetActiveTemplateBySlug(ctx context.Context, slug string) (Tem
 	return i, err
 }
 
+const getResizeWork = `-- name: GetResizeWork :one
+SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.resize_plan_id,
+       np.vcpu AS new_vcpu, np.ram_mb AS new_ram_mb, np.disk_gb AS new_disk_gb
+FROM vms v LEFT JOIN plans np ON np.id = v.resize_plan_id
+WHERE v.id = $1
+`
+
+type GetResizeWorkRow struct {
+	ID           int64       `json:"id"`
+	State        string      `json:"state"`
+	Busy         pgtype.Text `json:"busy"`
+	ProxmoxVmid  pgtype.Int4 `json:"proxmox_vmid"`
+	ResizePlanID pgtype.Int8 `json:"resize_plan_id"`
+	NewVcpu      pgtype.Int4 `json:"new_vcpu"`
+	NewRamMb     pgtype.Int4 `json:"new_ram_mb"`
+	NewDiskGb    pgtype.Int4 `json:"new_disk_gb"`
+}
+
+func (q *Queries) GetResizeWork(ctx context.Context, id int64) (GetResizeWorkRow, error) {
+	row := q.db.QueryRow(ctx, getResizeWork, id)
+	var i GetResizeWorkRow
+	err := row.Scan(
+		&i.ID,
+		&i.State,
+		&i.Busy,
+		&i.ProxmoxVmid,
+		&i.ResizePlanID,
+		&i.NewVcpu,
+		&i.NewRamMb,
+		&i.NewDiskGb,
+	)
+	return i, err
+}
+
 const getSSHKeysByIDs = `-- name: GetSSHKeysByIDs :many
 SELECT public_key FROM ssh_keys WHERE user_id = $1 AND id = ANY($2::bigint[]) ORDER BY id
 `
@@ -156,8 +265,8 @@ func (q *Queries) GetSSHKeysByIDs(ctx context.Context, arg GetSSHKeysByIDsParams
 }
 
 const getUserVM = `-- name: GetUserVM :one
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at,
-       p.slug AS plan_slug, p.price_uusdt_hourly,
+SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id,
+       p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
 FROM vms v
@@ -179,8 +288,14 @@ type GetUserVMRow struct {
 	State            string      `json:"state"`
 	Ipv6             pgtype.Text `json:"ipv6"`
 	CreatedAt        time.Time   `json:"created_at"`
+	Busy             pgtype.Text `json:"busy"`
+	ResizePlanID     pgtype.Int8 `json:"resize_plan_id"`
 	PlanSlug         string      `json:"plan_slug"`
 	PriceUusdtHourly int64       `json:"price_uusdt_hourly"`
+	PlanID           int64       `json:"plan_id"`
+	Vcpu             int32       `json:"vcpu"`
+	RamMb            int32       `json:"ram_mb"`
+	DiskGb           int32       `json:"disk_gb"`
 	TemplateSlug     string      `json:"template_slug"`
 	CiUser           string      `json:"ci_user"`
 	Ipv4             string      `json:"ipv4"`
@@ -196,8 +311,14 @@ func (q *Queries) GetUserVM(ctx context.Context, arg GetUserVMParams) (GetUserVM
 		&i.State,
 		&i.Ipv6,
 		&i.CreatedAt,
+		&i.Busy,
+		&i.ResizePlanID,
 		&i.PlanSlug,
 		&i.PriceUusdtHourly,
+		&i.PlanID,
+		&i.Vcpu,
+		&i.RamMb,
+		&i.DiskGb,
 		&i.TemplateSlug,
 		&i.CiUser,
 		&i.Ipv4,
@@ -259,9 +380,39 @@ func (q *Queries) GetVMForWork(ctx context.Context, id int64) (GetVMForWorkRow, 
 	return i, err
 }
 
+const getVMSnapshot = `-- name: GetVMSnapshot :one
+SELECT id, vm_id, name, pve_name, status FROM snapshots WHERE id = $1 AND vm_id = $2
+`
+
+type GetVMSnapshotParams struct {
+	ID   int64 `json:"id"`
+	VmID int64 `json:"vm_id"`
+}
+
+type GetVMSnapshotRow struct {
+	ID      int64  `json:"id"`
+	VmID    int64  `json:"vm_id"`
+	Name    string `json:"name"`
+	PveName string `json:"pve_name"`
+	Status  string `json:"status"`
+}
+
+func (q *Queries) GetVMSnapshot(ctx context.Context, arg GetVMSnapshotParams) (GetVMSnapshotRow, error) {
+	row := q.db.QueryRow(ctx, getVMSnapshot, arg.ID, arg.VmID)
+	var i GetVMSnapshotRow
+	err := row.Scan(
+		&i.ID,
+		&i.VmID,
+		&i.Name,
+		&i.PveName,
+		&i.Status,
+	)
+	return i, err
+}
+
 const listUserVMs = `-- name: ListUserVMs :many
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at,
-       p.slug AS plan_slug, p.price_uusdt_hourly,
+SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id,
+       p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
 FROM vms v
@@ -279,8 +430,14 @@ type ListUserVMsRow struct {
 	State            string      `json:"state"`
 	Ipv6             pgtype.Text `json:"ipv6"`
 	CreatedAt        time.Time   `json:"created_at"`
+	Busy             pgtype.Text `json:"busy"`
+	ResizePlanID     pgtype.Int8 `json:"resize_plan_id"`
 	PlanSlug         string      `json:"plan_slug"`
 	PriceUusdtHourly int64       `json:"price_uusdt_hourly"`
+	PlanID           int64       `json:"plan_id"`
+	Vcpu             int32       `json:"vcpu"`
+	RamMb            int32       `json:"ram_mb"`
+	DiskGb           int32       `json:"disk_gb"`
 	TemplateSlug     string      `json:"template_slug"`
 	CiUser           string      `json:"ci_user"`
 	Ipv4             string      `json:"ipv4"`
@@ -302,11 +459,60 @@ func (q *Queries) ListUserVMs(ctx context.Context, userID int64) ([]ListUserVMsR
 			&i.State,
 			&i.Ipv6,
 			&i.CreatedAt,
+			&i.Busy,
+			&i.ResizePlanID,
 			&i.PlanSlug,
 			&i.PriceUusdtHourly,
+			&i.PlanID,
+			&i.Vcpu,
+			&i.RamMb,
+			&i.DiskGb,
 			&i.TemplateSlug,
 			&i.CiUser,
 			&i.Ipv4,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVMSnapshots = `-- name: ListVMSnapshots :many
+SELECT id, vm_id, name, pve_name, status, COALESCE(last_error, '')::text AS last_error, created_at
+FROM snapshots WHERE vm_id = $1 AND status <> 'error' ORDER BY id DESC
+`
+
+type ListVMSnapshotsRow struct {
+	ID        int64     `json:"id"`
+	VmID      int64     `json:"vm_id"`
+	Name      string    `json:"name"`
+	PveName   string    `json:"pve_name"`
+	Status    string    `json:"status"`
+	LastError string    `json:"last_error"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (q *Queries) ListVMSnapshots(ctx context.Context, vmID int64) ([]ListVMSnapshotsRow, error) {
+	rows, err := q.db.Query(ctx, listVMSnapshots, vmID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListVMSnapshotsRow{}
+	for rows.Next() {
+		var i ListVMSnapshotsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.VmID,
+			&i.Name,
+			&i.PveName,
+			&i.Status,
+			&i.LastError,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -343,6 +549,44 @@ UPDATE ip_addresses SET vm_id = NULL WHERE vm_id = $1
 
 func (q *Queries) ReleaseIPForVM(ctx context.Context, vmID pgtype.Int8) error {
 	_, err := q.db.Exec(ctx, releaseIPForVM, vmID)
+	return err
+}
+
+const releaseVMBusy = `-- name: ReleaseVMBusy :exec
+UPDATE vms SET busy = NULL, resize_plan_id = NULL WHERE id = $1
+`
+
+func (q *Queries) ReleaseVMBusy(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, releaseVMBusy, id)
+	return err
+}
+
+const setSnapshotPVEName = `-- name: SetSnapshotPVEName :exec
+UPDATE snapshots SET pve_name = $2 WHERE id = $1
+`
+
+type SetSnapshotPVENameParams struct {
+	ID      int64  `json:"id"`
+	PveName string `json:"pve_name"`
+}
+
+func (q *Queries) SetSnapshotPVEName(ctx context.Context, arg SetSnapshotPVENameParams) error {
+	_, err := q.db.Exec(ctx, setSnapshotPVEName, arg.ID, arg.PveName)
+	return err
+}
+
+const setSnapshotStatus = `-- name: SetSnapshotStatus :exec
+UPDATE snapshots SET status = $2, last_error = $3 WHERE id = $1
+`
+
+type SetSnapshotStatusParams struct {
+	ID        int64       `json:"id"`
+	Status    string      `json:"status"`
+	LastError pgtype.Text `json:"last_error"`
+}
+
+func (q *Queries) SetSnapshotStatus(ctx context.Context, arg SetSnapshotStatusParams) error {
+	_, err := q.db.Exec(ctx, setSnapshotStatus, arg.ID, arg.Status, arg.LastError)
 	return err
 }
 
