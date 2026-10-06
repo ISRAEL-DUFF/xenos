@@ -3,18 +3,24 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type Config struct {
+	Env          string // "production" turns on startup checks that refuse unsafe defaults
 	HTTPAddr     string
 	DatabaseURL  string
 	Region       string
 	PublicURL    string // base URL used in emailed links
 	CookieSecure bool   // set Secure on session cookies (disable only for local http)
 	TrustProxy   bool   // trust X-Forwarded-For from the reverse proxy (Caddy)
+	// TrustedProxies are extra proxy addresses (besides loopback) whose X-Forwarded-For is believed.
+	TrustedProxies                                   []netip.Prefix
+	SMTPHost, SMTPPort, SMTPUser, SMTPPass, MailFrom string // transactional email; any SMTP provider
 
 	PVEURL         string
 	PVENode        string
@@ -50,7 +56,13 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:     get("XENOS_HTTP_ADDR", ":8080"),
+		Env:          get("XENOS_ENV", "development"),
+		HTTPAddr:     get("XENOS_HTTP_ADDR", "127.0.0.1:8080"),
+		SMTPHost:     os.Getenv("XENOS_SMTP_HOST"),
+		SMTPPort:     get("XENOS_SMTP_PORT", "587"),
+		SMTPUser:     os.Getenv("XENOS_SMTP_USER"),
+		SMTPPass:     os.Getenv("XENOS_SMTP_PASS"),
+		MailFrom:     os.Getenv("XENOS_MAIL_FROM"),
 		DatabaseURL:  os.Getenv("XENOS_DATABASE_URL"),
 		Region:       get("XENOS_REGION", "eu-de-1"),
 		PublicURL:    get("XENOS_PUBLIC_URL", "http://localhost:8080"),
@@ -109,7 +121,44 @@ func Load() (Config, error) {
 	if c.DatabaseURL == "" {
 		return c, fmt.Errorf("XENOS_DATABASE_URL is required")
 	}
+	for _, f := range strings.Fields(strings.ReplaceAll(os.Getenv("XENOS_TRUSTED_PROXIES"), ",", " ")) {
+		p, err := netip.ParsePrefix(f)
+		if err != nil {
+			a, aerr := netip.ParseAddr(f)
+			if aerr != nil {
+				return c, fmt.Errorf("XENOS_TRUSTED_PROXIES: %q is not an address or CIDR", f)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		c.TrustedProxies = append(c.TrustedProxies, p)
+	}
+	if err := c.checkProduction(); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// checkProduction refuses configurations that are only safe for development: silently using the
+// in-memory fake iSpend (which can hand out free credit), emailing nobody (reset and verification
+// would not work), insecure cookies, or a database link without TLS.
+func (c Config) checkProduction() error {
+	if c.Env != "production" {
+		return nil
+	}
+	var bad []string
+	if c.ISpendURL == "" || c.ISpendAPIKey == "" {
+		bad = append(bad, "XENOS_ISPEND_URL and XENOS_ISPEND_API_KEY are required (the fake iSpend is development only)")
+	}
+	if c.SMTPHost == "" || c.MailFrom == "" {
+		bad = append(bad, "XENOS_SMTP_HOST and XENOS_MAIL_FROM are required (email verification and password reset need real mail)")
+	}
+	if !c.CookieSecure {
+		bad = append(bad, "XENOS_COOKIE_SECURE must not be false")
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("XENOS_ENV=production: %s", strings.Join(bad, "; "))
+	}
+	return nil
 }
 
 func get(k, def string) string {

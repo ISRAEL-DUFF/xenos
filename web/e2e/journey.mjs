@@ -30,7 +30,7 @@ const check = (cond, msg) => {
 
 function emailLink(path) {
   // The development mailer logs each email (recipient and body, which holds the link) on one line.
-  const re = new RegExp(`${path}\\?token=([A-Za-z0-9_-]+)`);
+  const re = new RegExp(`${path}#token=([A-Za-z0-9_-]+)`);
   for (const line of readFileSync(logPath, "utf8").split("\n").reverse()) {
     const m = line.includes(email) ? re.exec(line) : null;
     if (m) return m[1];
@@ -102,7 +102,7 @@ const noOverflow = async (page, where) => {
   step("verify email from the emailed link");
   await new Promise((r) => setTimeout(r, 500));
   const token = emailLink("verify-email");
-  await page.goto(`${base}/verify-email?token=${token}`);
+  await page.goto(`${base}/verify-email#token=${token}`);
   await page.getByText("Your email is verified").waitFor();
 
   step("wallet shows the funding details once verified");

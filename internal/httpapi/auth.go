@@ -199,7 +199,7 @@ func (s *Server) sendVerification(ctx context.Context, u db.User) error {
 		TokenHash: hash, UserID: u.ID, ExpiresAt: time.Now().Add(verifyTTL)}); err != nil {
 		return err
 	}
-	link := fmt.Sprintf("%s/verify-email?token=%s", s.Cfg.PublicURL, token)
+	link := fmt.Sprintf("%s/verify-email#token=%s", s.Cfg.PublicURL, token)
 	return s.Mailer.Send(ctx, u.Email, "Verify your Xenos email", "Confirm your email address:\n\n"+link+"\n\nThis link expires in 24 hours.")
 }
 
@@ -332,11 +332,15 @@ func (s *Server) sendReset(ctx context.Context, u db.User) error {
 		TokenHash: hash, UserID: u.ID, ExpiresAt: time.Now().Add(resetTTL)}); err != nil {
 		return err
 	}
-	link := fmt.Sprintf("%s/reset-password?token=%s", s.Cfg.PublicURL, token)
+	link := fmt.Sprintf("%s/reset-password#token=%s", s.Cfg.PublicURL, token)
 	return s.Mailer.Send(ctx, u.Email, "Reset your Xenos password", "Reset your password:\n\n"+link+"\n\nThis link expires in 1 hour. If you did not ask for this, ignore this email.")
 }
 
 func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.resetTokenLimit.Allow(s.clientIP(r)) {
+		writeErr(w, http.StatusTooManyRequests, "too many attempts, try again later")
+		return
+	}
 	var in struct{ Token, Password string }
 	if !decode(w, r, &in) {
 		return
@@ -345,16 +349,17 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("password must be %d-%d characters", minPassword, maxPassword))
 		return
 	}
-	hash, err := auth.HashPassword(in.Password)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
+	// Check the token before the expensive hash: a request with a bad token must cost almost nothing.
 	uid, err := s.Store.Q.ConsumePasswordReset(r.Context(), auth.HashToken(in.Token))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeErr(w, http.StatusBadRequest, "invalid or expired token")
 		return
 	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	hash, err := auth.HashPassword(in.Password)
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}

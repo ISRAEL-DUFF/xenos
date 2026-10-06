@@ -49,7 +49,13 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	mailer := mail.LogMailer{Log: log}
+	if cfg.Env == "production" && !cfg.TrustProxy {
+		log.Warn("XENOS_TRUST_PROXY is false: behind a reverse proxy every client shares one IP, so per-IP rate limits apply to all users together")
+	}
+	mailer, err := mail.New(cfg, log)
+	if err != nil {
+		return err
+	}
 
 	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mailer, log, web.Dist())
 	if cfg.PVEURL != "" { // the admin capacity view reads host usage; without a host it reports it unreachable

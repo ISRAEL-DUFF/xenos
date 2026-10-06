@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { api } from "./api";
 import { useAuth } from "./auth";
 import { Button, Card, ErrorText, Field, Input } from "./ui";
@@ -123,13 +123,20 @@ export function Signup() {
   );
 }
 
+// Emailed links carry the token in the URL fragment, which browsers never send to a server, so it cannot
+// end up in proxy or access logs. Read it once and clear it from the address bar.
+function emailedToken(): string {
+  const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("token") ?? "";
+  if (token) window.history.replaceState(null, "", window.location.pathname);
+  return token;
+}
+
 export function VerifyEmail() {
-  const [params] = useSearchParams();
+  const [token] = useState(emailedToken);
   const { user, refresh } = useAuth();
   const [state, setState] = useState<"working" | "ok" | "error">("working");
   const [msg, setMsg] = useState("");
   useEffect(() => {
-    const token = params.get("token");
     if (!token) {
       setState("error");
       setMsg("This link is missing its token.");
@@ -198,11 +205,11 @@ export function ForgotPassword() {
 }
 
 export function ResetPassword() {
-  const [params] = useSearchParams();
+  const [token] = useState(emailedToken);
   const nav = useNavigate();
   const [password, setPassword] = useState("");
   const f = useSubmit(async () => {
-    await api("/auth/reset-password", { json: { token: params.get("token") ?? "", password } });
+    await api("/auth/reset-password", { json: { token, password } });
     nav("/login");
   });
   return (

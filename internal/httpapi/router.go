@@ -35,7 +35,7 @@ type Server struct {
 	Cache   *billing.BalanceCache
 	PVE     proxmox.API // optional; the admin capacity view reports the host as unreachable without it
 
-	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit *auth.Limiter
+	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit, resetTokenLimit *auth.Limiter
 }
 
 // NewServer builds a Server with its rate limiters (signup 3/hour per IP per the plan).
@@ -44,11 +44,12 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 	return &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot, Cache: cache,
 		Wallet: &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log, Alerter: &alert.Notifier{Store: st, Log: log,
 			TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID, Mailer: m, ToEmail: cfg.AlertEmail}},
-		signupLimit:    auth.NewLimiter(3, time.Hour),
-		loginIPLimit:   auth.NewLimiter(30, 15*time.Minute),
-		loginAcctLimit: auth.NewLimiter(8, 15*time.Minute),
-		resendLimit:    auth.NewLimiter(3, time.Hour),
-		resetLimit:     auth.NewLimiter(5, time.Hour),
+		signupLimit:     auth.NewLimiter(3, time.Hour),
+		loginIPLimit:    auth.NewLimiter(30, 15*time.Minute),
+		loginAcctLimit:  auth.NewLimiter(8, 15*time.Minute),
+		resendLimit:     auth.NewLimiter(3, time.Hour),
+		resetLimit:      auth.NewLimiter(5, time.Hour),
+		resetTokenLimit: auth.NewLimiter(20, 15*time.Minute),
 	}
 }
 

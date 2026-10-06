@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
@@ -258,5 +260,48 @@ func TestAdminAndAnonymousGuards(t *testing.T) {
 	c := newClient(t, ts.URL)
 	if code, _ := c.do("GET", "/v1/vms", nil, nil); code != 401 {
 		t.Fatalf("anonymous /vms = %d", code)
+	}
+}
+
+// A bad reset token must be refused before any argon2 work, and the route is rate limited per IP.
+func TestResetPasswordIsRateLimitedAndChecksTokenFirst(t *testing.T) {
+	env := newTestEnv(t)
+	c := newClient(t, env.ts.URL)
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		if code, _ := c.do("POST", "/v1/auth/reset-password", map[string]string{"token": "nope", "password": "a-long-enough-password"}, nil); code != http.StatusBadRequest {
+			t.Fatalf("attempt %d: status %d, want 400", i, code)
+		}
+	}
+	if d := time.Since(start); d > 5*time.Second { // 20 argon2 hashes would take far longer
+		t.Errorf("20 bad-token requests took %v: the hash must not run before the token is checked", d)
+	}
+	if code, _ := c.do("POST", "/v1/auth/reset-password", map[string]string{"token": "nope", "password": "a-long-enough-password"}, nil); code != http.StatusTooManyRequests {
+		t.Fatalf("21st attempt: status %d, want 429", code)
+	}
+}
+
+// X-Forwarded-For is believed only when the TCP peer is the proxy; anyone else could be forging it.
+func TestClientIPTrustsForwardedForOnlyFromTheProxy(t *testing.T) {
+	s := &Server{Cfg: config.Config{TrustProxy: true, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}}}
+	cases := []struct{ peer, xff, want string }{
+		{"127.0.0.1:5000", "9.9.9.9, 1.2.3.4", "1.2.3.4"},
+		{"10.1.2.3:5000", "1.2.3.4", "1.2.3.4"},
+		{"203.0.113.7:5000", "1.2.3.4", "203.0.113.7"}, // not the proxy: header ignored
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = tc.peer
+		r.Header.Set("X-Forwarded-For", tc.xff)
+		if got := s.clientIP(r); got != tc.want {
+			t.Errorf("peer %s xff %q: got %s, want %s", tc.peer, tc.xff, got, tc.want)
+		}
+	}
+	s.Cfg.TrustProxy = false
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5000"
+	r.Header.Set("X-Forwarded-For", "1.2.3.4")
+	if got := s.clientIP(r); got != "127.0.0.1" {
+		t.Errorf("proxy trust off: got %s", got)
 	}
 }

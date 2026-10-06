@@ -23,12 +23,22 @@ const (
 
 var ErrBadHash = errors.New("auth: malformed password hash")
 
+// hashSlots bounds concurrent argon2 runs: each needs 32 MiB, so an unbounded burst of login or reset
+// requests could exhaust memory. Excess requests wait their turn instead of allocating.
+var hashSlots = make(chan struct{}, 8)
+
+func argonKey(pw string, salt []byte, t uint32, mem uint32, threads uint8, n uint32) []byte {
+	hashSlots <- struct{}{}
+	defer func() { <-hashSlots }()
+	return argon2.IDKey([]byte(pw), salt, t, mem, threads, n)
+}
+
 func HashPassword(pw string) (string, error) {
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	key := argon2.IDKey([]byte(pw), salt, argonTime, argonMemKiB, argonThreads, argonKeyLen)
+	key := argonKey(pw, salt, argonTime, argonMemKiB, argonThreads, argonKeyLen)
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s", argon2.Version, argonMemKiB, argonTime, argonThreads,
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key)), nil
 }
@@ -55,7 +65,7 @@ func CheckPassword(pw, encoded string) (bool, error) {
 	if err != nil {
 		return false, ErrBadHash
 	}
-	got := argon2.IDKey([]byte(pw), salt, uint32(t), uint32(mem), p, uint32(len(want)))
+	got := argonKey(pw, salt, uint32(t), uint32(mem), p, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 

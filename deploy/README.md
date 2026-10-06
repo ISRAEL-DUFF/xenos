@@ -34,7 +34,13 @@ XENOS_DATABASE_URL=postgres://xenos:...@localhost:5432/xenos?sslmode=disable
 XENOS_HTTP_ADDR=127.0.0.1:8080
 XENOS_PUBLIC_URL=https://api.example.com
 XENOS_COOKIE_SECURE=true
-XENOS_TRUST_PROXY=true
+XENOS_TRUST_PROXY=true     # Caddy is on loopback; list other proxy addresses in XENOS_TRUSTED_PROXIES
+XENOS_ENV=production       # refuses to start without real iSpend, SMTP and secure cookies
+XENOS_SMTP_HOST=smtp.<provider>
+XENOS_SMTP_PORT=587
+XENOS_SMTP_USER=...
+XENOS_SMTP_PASS=...
+XENOS_MAIL_FROM="Xenos <no-reply@example.com>"
 XENOS_REGION=eu-de-1
 XENOS_PVE_URL=https://<proxmox-host>:8006
 XENOS_PVE_NODE=<node name>

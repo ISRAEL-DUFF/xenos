@@ -41,5 +41,9 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	return worker.Run(ctx, cfg, st, is, mail.LogMailer{Log: log}, log)
+	mailer, err := mail.New(cfg, log)
+	if err != nil {
+		return err
+	}
+	return worker.Run(ctx, cfg, st, is, mailer, log)
 }
