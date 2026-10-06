@@ -139,6 +139,10 @@ func ParseWebhook(secret string, h http.Header, body []byte, now time.Time) (Eve
 	if err := json.Unmarshal(body, &e); err != nil || e.EventType == "" {
 		return Event{}, fmt.Errorf("billing: malformed webhook body (no event_type)")
 	}
+	if e.ID == "" && e.Data.TxnID == "" {
+		// Without either, every such event would share one dedupe key and all but the first would be dropped.
+		return Event{}, fmt.Errorf("billing: malformed webhook body (no event id or txn_id)")
+	}
 	d := e.Data
 	wallet := d.WalletID
 	if wallet == "" {

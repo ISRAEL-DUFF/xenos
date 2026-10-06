@@ -5,7 +5,7 @@ services:
       POSTGRES_USER: xenos
       POSTGRES_PASSWORD: xenos
       POSTGRES_DB: xenos
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
 volumes:
   pgdata:

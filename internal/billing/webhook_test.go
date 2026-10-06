@@ -78,6 +78,8 @@ func TestParseWebhookRequiresAnEventType(t *testing.T) {
 		"inner payload only": `{"wallet_id":"w","amount":1,"currency":"NGN","txn_id":"t","source_type":"pull_inflow"}`,
 		"empty type":         `{"id":"e","event_type":"","wallet_id":"w","data":{"amount":1}}`,
 		"not json":           `nope`,
+		// With neither id the dedupe key would be constant and every later deposit would be dropped.
+		"no event id and no txn_id": `{"event_type":"wallet.credit.posted","data":{"wallet_id":"w","amount":1,"currency":"NGN"}}`,
 	} {
 		b := []byte(body)
 		_, err := ParseWebhook("s", SignWebhook("s", now, b, "d"), b, now)

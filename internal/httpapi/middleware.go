@@ -85,6 +85,18 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
+// requireActive blocks actions that start or spend something for accounts an operator has suspended.
+// Reading, stopping and deleting stay allowed so a suspended customer can still see why and stop paying.
+func (s *Server) requireActive(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := principalFrom(r.Context()); p != nil && p.User.Status != "active" {
+			writeErr(w, http.StatusForbidden, "this account is suspended")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requireAdmin must run after requireAuth.
 func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

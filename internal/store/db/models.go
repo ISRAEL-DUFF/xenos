@@ -21,6 +21,7 @@ type Adjustment struct {
 	Status           string      `json:"status"`
 	LastError        pgtype.Text `json:"last_error"`
 	CreatedAt        time.Time   `json:"created_at"`
+	RequestID        pgtype.Text `json:"request_id"`
 }
 
 type AdminAudit struct {

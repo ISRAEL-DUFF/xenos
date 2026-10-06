@@ -171,8 +171,14 @@ func TestAdminBalanceAdjustment(t *testing.T) {
 	newVMUser(t, env, "c@x.co", 1_000_000)
 	cust := customerOf(t, env, "c@x.co")
 	path := fmt.Sprintf("/v1/admin/users/%d/adjustments", userID(t, env, "c@x.co"))
+	seq := 0
+	post := func(in map[string]any) (int, map[string]any) {
+		seq++
+		in["request_id"] = fmt.Sprintf("req-test-%04d", seq)
+		return admin.do("POST", path, in, admin.csrfHdr())
+	}
 	// A credit is paid out of the Xenos merchant wallet; a debit is collected into it.
-	if code, out := admin.do("POST", path, map[string]any{"amount_uusdt": 100, "note": "merchant wallet is empty"}, admin.csrfHdr()); code != 409 ||
+	if code, out := post(map[string]any{"amount_uusdt": 100, "note": "merchant wallet is empty"}); code != 409 ||
 		!strings.Contains(out["error"].(string), "merchant wallet") {
 		t.Fatalf("credit from an empty merchant wallet = %d %v", code, out)
 	}
@@ -180,11 +186,11 @@ func TestAdminBalanceAdjustment(t *testing.T) {
 
 	bal := func() int64 { b, _ := env.ispend.Balances(context.Background(), cust); return b.USDTMicro }
 
-	code, out := admin.do("POST", path, map[string]any{"amount_uusdt": 2_500_000, "note": "goodwill credit, outage 3 Oct"}, admin.csrfHdr())
+	code, out := post(map[string]any{"amount_uusdt": 2_500_000, "note": "goodwill credit, outage 3 Oct"})
 	if code != 201 || out["status"] != "complete" || bal() != 3_500_000 {
 		t.Fatalf("credit = %d %v balance=%d", code, out, bal())
 	}
-	if code, _ := admin.do("POST", path, map[string]any{"amount_uusdt": -500_000, "note": "refund reversal"}, admin.csrfHdr()); code != 201 || bal() != 3_000_000 {
+	if code, _ := post(map[string]any{"amount_uusdt": -500_000, "note": "refund reversal"}); code != 201 || bal() != 3_000_000 {
 		t.Fatalf("debit: balance=%d", bal())
 	}
 
@@ -194,11 +200,11 @@ func TestAdminBalanceAdjustment(t *testing.T) {
 		"short note":   {"amount_uusdt": 100, "note": "hi"},
 		"over the cap": {"amount_uusdt": 2_000_000_000, "note": "typo with too many zeros"},
 	} {
-		if code, _ := admin.do("POST", path, body, admin.csrfHdr()); code != 400 {
+		if code, _ := post(body); code != 400 {
 			t.Errorf("%s = %d, want 400", name, code)
 		}
 	}
-	if code, _ := admin.do("POST", path, map[string]any{"amount_uusdt": -900_000_000, "note": "more than they have"}, admin.csrfHdr()); code != 409 {
+	if code, _ := post(map[string]any{"amount_uusdt": -900_000_000, "note": "more than they have"}); code != 409 {
 		t.Fatalf("overdraw = %d, want 409", code)
 	}
 	if bal() != 3_000_000 {
@@ -350,4 +356,65 @@ func TestVMMonthCost(t *testing.T) {
 
 func decodeBody(resp *http.Response, v any) error {
 	return jsonDecode(resp, v)
+}
+
+func TestAdminAdjustmentRetriesAreIdempotent(t *testing.T) {
+	env := newTestEnv(t)
+	admin := makeAdmin(t, env, "admin@x.co")
+	newVMUser(t, env, "c@x.co", 1_000_000)
+	cust := customerOf(t, env, "c@x.co")
+	env.ispend.FundMerchant(10_000_000)
+	path := fmt.Sprintf("/v1/admin/users/%d/adjustments", userID(t, env, "c@x.co"))
+	bal := func() int64 { b, _ := env.ispend.Balances(context.Background(), cust); return b.USDTMicro }
+	body := map[string]any{"amount_uusdt": 2_000_000, "note": "goodwill", "request_id": "req-retry-0001"}
+
+	if code, _ := admin.do("POST", path, body, admin.csrfHdr()); code != 201 || bal() != 3_000_000 {
+		t.Fatalf("first = balance %d", bal())
+	}
+	if code, out := admin.do("POST", path, body, admin.csrfHdr()); code != 200 || out["status"] != "complete" || bal() != 3_000_000 {
+		t.Fatalf("a retry must not pay again: %d %v balance=%d", code, out, bal())
+	}
+	if code, _ := admin.do("POST", path, map[string]any{"amount_uusdt": 3_000_000, "note": "goodwill", "request_id": "req-retry-0001"}, admin.csrfHdr()); code != 409 {
+		t.Fatalf("the same request_id for a different amount = %d, want 409", code)
+	}
+	if code, _ := admin.do("POST", path, map[string]any{"amount_uusdt": 1, "note": "goodwill"}, admin.csrfHdr()); code != 400 {
+		t.Fatalf("a missing request_id = %d, want 400", code)
+	}
+	if n := count(t, env, `SELECT count(*) FROM adjustments`); n != 1 {
+		t.Fatalf("adjustments recorded: %d, want 1", n)
+	}
+}
+
+func TestAdminAdjustmentDailyLimit(t *testing.T) {
+	env := newTestEnv(t)
+	admin := makeAdmin(t, env, "admin@x.co")
+	newVMUser(t, env, "c@x.co", 1_000_000)
+	env.ispend.FundMerchant(100_000_000_000)
+	path := fmt.Sprintf("/v1/admin/users/%d/adjustments", userID(t, env, "c@x.co"))
+	for i := 0; i < 5; i++ { // 5 x 1,000 USDT is exactly the daily limit
+		if code, out := admin.do("POST", path, map[string]any{"amount_uusdt": 1_000_000_000, "note": "bulk", "request_id": fmt.Sprintf("req-day-%04d", i)}, admin.csrfHdr()); code != 201 {
+			t.Fatalf("adjustment %d = %d %v", i, code, out)
+		}
+	}
+	if code, _ := admin.do("POST", path, map[string]any{"amount_uusdt": 1_000_000, "note": "one more", "request_id": "req-day-9999"}, admin.csrfHdr()); code != 429 {
+		t.Fatalf("over the daily limit = %d, want 429", code)
+	}
+}
+
+func TestSuspendedAccountCannotStartThings(t *testing.T) {
+	env := newTestEnv(t)
+	admin := makeAdmin(t, env, "admin@x.co")
+	user := newVMUser(t, env, "c@x.co", 1_000_000).c
+	uid := userID(t, env, "c@x.co")
+	if code, _ := admin.do("PATCH", fmt.Sprintf("/v1/admin/users/%d", uid), map[string]any{"status": "suspended"}, admin.csrfHdr()); code != 200 {
+		t.Fatalf("suspend = %d", code)
+	}
+	for _, p := range []string{"/v1/vms/1/start", "/v1/vms/1/reboot"} {
+		if code, _ := user.do("POST", p, map[string]any{}, user.csrfHdr()); code != 403 {
+			t.Errorf("%s as a suspended user = %d, want 403", p, code)
+		}
+	}
+	if code, _ := user.do("GET", "/v1/vms", nil, nil); code != 200 {
+		t.Errorf("a suspended user can still read: %d", code)
+	}
 }

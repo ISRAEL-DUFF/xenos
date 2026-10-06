@@ -35,7 +35,7 @@ type Server struct {
 	Cache   *billing.BalanceCache
 	PVE     proxmox.API // optional; the admin capacity view reports the host as unreachable without it
 
-	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit, resetTokenLimit *auth.Limiter
+	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit, resetTokenLimit, webhookFailLimit *auth.Limiter
 }
 
 // NewServer builds a Server with its rate limiters (signup 3/hour per IP per the plan).
@@ -44,12 +44,13 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 	return &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot, Cache: cache,
 		Wallet: &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log, Alerter: &alert.Notifier{Store: st, Log: log,
 			TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID, Mailer: m, ToEmail: cfg.AlertEmail}},
-		signupLimit:     auth.NewLimiter(3, time.Hour),
-		loginIPLimit:    auth.NewLimiter(30, 15*time.Minute),
-		loginAcctLimit:  auth.NewLimiter(8, 15*time.Minute),
-		resendLimit:     auth.NewLimiter(3, time.Hour),
-		resetLimit:      auth.NewLimiter(5, time.Hour),
-		resetTokenLimit: auth.NewLimiter(20, 15*time.Minute),
+		signupLimit:      auth.NewLimiter(3, time.Hour),
+		loginIPLimit:     auth.NewLimiter(30, 15*time.Minute),
+		loginAcctLimit:   auth.NewLimiter(8, 15*time.Minute),
+		resendLimit:      auth.NewLimiter(3, time.Hour),
+		webhookFailLimit: auth.NewLimiter(30, time.Minute),
+		resetLimit:       auth.NewLimiter(5, time.Hour),
+		resetTokenLimit:  auth.NewLimiter(20, 15*time.Minute),
 	}
 }
 
@@ -84,21 +85,21 @@ func (s *Server) Router() http.Handler {
 			r.Post("/auth/change-password", s.changePassword)
 
 			r.Get("/ssh-keys", s.listSSHKeys)
-			r.Post("/ssh-keys", s.createSSHKey)
+			r.With(s.requireActive).Post("/ssh-keys", s.createSSHKey)
 			r.Delete("/ssh-keys/{id}", s.deleteSSHKey)
 
 			r.Post("/vms", s.createVM)
 			r.Get("/vms", s.listVMs)
 			r.Get("/vms/{id}", s.getVM)
 			r.Delete("/vms/{id}", s.deleteVM)
-			r.Post("/vms/{id}/start", s.powerAction("start", "stopped"))
+			r.With(s.requireActive).Post("/vms/{id}/start", s.powerAction("start", "stopped"))
 			r.Post("/vms/{id}/stop", s.powerAction("stop", "running"))
-			r.Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
+			r.With(s.requireActive).Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
 
 			r.Get("/wallet", s.getWallet)
 			r.Patch("/wallet/settings", s.walletSettings)
 			// Starting a top-up or conversion needs a verified email.
-			r.With(s.requireVerified).Post("/wallet/convert", s.convert)
+			r.With(s.requireActive, s.requireVerified).Post("/wallet/convert", s.convert)
 		})
 
 		// Operator area: every route requires an admin account.

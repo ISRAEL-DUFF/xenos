@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,20 +20,28 @@ import (
 
 const (
 	maxAdjustmentUUSDT = 1_000 * 1_000_000 // 1,000 USDT per adjustment, a guard against typos
-	minNoteLen         = 3
-	maxNoteLen         = 200
+	// maxAdjustmentsPerDay bounds what one admin account can move in 24 hours (credits and debits both
+	// count), so a stolen admin session cannot drain the operating wallet.
+	maxAdjustmentsPerDay = 5_000 * 1_000_000
+	minNoteLen           = 3
+	maxNoteLen           = 200
 )
 
 // audit records an admin action. A failure to audit is logged but does not undo the action.
 func (s *Server) audit(r *http.Request, action, target string, detail any) {
+	if err := s.auditErr(r, action, target, detail); err != nil {
+		s.Log.Error("audit write failed", "action", action, "target", target, "err", err)
+	}
+}
+
+// auditErr is audit for actions that must not happen unrecorded (moving money): the caller aborts on error.
+func (s *Server) auditErr(r *http.Request, action, target string, detail any) error {
 	b, err := json.Marshal(detail)
 	if err != nil {
 		b = []byte("{}")
 	}
-	if err := s.Store.Q.InsertAudit(r.Context(), db.InsertAuditParams{
-		AdminID: principalFrom(r.Context()).User.ID, Action: action, Target: target, Detail: b}); err != nil {
-		s.Log.Error("audit write failed", "action", action, "target", target, "err", err)
-	}
+	return s.Store.Q.InsertAudit(r.Context(), db.InsertAuditParams{
+		AdminID: principalFrom(r.Context()).User.ID, Action: action, Target: target, Detail: b})
 }
 
 func likeEscape(q string) string {
@@ -190,14 +199,20 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusForbidden, "admin accounts cannot be suspended or banned from the web")
 			return
 		}
-		if *in.Status == "banned" {
-			n, err := accounts.Ban(ctx, s.Store, s.Jobs, id)
-			if err != nil {
-				s.fail(w, r, err)
-				return
-			}
-			result["vms_suspending"] = n
-		} else if _, err := s.Store.Q.SetUserStatusByID(ctx, db.SetUserStatusByIDParams{ID: id, Status: *in.Status}); err != nil {
+		var n int
+		var err error
+		switch *in.Status {
+		case "banned":
+			n, err = accounts.Ban(ctx, s.Store, s.Jobs, id)
+			result["vms_suspending"] = &n
+		case "suspended":
+			n, err = accounts.Suspend(ctx, s.Store, s.Jobs, id)
+			result["vms_suspending"] = &n
+		default:
+			n, err = accounts.Reactivate(ctx, s.Store, s.Jobs, id)
+			result["vms_resuming"] = &n
+		}
+		if err != nil {
 			s.fail(w, r, err)
 			return
 		}
@@ -211,8 +226,12 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// adminAdjust applies a manual balance change through iSpend and records it with
-// the admin's note. The adjustment id is the iSpend idempotency key.
+// requestIDRe is the shape of a client-chosen adjustment request id (a UUID or similar).
+var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
+
+// adminAdjust applies a manual balance change through iSpend and records it with the admin's note.
+// The caller supplies a request_id: the same id from the same admin is the same adjustment, so a retry
+// after a timeout or crash resumes the original (same iSpend idempotency key) instead of paying twice.
 func (s *Server) adminAdjust(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -221,12 +240,16 @@ func (s *Server) adminAdjust(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		AmountUUSDT int64  `json:"amount_uusdt"`
 		Note        string `json:"note"`
+		RequestID   string `json:"request_id"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
 	note := strings.TrimSpace(in.Note)
 	switch {
+	case !requestIDRe.MatchString(in.RequestID):
+		writeErr(w, http.StatusBadRequest, "request_id is required (8-64 letters, digits, - or _): reuse it to retry safely")
+		return
 	case in.AmountUUSDT == 0:
 		writeErr(w, http.StatusBadRequest, "amount must not be zero")
 		return
@@ -251,8 +274,47 @@ func (s *Server) adminAdjust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	adminID := principalFrom(ctx).User.ID
-	adjID, err := s.Store.Q.CreateAdjustment(ctx, db.CreateAdjustmentParams{AdminID: adminID, UserID: id, AmountUusdt: in.AmountUUSDT, Note: note})
-	if err != nil {
+	reqID := textOf(in.RequestID)
+
+	// A repeat of an earlier request resumes it; it never creates a second adjustment.
+	adjID, err := s.Store.Q.CreateAdjustment(ctx, db.CreateAdjustmentParams{AdminID: adminID, UserID: id, AmountUusdt: in.AmountUUSDT, Note: note, RequestID: reqID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		prev, err := s.Store.Q.GetAdjustmentByRequest(ctx, db.GetAdjustmentByRequestParams{AdminID: adminID, RequestID: reqID})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		switch {
+		case prev.UserID != id || prev.AmountUusdt != in.AmountUUSDT || prev.Note != note:
+			writeErr(w, http.StatusConflict, "this request_id was already used for a different adjustment")
+			return
+		case prev.Status == "complete":
+			writeJSON(w, http.StatusOK, map[string]any{"id": prev.ID, "amount_uusdt": prev.AmountUusdt, "note": prev.Note, "status": "complete"})
+			return
+		case prev.Status == "failed":
+			writeErr(w, http.StatusConflict, "that request failed earlier: send it again with a new request_id")
+			return
+		}
+		adjID = prev.ID // still pending (a crash after the money moved, or a timeout): replay it below
+	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	} else {
+		moved, err := s.Store.Q.SumAdminAdjustments24h(ctx, adminID)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if moved > maxAdjustmentsPerDay { // this row is already counted in the sum
+			_ = s.Store.Q.FailAdjustment(ctx, db.FailAdjustmentParams{ID: adjID, LastError: textOf("daily adjustment limit")})
+			s.audit(r, "balance.adjust.refused", target.Email, map[string]any{"adjustment": adjID, "amount_uusdt": in.AmountUUSDT, "reason": "daily limit"})
+			writeErr(w, http.StatusTooManyRequests, "this admin account has reached its 24-hour adjustment limit of 5,000 USDT")
+			return
+		}
+	}
+
+	// Record the intent before any money moves: an adjustment that cannot be audited does not happen.
+	if err := s.auditErr(r, "balance.adjust.start", target.Email, map[string]any{"adjustment": adjID, "amount_uusdt": in.AmountUUSDT, "note": note}); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -277,7 +339,7 @@ func (s *Server) adminAdjust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Store.Q.CompleteAdjustment(ctx, db.CompleteAdjustmentParams{ID: adjID, IspendMovementID: textOf(mv.ID)}); err != nil {
-		s.fail(w, r, err)
+		s.fail(w, r, err) // the money moved; a retry with the same request_id replays the idempotent transfer and completes it
 		return
 	}
 	s.Cache.Invalidate(target.IspendCustomerID.String)

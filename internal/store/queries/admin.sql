@@ -28,7 +28,17 @@ ORDER BY v.id DESC
 LIMIT 200;
 
 -- name: CreateAdjustment :one
-INSERT INTO adjustments (admin_id, user_id, amount_uusdt, note) VALUES ($1, $2, $3, $4) RETURNING id;
+-- A repeat of (admin, request_id) inserts nothing and returns no row: the caller then reads the original.
+INSERT INTO adjustments (admin_id, user_id, amount_uusdt, note, request_id) VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (admin_id, request_id) WHERE request_id IS NOT NULL DO NOTHING
+RETURNING id;
+
+-- name: GetAdjustmentByRequest :one
+SELECT id, user_id, amount_uusdt, note, status FROM adjustments WHERE admin_id = $1 AND request_id = $2;
+
+-- name: SumAdminAdjustments24h :one
+SELECT COALESCE(sum(abs(amount_uusdt)), 0)::bigint FROM adjustments
+WHERE admin_id = $1 AND status <> 'failed' AND created_at > now() - interval '24 hours';
 
 -- name: CompleteAdjustment :exec
 UPDATE adjustments SET status = 'complete', ispend_movement_id = $2, last_error = NULL WHERE id = $1;

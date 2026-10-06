@@ -109,11 +109,13 @@ export function AdminUserDetail() {
   const [confirmBan, setConfirmBan] = useState(false);
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  // One id per attempt: a retry of the same submission (timeout, double click) is the same adjustment server-side.
+  const [requestId, setRequestId] = useState(() => crypto.randomUUID());
 
   const patch = useMutation({ mutationFn: (body: object) => api(`/admin/users/${id}`, { method: "PATCH", json: body }), onSuccess: () => { setConfirmBan(false); refresh(); } });
   const adjust = useMutation({
-    mutationFn: (micro: number) => api(`/admin/users/${id}/adjustments`, { json: { amount_uusdt: micro, note } }),
-    onSuccess: () => { setAmount(""); setNote(""); refresh(); },
+    mutationFn: (micro: number) => api(`/admin/users/${id}/adjustments`, { json: { amount_uusdt: micro, note, request_id: requestId } }),
+    onSuccess: () => { setAmount(""); setNote(""); setRequestId(crypto.randomUUID()); refresh(); },
   });
 
   if (q.isLoading) return <Loading />;

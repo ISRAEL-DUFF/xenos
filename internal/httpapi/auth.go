@@ -217,6 +217,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(in.Email))
+	if len(email) > 254 { // no real address is longer; do not let junk keys fill the limiter
+		writeErr(w, http.StatusUnauthorized, "invalid email or password")
+		return
+	}
 	if !s.loginAcctLimit.Allow(email) {
 		writeErr(w, http.StatusTooManyRequests, "too many attempts for this account, try again later")
 		return

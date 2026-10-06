@@ -181,22 +181,27 @@ func (q *Queries) CountTotalIPs(ctx context.Context) (int64, error) {
 }
 
 const createAdjustment = `-- name: CreateAdjustment :one
-INSERT INTO adjustments (admin_id, user_id, amount_uusdt, note) VALUES ($1, $2, $3, $4) RETURNING id
+INSERT INTO adjustments (admin_id, user_id, amount_uusdt, note, request_id) VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (admin_id, request_id) WHERE request_id IS NOT NULL DO NOTHING
+RETURNING id
 `
 
 type CreateAdjustmentParams struct {
-	AdminID     int64  `json:"admin_id"`
-	UserID      int64  `json:"user_id"`
-	AmountUusdt int64  `json:"amount_uusdt"`
-	Note        string `json:"note"`
+	AdminID     int64       `json:"admin_id"`
+	UserID      int64       `json:"user_id"`
+	AmountUusdt int64       `json:"amount_uusdt"`
+	Note        string      `json:"note"`
+	RequestID   pgtype.Text `json:"request_id"`
 }
 
+// A repeat of (admin, request_id) inserts nothing and returns no row: the caller then reads the original.
 func (q *Queries) CreateAdjustment(ctx context.Context, arg CreateAdjustmentParams) (int64, error) {
 	row := q.db.QueryRow(ctx, createAdjustment,
 		arg.AdminID,
 		arg.UserID,
 		arg.AmountUusdt,
 		arg.Note,
+		arg.RequestID,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -215,6 +220,36 @@ type FailAdjustmentParams struct {
 func (q *Queries) FailAdjustment(ctx context.Context, arg FailAdjustmentParams) error {
 	_, err := q.db.Exec(ctx, failAdjustment, arg.ID, arg.LastError)
 	return err
+}
+
+const getAdjustmentByRequest = `-- name: GetAdjustmentByRequest :one
+SELECT id, user_id, amount_uusdt, note, status FROM adjustments WHERE admin_id = $1 AND request_id = $2
+`
+
+type GetAdjustmentByRequestParams struct {
+	AdminID   int64       `json:"admin_id"`
+	RequestID pgtype.Text `json:"request_id"`
+}
+
+type GetAdjustmentByRequestRow struct {
+	ID          int64  `json:"id"`
+	UserID      int64  `json:"user_id"`
+	AmountUusdt int64  `json:"amount_uusdt"`
+	Note        string `json:"note"`
+	Status      string `json:"status"`
+}
+
+func (q *Queries) GetAdjustmentByRequest(ctx context.Context, arg GetAdjustmentByRequestParams) (GetAdjustmentByRequestRow, error) {
+	row := q.db.QueryRow(ctx, getAdjustmentByRequest, arg.AdminID, arg.RequestID)
+	var i GetAdjustmentByRequestRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.AmountUusdt,
+		&i.Note,
+		&i.Status,
+	)
+	return i, err
 }
 
 const insertAudit = `-- name: InsertAudit :exec
@@ -416,4 +451,16 @@ func (q *Queries) SetUserVMLimit(ctx context.Context, arg SetUserVMLimitParams) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const sumAdminAdjustments24h = `-- name: SumAdminAdjustments24h :one
+SELECT COALESCE(sum(abs(amount_uusdt)), 0)::bigint FROM adjustments
+WHERE admin_id = $1 AND status <> 'failed' AND created_at > now() - interval '24 hours'
+`
+
+func (q *Queries) SumAdminAdjustments24h(ctx context.Context, adminID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, sumAdminAdjustments24h, adminID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
