@@ -360,3 +360,44 @@ func (c *Client) DialConsole(ctx context.Context, vmid int, t ConsoleTicket) (Co
 	}
 	return wsConn{conn}, nil
 }
+
+// AgentExec runs a command in the guest through the QEMU guest agent, feeding stdin, and returns its pid.
+func (c *Client) AgentExec(ctx context.Context, vmid int, command []string, stdin string) (int, error) {
+	f := url.Values{"command": command}
+	if stdin != "" {
+		f.Set("input-data", stdin)
+	}
+	var out struct {
+		PID int `json:"pid"`
+	}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/agent/exec", c.node, vmid), f, &out); err != nil {
+		return 0, err
+	}
+	return out.PID, nil
+}
+
+// pveBool reads the 0/1 or true/false Proxmox uses for flags.
+type pveBool bool
+
+func (b *pveBool) UnmarshalJSON(d []byte) error {
+	switch strings.Trim(string(d), `"`) {
+	case "1", "true":
+		*b = true
+	default:
+		*b = false
+	}
+	return nil
+}
+
+func (c *Client) AgentExecStatus(ctx context.Context, vmid int, pid int) (ExecStatus, error) {
+	var out struct {
+		Exited   pveBool `json:"exited"`
+		ExitCode int     `json:"exitcode"`
+		OutData  string  `json:"out-data"`
+		ErrData  string  `json:"err-data"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/agent/exec-status?pid=%d", c.node, vmid, pid), nil, &out); err != nil {
+		return ExecStatus{}, err
+	}
+	return ExecStatus{Exited: bool(out.Exited), ExitCode: out.ExitCode, Output: out.OutData + out.ErrData}, nil
+}

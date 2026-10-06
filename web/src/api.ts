@@ -83,6 +83,8 @@ export interface VM {
   price_uusdt_hourly: number;
   created_at: string;
   month_cost_uusdt?: number;
+  labels?: Record<string, string>;
+  boot_script?: { status: string; exit_code?: number; output?: string };
   /** Set while the worker resizes, snapshots or restores the VM. */
   busy?: "resizing" | "snapshotting" | "restoring" | "rebuilding";
 }

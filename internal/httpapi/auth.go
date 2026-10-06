@@ -371,6 +371,11 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// A reset is how an account is recovered after a compromise, so API tokens do not survive it.
+	if err := s.Store.Q.RevokeUserAPITokens(r.Context(), uid); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "password updated"})
 }
 

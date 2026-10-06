@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 )
 
@@ -196,4 +197,14 @@ func TestRebuildAPI(t *testing.T) {
 	if n := count(t, env, `SELECT count(*) FROM vms v JOIN templates t ON t.id=v.template_id WHERE t.slug='ubuntu-24.04'`); n != 1 {
 		t.Errorf("the template must not change before the worker finishes")
 	}
+}
+
+func mustReq(t *testing.T, method, url, token string) *http.Request {
+	t.Helper()
+	r, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Authorization", "Bearer "+token)
+	return r
 }

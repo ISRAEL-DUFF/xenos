@@ -303,8 +303,14 @@ func (s *Server) rebuildVM(w http.ResponseWriter, r *http.Request) {
 		Template  string  `json:"template"`
 		SSHKeyIDs []int64 `json:"ssh_key_ids"`
 		Confirm   bool    `json:"confirm"`
+		// BootScript runs once after the rebuild (a rebuild does not keep the previous one: it was erased after it ran).
+		BootScript string `json:"boot_script"`
 	}
 	if !decode(w, r, &in) {
+		return
+	}
+	if msg := validBootScript(in.BootScript); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 	if !in.Confirm {
@@ -356,7 +362,7 @@ func (s *Server) rebuildVM(w http.ResponseWriter, r *http.Request) {
 
 	err = s.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
 		n, err := q.ClaimVMRebuild(ctx, db.ClaimVMRebuildParams{ID: v.ID, UserID: user.ID,
-			RebuildTemplateID: pgtype.Int8{Int64: tpl.ID, Valid: true}, RebuildKeys: pgtype.Text{String: keys, Valid: true}})
+			RebuildTemplateID: pgtype.Int8{Int64: tpl.ID, Valid: true}, RebuildKeys: pgtype.Text{String: keys, Valid: true}, RebuildBootScript: bootScriptText(in.BootScript)})
 		if err != nil {
 			return err
 		}
@@ -373,4 +379,11 @@ func (s *Server) rebuildVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "template": tpl.Slug})
+}
+
+func bootScriptText(s string) pgtype.Text {
+	if s == "" {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: s, Valid: true}
 }

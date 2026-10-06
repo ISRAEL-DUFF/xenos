@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/jobs"
@@ -34,6 +35,7 @@ const (
 	JobSnapshotDelete = "vm.snapshot_delete" // remove a customer snapshot
 	JobRestore        = "vm.restore"         // roll the disk back to a snapshot
 	JobRebuild        = "vm.rebuild"         // reinstall from a template, keeping the VM's IP and plan
+	JobBootScript     = "vm.bootscript"      // run the customer's boot script once, through the guest agent
 )
 
 // Power actions accepted by JobPower.
@@ -115,6 +117,7 @@ func (p *Provisioner) Handlers() map[string]jobs.Handler {
 		JobSnapshotDelete: p.handle(p.snapshotDelete),
 		JobRestore:        p.handle(p.restore),
 		JobRebuild:        p.handle(p.rebuild),
+		JobBootScript:     p.handle(p.bootScript),
 	}
 }
 
@@ -197,7 +200,16 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 	}
 	// Billing starts now, at the top of the current hour (hours are charged in advance).
 	// A VM that never reaches running is never charged, so a failed build needs no refund.
-	if _, err := p.Store.Q.MarkVMRunning(ctx, db.MarkVMRunningParams{ID: w.ID, BillingFrom: tsOf(p.now().Truncate(time.Hour))}); err != nil {
+	err := p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		if _, err := q.MarkVMRunning(ctx, db.MarkVMRunningParams{ID: w.ID, BillingFrom: tsOf(p.now().Truncate(time.Hour))}); err != nil {
+			return err
+		}
+		if w.BootScriptStatus == "pending" { // queued with the state change, so a crash cannot skip it
+			return jobs.EnqueueTx(ctx, tx, JobBootScript, Payload{VMID: w.ID})
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 	p.Log.Info("vm running", "vm_id", w.ID, "vmid", vmid)

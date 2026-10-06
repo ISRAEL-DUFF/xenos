@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,10 +38,34 @@ type vmJSON struct {
 	SSHCommand  string    `json:"ssh_command,omitempty"`
 	HourlyUUSDT int64     `json:"price_uusdt_hourly"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Labels are free-form tags a program sets to find its own VMs again.
+	Labels map[string]string `json:"labels"`
+	// BootScript is the outcome of the script given at creation: none, pending, running, ok or failed.
+	BootScript *bootScriptJSON `json:"boot_script,omitempty"`
 	// Busy is set while the worker resizes, snapshots or restores the VM; power actions wait until it clears.
 	Busy string `json:"busy,omitempty"`
 	// Detail view only: what this VM has cost so far this UTC month.
 	MonthCostUUSDT *int64 `json:"month_cost_uusdt,omitempty"`
+}
+
+type bootScriptJSON struct {
+	Status   string `json:"status"`
+	ExitCode *int32 `json:"exit_code,omitempty"`
+	Output   string `json:"output,omitempty"`
+}
+
+// withExtras fills the fields that need more than the common columns.
+func (v vmJSON) withExtras(labels []byte, bsStatus string, bsExit pgtype.Int4, bsOut pgtype.Text) vmJSON {
+	v.Labels = map[string]string{}
+	_ = json.Unmarshal(labels, &v.Labels)
+	if bsStatus != "" && bsStatus != "none" {
+		b := &bootScriptJSON{Status: bsStatus, Output: bsOut.String}
+		if bsExit.Valid {
+			b.ExitCode = &bsExit.Int32
+		}
+		v.BootScript = b
+	}
+	return v
 }
 
 func newVMJSON(id int64, hostname, region, plan, tpl, state, ipv4 string, ipv6 pgtype.Text, user string, hourly int64, created time.Time, busy pgtype.Text) vmJSON {
@@ -66,11 +91,33 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		Template  string  `json:"template"`
 		Hostname  string  `json:"hostname"`
 		SSHKeyIDs []int64 `json:"ssh_key_ids"`
+		// Labels tag the VM so a program can find it again; BootScript runs once as root after it is up.
+		Labels     map[string]string `json:"labels"`
+		BootScript string            `json:"boot_script"`
 	}
 	if !decode(w, r, &in) {
 		return
 	}
 	ctx := r.Context()
+	labels, msg := validLabels(in.Labels)
+	if msg == "" {
+		msg = validBootScript(in.BootScript)
+	}
+	if msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	// Idempotency-Key makes creation at-most-once per user: a repeat returns the VM the first call made.
+	clientToken := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(clientToken) > 128 {
+		writeErr(w, http.StatusBadRequest, "Idempotency-Key is at most 128 characters")
+		return
+	}
+	if clientToken != "" {
+		if s.replayCreate(w, r, p.User.ID, clientToken, in.Plan, in.Template, in.Hostname) {
+			return
+		}
+	}
 
 	hostname := strings.ToLower(strings.TrimSpace(in.Hostname))
 	if hostname == "" {
@@ -158,8 +205,15 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("balance must cover %d hours of usage for all your VMs (%d micro-USDT needed, %d available)", minRunwayHours, need, bal.USDTMicro)}
 			return errAbort
 		}
-		id, err := q.CreateVM(ctx, db.CreateVMParams{UserID: user.ID, Region: s.Cfg.Region, PlanID: plan.ID,
-			TemplateID: tpl.ID, Hostname: hostname, AuthorizedKeys: strings.Join(keys, "\n")})
+		cp := db.CreateVMParams{UserID: user.ID, Region: s.Cfg.Region, PlanID: plan.ID,
+			TemplateID: tpl.ID, Hostname: hostname, AuthorizedKeys: strings.Join(keys, "\n"), Labels: labels}
+		if clientToken != "" {
+			cp.ClientToken = textOf(clientToken)
+		}
+		if in.BootScript != "" {
+			cp.BootScript, cp.BootScriptStatus = textOf(in.BootScript), "pending"
+		}
+		id, err := q.CreateVM(ctx, cp)
 		if err != nil {
 			return err
 		}
@@ -186,7 +240,13 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, errAbort) {
 		writeErr(w, apiErr.status, apiErr.msg)
 		return
-	} else if err != nil {
+	} else if isUniqueViolation(err) && clientToken != "" {
+		// Two creates with one Idempotency-Key raced: the other one won, so answer with its VM.
+		if s.replayCreate(w, r, user.ID, clientToken, in.Plan, in.Template, in.Hostname) {
+			return
+		}
+	}
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -199,9 +259,16 @@ func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	want, ok := labelFilter(w, r)
+	if !ok {
+		return
+	}
 	out := make([]vmJSON, 0, len(rows))
 	for _, v := range rows {
-		out = append(out, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy))
+		if !labelsMatch(v.Labels, want) {
+			continue
+		}
+		out = append(out, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -220,7 +287,7 @@ func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy)
+	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput)
 	now := time.Now().UTC()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	cost, err := s.Store.Q.MonthChargedForVM(r.Context(), db.MonthChargedForVMParams{VmID: id, Hour: monthStart, Hour_2: monthStart.AddDate(0, 1, 0)})
@@ -242,7 +309,7 @@ func (s *Server) respondVM(w http.ResponseWriter, r *http.Request, id, userID in
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, status, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy))
+	writeJSON(w, status, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput))
 }
 
 // powerAction validates the request against the VM's current state and queues

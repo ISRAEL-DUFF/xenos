@@ -23,7 +23,7 @@ const principalKey ctxKey = 0
 type Principal struct {
 	User      db.User
 	TokenHash []byte
-	Kind      string // "cookie" or "bearer"
+	Kind      string // "cookie", "bearer" (a login session) or "token" (an API token)
 	CSRFToken string
 }
 
@@ -46,6 +46,10 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if kind == "bearer" && strings.HasPrefix(token, apiTokenPrefix) {
+			s.authenticateAPIToken(w, r, next, token)
+			return
+		}
 		row, err := s.Store.Q.GetSessionUser(r.Context(), auth.HashToken(token))
 		if err != nil {
 			if !errors.Is(err, pgx.ErrNoRows) {
@@ -63,6 +67,18 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		}
 		p := &Principal{User: userFromRow(row), TokenHash: row.TokenHash, Kind: row.Kind, CSRFToken: row.CsrfToken}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
+	})
+}
+
+// requireSession keeps an action for a signed-in person: an API token cannot change the account, move
+// money, mint more tokens or reach the admin area, so a leaked token can only manage VMs.
+func (s *Server) requireSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := principalFrom(r.Context()); p != nil && p.Kind == "token" {
+			writeErr(w, http.StatusForbidden, "this action needs a signed-in session, not an API token")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

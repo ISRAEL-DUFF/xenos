@@ -255,3 +255,28 @@ func TestConsoleTicketAndWebsocket(t *testing.T) {
 		t.Fatalf("websocket request: auth=%q query=%q", auth, query)
 	}
 }
+
+func TestAgentExecRequestShapes(t *testing.T) {
+	c, got := testClient(t, func(r recorded) string {
+		if strings.Contains(r.path, "exec-status") {
+			return `{"exited":1,"exitcode":3,"out-data":"hello\n","err-data":"oops\n"}`
+		}
+		return `{"pid":4242}`
+	})
+	ctx := context.Background()
+	pid, err := c.AgentExec(ctx, 105, []string{"/bin/bash", "-s"}, "echo hi")
+	if err != nil || pid != 4242 {
+		t.Fatalf("exec = %d %v", pid, err)
+	}
+	r := (*got)[0]
+	if r.method != "POST" || r.path != "/api2/json/nodes/pve1/qemu/105/agent/exec" || strings.Join(r.form["command"], " ") != "/bin/bash -s" || r.form.Get("input-data") != "echo hi" {
+		t.Fatalf("exec request: %+v", r)
+	}
+	st, err := c.AgentExecStatus(ctx, 105, 4242)
+	if err != nil || !st.Exited || st.ExitCode != 3 || st.Output != "hello\noops\n" {
+		t.Fatalf("status = %+v %v", st, err)
+	}
+	if r := (*got)[1]; r.method != "GET" || r.path != "/api2/json/nodes/pve1/qemu/105/agent/exec-status?pid=4242" {
+		t.Fatalf("status request: %+v", r)
+	}
+}

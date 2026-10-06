@@ -39,6 +39,7 @@ type Server struct {
 	consoles     consoleStore
 	consoleLimit *auth.Limiter
 	rebuildLimit *auth.Limiter
+	tokenLimit   *auth.Limiter
 
 	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit, resetTokenLimit, webhookFailLimit *auth.Limiter
 }
@@ -56,6 +57,7 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 		webhookFailLimit: auth.NewLimiter(30, time.Minute),
 		consoleLimit:     auth.NewLimiter(10, time.Minute),
 		rebuildLimit:     auth.NewLimiter(5, time.Hour),
+		tokenLimit:       auth.NewLimiter(600, time.Minute),
 		resetLimit:       auth.NewLimiter(5, time.Hour),
 		resetTokenLimit:  auth.NewLimiter(20, 15*time.Minute),
 	}
@@ -87,9 +89,14 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireAuth)
 			r.Get("/auth/me", s.me)
-			r.Post("/auth/logout", s.logout)
-			r.Post("/auth/resend-verification", s.resendVerification)
-			r.Post("/auth/change-password", s.changePassword)
+			r.With(s.requireSession).Post("/auth/logout", s.logout)
+			r.With(s.requireSession).Post("/auth/resend-verification", s.resendVerification)
+			r.With(s.requireSession).Post("/auth/change-password", s.changePassword)
+
+			// API tokens are managed by a signed-in person only.
+			r.With(s.requireSession).Get("/tokens", s.listTokens)
+			r.With(s.requireSession, s.requireVerified).Post("/tokens", s.createToken)
+			r.With(s.requireSession).Delete("/tokens/{id}", s.deleteToken)
 
 			r.Get("/ssh-keys", s.listSSHKeys)
 			r.With(s.requireActive).Post("/ssh-keys", s.createSSHKey)
@@ -98,13 +105,14 @@ func (s *Server) Router() http.Handler {
 			r.Post("/vms", s.createVM)
 			r.Get("/vms", s.listVMs)
 			r.Get("/vms/{id}", s.getVM)
+			r.Patch("/vms/{id}", s.patchVM)
 			r.Delete("/vms/{id}", s.deleteVM)
 			r.With(s.requireActive).Post("/vms/{id}/start", s.powerAction("start", "stopped"))
 			r.Post("/vms/{id}/stop", s.powerAction("stop", "running"))
 			r.With(s.requireActive).Post("/vms/{id}/reboot", s.powerAction("reboot", "running"))
 
-			r.With(s.requireActive).Post("/vms/{id}/console", s.createConsole)
-			r.Get("/vms/{id}/console/ws", s.consoleSocket)
+			r.With(s.requireSession, s.requireActive).Post("/vms/{id}/console", s.createConsole)
+			r.With(s.requireSession).Get("/vms/{id}/console/ws", s.consoleSocket)
 			r.With(s.requireActive).Post("/vms/{id}/resize", s.resizeVM)
 			r.With(s.requireActive).Post("/vms/{id}/rebuild", s.rebuildVM)
 			r.Get("/vms/{id}/snapshots", s.listSnapshots)
@@ -113,14 +121,14 @@ func (s *Server) Router() http.Handler {
 			r.With(s.requireActive).Post("/vms/{id}/snapshots/{sid}/restore", s.restoreSnapshot)
 
 			r.Get("/wallet", s.getWallet)
-			r.Patch("/wallet/settings", s.walletSettings)
+			r.With(s.requireSession).Patch("/wallet/settings", s.walletSettings)
 			// Starting a top-up or conversion needs a verified email.
-			r.With(s.requireActive, s.requireVerified).Post("/wallet/convert", s.convert)
+			r.With(s.requireSession, s.requireActive, s.requireVerified).Post("/wallet/convert", s.convert)
 		})
 
 		// Operator area: every route requires an admin account.
 		r.Route("/admin", func(r chi.Router) {
-			r.Use(s.requireAuth, s.requireAdmin)
+			r.Use(s.requireAuth, s.requireSession, s.requireAdmin)
 			r.Get("/users", s.adminListUsers)
 			r.Get("/users/{id}", s.adminGetUser)
 			r.Patch("/users/{id}", s.adminUpdateUser)

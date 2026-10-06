@@ -26,6 +26,18 @@ func (q *Queries) AssignIP(ctx context.Context, arg AssignIPParams) error {
 	return err
 }
 
+const claimBootScript = `-- name: ClaimBootScript :execrows
+UPDATE vms SET boot_script_status = 'running' WHERE id = $1 AND boot_script_status = 'pending'
+`
+
+func (q *Queries) ClaimBootScript(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.Exec(ctx, claimBootScript, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const claimFreeIP = `-- name: ClaimFreeIP :one
 SELECT id, host(address)::text AS address, host(gateway)::text AS gateway
 FROM ip_addresses
@@ -75,7 +87,7 @@ func (q *Queries) ClaimVMBusy(ctx context.Context, arg ClaimVMBusyParams) (int64
 }
 
 const claimVMRebuild = `-- name: ClaimVMRebuild :execrows
-UPDATE vms SET busy = 'rebuilding', rebuild_template_id = $3, rebuild_keys = $4
+UPDATE vms SET busy = 'rebuilding', rebuild_template_id = $3, rebuild_keys = $4, rebuild_boot_script = $5
 WHERE id = $1 AND user_id = $2 AND busy IS NULL AND state IN ('running', 'stopped') AND deleted_at IS NULL
 `
 
@@ -84,6 +96,7 @@ type ClaimVMRebuildParams struct {
 	UserID            int64       `json:"user_id"`
 	RebuildTemplateID pgtype.Int8 `json:"rebuild_template_id"`
 	RebuildKeys       pgtype.Text `json:"rebuild_keys"`
+	RebuildBootScript pgtype.Text `json:"rebuild_boot_script"`
 }
 
 // Claims an idle running or stopped VM for a rebuild and records the template and keys to rebuild with.
@@ -93,6 +106,7 @@ func (q *Queries) ClaimVMRebuild(ctx context.Context, arg ClaimVMRebuildParams) 
 		arg.UserID,
 		arg.RebuildTemplateID,
 		arg.RebuildKeys,
+		arg.RebuildBootScript,
 	)
 	if err != nil {
 		return 0, err
@@ -139,18 +153,25 @@ func (q *Queries) CreateSnapshot(ctx context.Context, arg CreateSnapshotParams) 
 }
 
 const createVM = `-- name: CreateVM :one
-INSERT INTO vms (user_id, region, plan_id, template_id, proxmox_vmid, hostname, authorized_keys)
-VALUES ($1, $2, $3, $4, nextval('vmid_seq')::int, $5, $6)
+INSERT INTO vms (user_id, region, plan_id, template_id, proxmox_vmid, hostname, authorized_keys,
+                 labels, client_token, boot_script, boot_script_status)
+VALUES ($1, $2, $3, $4, nextval('vmid_seq')::int,
+        $5, $6, COALESCE($7::jsonb, '{}'::jsonb),
+        $8, $9, COALESCE(NULLIF($10::text, ''), 'none'))
 RETURNING id
 `
 
 type CreateVMParams struct {
-	UserID         int64  `json:"user_id"`
-	Region         string `json:"region"`
-	PlanID         int64  `json:"plan_id"`
-	TemplateID     int64  `json:"template_id"`
-	Hostname       string `json:"hostname"`
-	AuthorizedKeys string `json:"authorized_keys"`
+	UserID           int64       `json:"user_id"`
+	Region           string      `json:"region"`
+	PlanID           int64       `json:"plan_id"`
+	TemplateID       int64       `json:"template_id"`
+	Hostname         string      `json:"hostname"`
+	AuthorizedKeys   string      `json:"authorized_keys"`
+	Labels           []byte      `json:"labels"`
+	ClientToken      pgtype.Text `json:"client_token"`
+	BootScript       pgtype.Text `json:"boot_script"`
+	BootScriptStatus string      `json:"boot_script_status"`
 }
 
 func (q *Queries) CreateVM(ctx context.Context, arg CreateVMParams) (int64, error) {
@@ -161,6 +182,10 @@ func (q *Queries) CreateVM(ctx context.Context, arg CreateVMParams) (int64, erro
 		arg.TemplateID,
 		arg.Hostname,
 		arg.AuthorizedKeys,
+		arg.Labels,
+		arg.ClientToken,
+		arg.BootScript,
+		arg.BootScriptStatus,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -185,9 +210,34 @@ func (q *Queries) DeleteVMSnapshots(ctx context.Context, vmID int64) error {
 	return err
 }
 
+const finishBootScript = `-- name: FinishBootScript :exec
+UPDATE vms SET boot_script_status = $2, boot_script_exit = $3, boot_script_output = $4, boot_script = NULL WHERE id = $1
+`
+
+type FinishBootScriptParams struct {
+	ID               int64       `json:"id"`
+	BootScriptStatus string      `json:"boot_script_status"`
+	BootScriptExit   pgtype.Int4 `json:"boot_script_exit"`
+	BootScriptOutput pgtype.Text `json:"boot_script_output"`
+}
+
+// The script text is erased once it has run: it may carry a one-time registration token.
+func (q *Queries) FinishBootScript(ctx context.Context, arg FinishBootScriptParams) error {
+	_, err := q.db.Exec(ctx, finishBootScript,
+		arg.ID,
+		arg.BootScriptStatus,
+		arg.BootScriptExit,
+		arg.BootScriptOutput,
+	)
+	return err
+}
+
 const finishRebuild = `-- name: FinishRebuild :execrows
 UPDATE vms SET template_id = rebuild_template_id, authorized_keys = rebuild_keys, state = 'running',
-       rebuild_template_id = NULL, rebuild_keys = NULL, busy = NULL
+       boot_script = rebuild_boot_script,
+       boot_script_status = CASE WHEN rebuild_boot_script IS NULL THEN 'none' ELSE 'pending' END,
+       boot_script_exit = NULL, boot_script_output = NULL,
+       rebuild_template_id = NULL, rebuild_keys = NULL, rebuild_boot_script = NULL, busy = NULL
 WHERE id = $1 AND busy = 'rebuilding' AND rebuild_template_id IS NOT NULL
 `
 
@@ -251,8 +301,33 @@ func (q *Queries) GetActiveTemplateBySlug(ctx context.Context, slug string) (Tem
 	return i, err
 }
 
+const getBootScriptWork = `-- name: GetBootScriptWork :one
+SELECT id, state, proxmox_vmid, COALESCE(boot_script, '')::text AS boot_script, boot_script_status FROM vms WHERE id = $1
+`
+
+type GetBootScriptWorkRow struct {
+	ID               int64       `json:"id"`
+	State            string      `json:"state"`
+	ProxmoxVmid      pgtype.Int4 `json:"proxmox_vmid"`
+	BootScript       string      `json:"boot_script"`
+	BootScriptStatus string      `json:"boot_script_status"`
+}
+
+func (q *Queries) GetBootScriptWork(ctx context.Context, id int64) (GetBootScriptWorkRow, error) {
+	row := q.db.QueryRow(ctx, getBootScriptWork, id)
+	var i GetBootScriptWorkRow
+	err := row.Scan(
+		&i.ID,
+		&i.State,
+		&i.ProxmoxVmid,
+		&i.BootScript,
+		&i.BootScriptStatus,
+	)
+	return i, err
+}
+
 const getRebuildWork = `-- name: GetRebuildWork :one
-SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys,
+SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys, v.rebuild_boot_script,
        p.vcpu, p.ram_mb, p.disk_gb,
        COALESCE(t.proxmox_template_id, 0)::int AS template_vmid, COALESCE(t.ci_user, 'root')::text AS ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4, COALESCE(host(ip.gateway), '')::text AS gateway
@@ -272,6 +347,7 @@ type GetRebuildWorkRow struct {
 	Ipv6              pgtype.Text `json:"ipv6"`
 	RebuildTemplateID pgtype.Int8 `json:"rebuild_template_id"`
 	RebuildKeys       pgtype.Text `json:"rebuild_keys"`
+	RebuildBootScript pgtype.Text `json:"rebuild_boot_script"`
 	Vcpu              int32       `json:"vcpu"`
 	RamMb             int32       `json:"ram_mb"`
 	DiskGb            int32       `json:"disk_gb"`
@@ -293,6 +369,7 @@ func (q *Queries) GetRebuildWork(ctx context.Context, id int64) (GetRebuildWorkR
 		&i.Ipv6,
 		&i.RebuildTemplateID,
 		&i.RebuildKeys,
+		&i.RebuildBootScript,
 		&i.Vcpu,
 		&i.RamMb,
 		&i.DiskGb,
@@ -368,7 +445,7 @@ func (q *Queries) GetSSHKeysByIDs(ctx context.Context, arg GetSSHKeysByIDsParams
 }
 
 const getUserVM = `-- name: GetUserVM :one
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id,
+SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
        p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
@@ -393,6 +470,10 @@ type GetUserVMRow struct {
 	CreatedAt        time.Time   `json:"created_at"`
 	Busy             pgtype.Text `json:"busy"`
 	ResizePlanID     pgtype.Int8 `json:"resize_plan_id"`
+	Labels           []byte      `json:"labels"`
+	BootScriptStatus string      `json:"boot_script_status"`
+	BootScriptExit   pgtype.Int4 `json:"boot_script_exit"`
+	BootScriptOutput pgtype.Text `json:"boot_script_output"`
 	PlanSlug         string      `json:"plan_slug"`
 	PriceUusdtHourly int64       `json:"price_uusdt_hourly"`
 	PlanID           int64       `json:"plan_id"`
@@ -416,6 +497,10 @@ func (q *Queries) GetUserVM(ctx context.Context, arg GetUserVMParams) (GetUserVM
 		&i.CreatedAt,
 		&i.Busy,
 		&i.ResizePlanID,
+		&i.Labels,
+		&i.BootScriptStatus,
+		&i.BootScriptExit,
+		&i.BootScriptOutput,
 		&i.PlanSlug,
 		&i.PriceUusdtHourly,
 		&i.PlanID,
@@ -429,8 +514,38 @@ func (q *Queries) GetUserVM(ctx context.Context, arg GetUserVMParams) (GetUserVM
 	return i, err
 }
 
+const getVMByClientToken = `-- name: GetVMByClientToken :one
+SELECT v.id, v.hostname, p.slug AS plan_slug, t.slug AS template_slug
+FROM vms v JOIN plans p ON p.id = v.plan_id JOIN templates t ON t.id = v.template_id
+WHERE v.user_id = $1 AND v.client_token = $2
+`
+
+type GetVMByClientTokenParams struct {
+	UserID      int64       `json:"user_id"`
+	ClientToken pgtype.Text `json:"client_token"`
+}
+
+type GetVMByClientTokenRow struct {
+	ID           int64  `json:"id"`
+	Hostname     string `json:"hostname"`
+	PlanSlug     string `json:"plan_slug"`
+	TemplateSlug string `json:"template_slug"`
+}
+
+func (q *Queries) GetVMByClientToken(ctx context.Context, arg GetVMByClientTokenParams) (GetVMByClientTokenRow, error) {
+	row := q.db.QueryRow(ctx, getVMByClientToken, arg.UserID, arg.ClientToken)
+	var i GetVMByClientTokenRow
+	err := row.Scan(
+		&i.ID,
+		&i.Hostname,
+		&i.PlanSlug,
+		&i.TemplateSlug,
+	)
+	return i, err
+}
+
 const getVMForWork = `-- name: GetVMForWork :one
-SELECT v.id, v.user_id, v.hostname, v.state, v.proxmox_vmid, v.authorized_keys, v.ipv6, v.ipv4_id,
+SELECT v.id, v.user_id, v.hostname, v.state, v.proxmox_vmid, v.authorized_keys, v.ipv6, v.ipv4_id, v.boot_script_status,
        p.vcpu, p.ram_mb, p.disk_gb,
        t.proxmox_template_id, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4,
@@ -451,6 +566,7 @@ type GetVMForWorkRow struct {
 	AuthorizedKeys    string      `json:"authorized_keys"`
 	Ipv6              pgtype.Text `json:"ipv6"`
 	Ipv4ID            pgtype.Int8 `json:"ipv4_id"`
+	BootScriptStatus  string      `json:"boot_script_status"`
 	Vcpu              int32       `json:"vcpu"`
 	RamMb             int32       `json:"ram_mb"`
 	DiskGb            int32       `json:"disk_gb"`
@@ -472,6 +588,7 @@ func (q *Queries) GetVMForWork(ctx context.Context, id int64) (GetVMForWorkRow, 
 		&i.AuthorizedKeys,
 		&i.Ipv6,
 		&i.Ipv4ID,
+		&i.BootScriptStatus,
 		&i.Vcpu,
 		&i.RamMb,
 		&i.DiskGb,
@@ -514,7 +631,7 @@ func (q *Queries) GetVMSnapshot(ctx context.Context, arg GetVMSnapshotParams) (G
 }
 
 const listUserVMs = `-- name: ListUserVMs :many
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id,
+SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
        p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
@@ -535,6 +652,10 @@ type ListUserVMsRow struct {
 	CreatedAt        time.Time   `json:"created_at"`
 	Busy             pgtype.Text `json:"busy"`
 	ResizePlanID     pgtype.Int8 `json:"resize_plan_id"`
+	Labels           []byte      `json:"labels"`
+	BootScriptStatus string      `json:"boot_script_status"`
+	BootScriptExit   pgtype.Int4 `json:"boot_script_exit"`
+	BootScriptOutput pgtype.Text `json:"boot_script_output"`
 	PlanSlug         string      `json:"plan_slug"`
 	PriceUusdtHourly int64       `json:"price_uusdt_hourly"`
 	PlanID           int64       `json:"plan_id"`
@@ -564,6 +685,10 @@ func (q *Queries) ListUserVMs(ctx context.Context, userID int64) ([]ListUserVMsR
 			&i.CreatedAt,
 			&i.Busy,
 			&i.ResizePlanID,
+			&i.Labels,
+			&i.BootScriptStatus,
+			&i.BootScriptExit,
+			&i.BootScriptOutput,
 			&i.PlanSlug,
 			&i.PriceUusdtHourly,
 			&i.PlanID,
@@ -647,7 +772,7 @@ func (q *Queries) MarkVMDeleted(ctx context.Context, id int64) error {
 }
 
 const markVMError = `-- name: MarkVMError :exec
-UPDATE vms SET state = 'error', busy = NULL, rebuild_template_id = NULL, rebuild_keys = NULL WHERE id = $1
+UPDATE vms SET state = 'error', busy = NULL, rebuild_template_id = NULL, rebuild_keys = NULL, rebuild_boot_script = NULL WHERE id = $1
 `
 
 func (q *Queries) MarkVMError(ctx context.Context, id int64) error {
@@ -665,11 +790,20 @@ func (q *Queries) ReleaseIPForVM(ctx context.Context, vmID pgtype.Int8) error {
 }
 
 const releaseVMBusy = `-- name: ReleaseVMBusy :exec
-UPDATE vms SET busy = NULL, resize_plan_id = NULL, rebuild_template_id = NULL, rebuild_keys = NULL WHERE id = $1
+UPDATE vms SET busy = NULL, resize_plan_id = NULL, rebuild_template_id = NULL, rebuild_keys = NULL, rebuild_boot_script = NULL WHERE id = $1
 `
 
 func (q *Queries) ReleaseVMBusy(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, releaseVMBusy, id)
+	return err
+}
+
+const revertBootScript = `-- name: RevertBootScript :exec
+UPDATE vms SET boot_script_status = 'pending' WHERE id = $1 AND boot_script_status = 'running'
+`
+
+func (q *Queries) RevertBootScript(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, revertBootScript, id)
 	return err
 }
 
@@ -728,6 +862,24 @@ type SetVMIPv6Params struct {
 func (q *Queries) SetVMIPv6(ctx context.Context, arg SetVMIPv6Params) error {
 	_, err := q.db.Exec(ctx, setVMIPv6, arg.ID, arg.Ipv6)
 	return err
+}
+
+const setVMLabels = `-- name: SetVMLabels :execrows
+UPDATE vms SET labels = $3 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+`
+
+type SetVMLabelsParams struct {
+	ID     int64  `json:"id"`
+	UserID int64  `json:"user_id"`
+	Labels []byte `json:"labels"`
+}
+
+func (q *Queries) SetVMLabels(ctx context.Context, arg SetVMLabelsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setVMLabels, arg.ID, arg.UserID, arg.Labels)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const sumActiveHourly = `-- name: SumActiveHourly :one

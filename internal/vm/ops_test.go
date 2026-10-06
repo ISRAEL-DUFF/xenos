@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -17,9 +18,7 @@ func (e *env) running(ip string) (id int64, vmid int) {
 	e.t.Helper()
 	id = e.seedVM(ip)
 	must(e.t, e.call(e.prov, JobProvision, id, "", 1))
-	for k := range e.pve.VMs {
-		vmid = k
-	}
+	must(e.t, e.st.Pool.QueryRow(context.Background(), `SELECT proxmox_vmid FROM vms WHERE id=$1`, id).Scan(&vmid))
 	return id, vmid
 }
 
@@ -313,4 +312,164 @@ func TestRebuildFinalFailureMarksTheVMErroredAndStopsBilling(t *testing.T) {
 	if busy, _ := e.busy(id); busy != "" {
 		t.Fatal("released")
 	}
+}
+
+func (e *env) setScript(id int64, script string) {
+	e.t.Helper()
+	_, err := e.st.Pool.Exec(context.Background(), `UPDATE vms SET boot_script=$2, boot_script_status='pending' WHERE id=$1`, id, script)
+	must(e.t, err)
+}
+
+func (e *env) script(id int64) (status string, exit *int, out string, text *string) {
+	e.t.Helper()
+	var o *string
+	must(e.t, e.st.Pool.QueryRow(context.Background(), `SELECT boot_script_status, boot_script_exit, boot_script_output, boot_script FROM vms WHERE id=$1`, id).Scan(&status, &exit, &o, &text))
+	if o != nil {
+		out = *o
+	}
+	return
+}
+
+func TestProvisionQueuesTheBootScriptWithTheStateChange(t *testing.T) {
+	e := newEnv(t)
+	id := e.seedVM("203.0.113.50")
+	e.setScript(id, "echo registering with token abc123")
+	must(t, e.call(e.prov, JobProvision, id, "", 1))
+	var n int
+	must(t, e.st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM jobs WHERE kind='vm.bootscript'`).Scan(&n))
+	if n != 1 {
+		t.Fatalf("boot script jobs queued with the VM running: %d", n)
+	}
+	// A VM without a script queues nothing.
+	id2 := e.seedVM("203.0.113.51")
+	must(t, e.call(e.prov, JobProvision, id2, "", 1))
+	must(t, e.st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM jobs WHERE kind='vm.bootscript'`).Scan(&n))
+	if n != 1 {
+		t.Fatalf("a VM with no script must not queue one: %d jobs", n)
+	}
+}
+
+func TestBootScriptRunsOnceAndIsErased(t *testing.T) {
+	e := newEnv(t)
+	id, vmid := e.running("203.0.113.52")
+	e.setScript(id, "echo registering with token abc123")
+	e.pve.ExecFn = func(int, []string, string) (int, string) { return 0, "registered\n" }
+
+	must(t, e.call(e.prov, JobBootScript, id, "", 1))
+	if len(e.pve.Execs) != 1 {
+		t.Fatalf("execs: %+v", e.pve.Execs)
+	}
+	c := e.pve.Execs[0]
+	if c.VMID != vmid || strings.Join(c.Command, " ") != "/bin/bash -s" || c.Stdin != "echo registering with token abc123" {
+		t.Fatalf("the script must reach bash on stdin: %+v", c)
+	}
+	status, exit, out, text := e.script(id)
+	if status != "ok" || exit == nil || *exit != 0 || out != "registered\n" {
+		t.Fatalf("outcome: %s %v %q", status, exit, out)
+	}
+	if text != nil {
+		t.Fatal("the script text (it may hold a token) must be erased after it ran")
+	}
+	// A repeated job does not run it again.
+	must(t, e.call(e.prov, JobBootScript, id, "", 1))
+	if len(e.pve.Execs) != 1 {
+		t.Fatal("the script ran twice")
+	}
+}
+
+func TestBootScriptFailureIsRecorded(t *testing.T) {
+	e := newEnv(t)
+	id, _ := e.running("203.0.113.53")
+	e.setScript(id, "exit 3")
+	e.pve.ExecFn = func(int, []string, string) (int, string) { return 3, strings.Repeat("x", 6000) + "END" }
+	must(t, e.call(e.prov, JobBootScript, id, "", 1))
+	status, exit, out, _ := e.script(id)
+	if status != "failed" || exit == nil || *exit != 3 {
+		t.Fatalf("outcome: %s %v", status, exit)
+	}
+	if len(out) > bootOutputTail+8 || !strings.HasSuffix(out, "END") || !strings.HasPrefix(out, "…") {
+		t.Fatalf("output must keep only its tail: %d bytes", len(out))
+	}
+}
+
+func TestBootScriptStartFailureRetriesThenFails(t *testing.T) {
+	e := newEnv(t)
+	id, _ := e.running("203.0.113.54")
+	e.setScript(id, "echo hi")
+	e.pve.Fail["exec"] = errors.New("guest agent not ready")
+	if err := e.call(e.prov, JobBootScript, id, "", 1); err == nil {
+		t.Fatal("a start failure is retried by the queue")
+	}
+	if status, _, _, _ := e.script(id); status != "pending" {
+		t.Fatalf("a script that never started goes back to pending, got %s", status)
+	}
+	delete(e.pve.Fail, "exec")
+	must(t, e.call(e.prov, JobBootScript, id, "", 2))
+	if status, _, _, _ := e.script(id); status != "ok" {
+		t.Fatalf("after the retry: %s", status)
+	}
+
+	id2, _ := e.running2("203.0.113.55")
+	e.setScript(id2, "echo hi")
+	e.pve.Fail["exec"] = errors.New("guest agent not ready")
+	if err := e.call(e.prov, JobBootScript, id2, "", jobs.MaxAttempts); err == nil {
+		t.Fatal("expected failure")
+	}
+	if status, exit, out, text := e.script(id2); status != "failed" || exit == nil || *exit != -1 || !strings.Contains(out, "guest agent") || text != nil {
+		t.Fatalf("final failure: %s %v %q %v", status, exit, out, text)
+	}
+}
+
+// A script that began and was then interrupted may have done half its work: it is never run again.
+func TestInterruptedBootScriptIsNotRerun(t *testing.T) {
+	e := newEnv(t)
+	id, _ := e.running("203.0.113.56")
+	e.setScript(id, "echo hi")
+	_, err := e.st.Pool.Exec(context.Background(), `UPDATE vms SET boot_script_status='running' WHERE id=$1`, id)
+	must(t, err)
+	must(t, e.call(e.prov, JobBootScript, id, "", 1))
+	if len(e.pve.Execs) != 0 {
+		t.Fatal("an interrupted script must not be run a second time")
+	}
+	if status, _, out, text := e.script(id); status != "failed" || !strings.Contains(out, "interrupted") || text != nil {
+		t.Fatalf("%s %q %v", status, out, text)
+	}
+}
+
+func TestRebuildRunsTheNewBootScript(t *testing.T) {
+	e := newEnv(t)
+	id, _ := e.running("203.0.113.57")
+	ctx := context.Background()
+	var userID int64
+	must(t, e.st.Pool.QueryRow(ctx, `SELECT user_id FROM vms WHERE id=$1`, id).Scan(&userID))
+	tpl, _ := e.st.Q.GetActiveTemplateBySlug(ctx, "ubuntu-24.04")
+	n, err := e.st.Q.ClaimVMRebuild(ctx, db.ClaimVMRebuildParams{ID: id, UserID: userID,
+		RebuildTemplateID: pgtype.Int8{Int64: tpl.ID, Valid: true}, RebuildKeys: pgtype.Text{String: "ssh-ed25519 K", Valid: true},
+		RebuildBootScript: pgtype.Text{String: "echo after rebuild", Valid: true}})
+	must(t, err)
+	if n != 1 {
+		t.Fatal("claim")
+	}
+	must(t, e.call(e.prov, JobRebuild, id, "", 1))
+	if status, _, _, _ := e.script(id); status != "pending" {
+		t.Fatalf("a rebuild with a script leaves it pending: %s", status)
+	}
+	var jobsQueued int
+	must(t, e.st.Pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE kind='vm.bootscript'`).Scan(&jobsQueued))
+	if jobsQueued != 1 {
+		t.Fatalf("boot script jobs: %d", jobsQueued)
+	}
+	must(t, e.call(e.prov, JobBootScript, id, "", 1))
+	if status, _, _, _ := e.script(id); status != "ok" || len(e.pve.Execs) != 1 || e.pve.Execs[0].Stdin != "echo after rebuild" {
+		t.Fatalf("after the job: %s %+v", status, e.pve.Execs)
+	}
+}
+
+// running2 is running for a second VM in the same test (the fake host then holds two guests).
+func (e *env) running2(ip string) (int64, int) {
+	id := e.seedVM(ip)
+	must(e.t, e.call(e.prov, JobProvision, id, "", 1))
+	var vmid int
+	must(e.t, e.st.Pool.QueryRow(context.Background(), `SELECT proxmox_vmid FROM vms WHERE id=$1`, id).Scan(&vmid))
+	return id, vmid
 }

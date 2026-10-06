@@ -20,6 +20,10 @@ type Fake struct {
 	Pool     Usage
 	MemTotal int64
 	CPUs     int
+	// ExecFn, if set, decides what a guest command does (exit code and output); the default exits 0.
+	ExecFn func(vmid int, command []string, stdin string) (int, string)
+	// Execs records every guest command started: "vmid\x00command\x00stdin".
+	Execs []ExecCall
 	// Consoles lists the console connections opened so far.
 	Consoles []*FakeConsole
 	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
@@ -360,4 +364,44 @@ func (c *FakeConsole) Close() error {
 		close(c.in)
 	}
 	return nil
+}
+
+// ExecCall is one command the fake guest ran.
+type ExecCall struct {
+	VMID    int
+	Command []string
+	Stdin   string
+	Exit    int
+	Output  string
+}
+
+func (f *Fake) AgentExec(_ context.Context, vmid int, command []string, stdin string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("exec", vmid); err != nil {
+		return 0, err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return 0, ErrFakeNotFound
+	}
+	if !vm.Running {
+		return 0, errors.New("proxmox fake: guest agent is not running")
+	}
+	call := ExecCall{VMID: vmid, Command: command, Stdin: stdin}
+	if f.ExecFn != nil {
+		call.Exit, call.Output = f.ExecFn(vmid, command, stdin)
+	}
+	f.Execs = append(f.Execs, call)
+	return len(f.Execs), nil
+}
+
+func (f *Fake) AgentExecStatus(_ context.Context, _ int, pid int) (ExecStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if pid < 1 || pid > len(f.Execs) {
+		return ExecStatus{}, errors.New("proxmox fake: no such pid")
+	}
+	c := f.Execs[pid-1]
+	return ExecStatus{Exited: true, ExitCode: c.Exit, Output: c.Output}, nil
 }

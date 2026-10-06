@@ -27,6 +27,11 @@ type API interface {
 	SnapshotRollback(ctx context.Context, vmid int, name string) (string, error)
 	SnapshotDelete(ctx context.Context, vmid int, name string) (string, error)
 
+	// Guest agent commands: AgentExec starts a command inside the guest and returns its pid, AgentExecStatus
+	// reports whether it has exited, with its exit code and the end of its output.
+	AgentExec(ctx context.Context, vmid int, command []string, stdin string) (int, error)
+	AgentExecStatus(ctx context.Context, vmid int, pid int) (ExecStatus, error)
+
 	// Console: Console asks the host for a one-time VNC session on a running guest; DialConsole opens its
 	// websocket. The ticket is the VNC password and never leaves the control plane except to the guest's owner.
 	Console(ctx context.Context, vmid int) (ConsoleTicket, error)
@@ -49,6 +54,13 @@ type ConsoleConn interface {
 	ReadMessage() ([]byte, error)
 	WriteMessage([]byte) error
 	Close() error
+}
+
+// ExecStatus is the state of a command started with AgentExec.
+type ExecStatus struct {
+	Exited   bool
+	ExitCode int
+	Output   string // stdout then stderr
 }
 
 // VMStatus is a guest's presence and power state on the node.

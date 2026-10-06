@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/store/db"
@@ -309,11 +312,116 @@ func (p *Provisioner) doRebuild(ctx context.Context, w db.GetRebuildWorkRow) err
 		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: w.Ipv6.String, Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
 		return err
 	}
-	if n, err := p.Store.Q.FinishRebuild(ctx, w.ID); err != nil {
+	err := p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		n, err := q.FinishRebuild(ctx, w.ID)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("rebuild claim was lost")
+		}
+		if w.RebuildBootScript.Valid {
+			return jobs.EnqueueTx(ctx, tx, JobBootScript, Payload{VMID: w.ID})
+		}
+		return nil
+	})
+	if err != nil {
 		return err
-	} else if n == 0 {
-		return errors.New("rebuild claim was lost")
 	}
 	p.Log.Info("vm rebuilt", "vm_id", w.ID, "vmid", vmid)
 	return nil
+}
+
+// ---- boot script ----
+
+const (
+	bootScriptTimeout = 10 * time.Minute
+	bootScriptPoll    = 2 * time.Second
+	bootOutputTail    = 4096
+)
+
+// bootScript runs the customer's boot script once, as root, through the guest agent: the script is fed to
+// bash on stdin. It runs at most once: a start that never reached the guest is retried, but a script that
+// began and was then interrupted is recorded as failed and not run again, because it may not be repeatable.
+// The script text is erased afterwards (it can carry a one-time token); the exit code and the tail of its
+// output stay. It is for work that finishes: background anything long-lived.
+func (p *Provisioner) bootScript(ctx context.Context, j *jobs.Job, in Payload) error {
+	w, err := p.Store.Q.GetBootScriptWork(ctx, in.VMID)
+	if err != nil {
+		return err
+	}
+	finish := func(status string, exit int, out string) {
+		e := p.Store.Q.FinishBootScript(context.WithoutCancel(ctx), db.FinishBootScriptParams{ID: w.ID, BootScriptStatus: status,
+			BootScriptExit: pgtype.Int4{Int32: int32(exit), Valid: true}, BootScriptOutput: textOf(tail(out, bootOutputTail))})
+		if e != nil {
+			p.Log.Error("record boot script outcome", "vm_id", w.ID, "err", e)
+		}
+	}
+	switch w.BootScriptStatus {
+	case "running": // an earlier attempt died mid-flight
+		finish("failed", -1, "interrupted: the worker stopped while the script was running; it was not run again")
+		return nil
+	case "pending":
+	default:
+		return nil
+	}
+	if w.State != "running" {
+		finish("failed", -1, "the VM was not running")
+		return nil
+	}
+	if n, err := p.Store.Q.ClaimBootScript(ctx, w.ID); err != nil {
+		return err
+	} else if n == 0 {
+		return nil
+	}
+
+	vmid := int(w.ProxmoxVmid.Int32)
+	pid, err := p.PVE.AgentExec(ctx, vmid, []string{"/bin/bash", "-s"}, w.BootScript)
+	if err != nil { // never started: safe to retry
+		if finalFailure(ctx, j) {
+			finish("failed", -1, "could not start the script through the guest agent: "+err.Error())
+			return err
+		}
+		_ = p.Store.Q.RevertBootScript(context.WithoutCancel(ctx), w.ID)
+		return fmt.Errorf("start boot script: %w", err)
+	}
+	deadline := time.Now().Add(bootScriptTimeout)
+	for {
+		st, err := p.PVE.AgentExecStatus(ctx, vmid, pid)
+		switch {
+		case err != nil && ctx.Err() == nil && time.Now().Before(deadline):
+			// transient: keep asking
+		case err != nil:
+			finish("failed", -1, "lost contact with the script: "+err.Error())
+			return nil
+		case st.Exited:
+			status := "ok"
+			if st.ExitCode != 0 {
+				status = "failed"
+			}
+			finish(status, st.ExitCode, st.Output)
+			return nil
+		case !time.Now().Before(deadline):
+			finish("failed", -1, "the script did not finish within "+bootScriptTimeout.String()+"; scripts must finish, so background long-running work")
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			finish("failed", -1, "interrupted while the script was running")
+			return nil
+		case <-time.After(bootScriptPoll):
+		}
+	}
+}
+
+// tail keeps the last n bytes of s, on a character boundary.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	s = s[len(s)-n:]
+	for len(s) > 0 && !utf8.RuneStart(s[0]) {
+		s = s[1:]
+	}
+	return "…" + s
 }

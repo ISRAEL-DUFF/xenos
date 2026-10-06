@@ -38,6 +38,18 @@ type AlertsSent struct {
 	LastSentAt time.Time `json:"last_sent_at"`
 }
 
+type ApiToken struct {
+	ID         int64              `json:"id"`
+	UserID     int64              `json:"user_id"`
+	Name       string             `json:"name"`
+	Prefix     string             `json:"prefix"`
+	TokenHash  []byte             `json:"token_hash"`
+	CreatedAt  time.Time          `json:"created_at"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+}
+
 type Conversion struct {
 	ID               int64          `json:"id"`
 	UserID           int64          `json:"user_id"`
@@ -217,6 +229,13 @@ type Vm struct {
 	ResizePlanID      pgtype.Int8        `json:"resize_plan_id"`
 	RebuildTemplateID pgtype.Int8        `json:"rebuild_template_id"`
 	RebuildKeys       pgtype.Text        `json:"rebuild_keys"`
+	Labels            []byte             `json:"labels"`
+	ClientToken       pgtype.Text        `json:"client_token"`
+	BootScript        pgtype.Text        `json:"boot_script"`
+	BootScriptStatus  string             `json:"boot_script_status"`
+	BootScriptExit    pgtype.Int4        `json:"boot_script_exit"`
+	BootScriptOutput  pgtype.Text        `json:"boot_script_output"`
+	RebuildBootScript pgtype.Text        `json:"rebuild_boot_script"`
 }
 
 type WebhookEvent struct {
