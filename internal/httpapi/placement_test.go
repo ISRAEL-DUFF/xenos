@@ -86,7 +86,7 @@ func TestPlacementSkipsHostsThatCannotTakeTheVM(t *testing.T) {
 	}
 	must(`UPDATE hosts SET status='draining' WHERE name='a'`)
 	must(`DELETE FROM host_templates WHERE host='b'`)
-	f.fakes["c"].MemTotal = 512 << 20   // a nano VM wants 1024 MB
+	f.fakes["c"].MemTotal = 512 << 20 // a nano VM wants 1024 MB
 	code, out := u.create(t, nil)
 	if code != 202 || f.hostOf(t, out) != "d" {
 		t.Fatalf("create = %d %v host %s: only d can take it (a drains, b lacks the template, c is full)", code, out, f.hostOf(t, out))
