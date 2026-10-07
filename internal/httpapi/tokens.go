@@ -44,7 +44,7 @@ func (s *Server) authenticateAPIToken(w http.ResponseWriter, r *http.Request, ne
 		s.fail(w, r, err)
 		return
 	}
-	if row.Status == "banned" {
+	if cannotSignIn(row.Status) {
 		next.ServeHTTP(w, r)
 		return
 	}

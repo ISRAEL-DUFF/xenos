@@ -238,6 +238,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
+	if u.Status == "closing" || u.Status == "closed" {
+		writeErr(w, http.StatusForbidden, "this account has been closed")
+		return
+	}
 	if u.Status == "banned" {
 		writeErr(w, http.StatusForbidden, "account disabled")
 		return

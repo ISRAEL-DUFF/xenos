@@ -5,6 +5,9 @@
 //	xenosctl admin grant <email>                       make a user an admin
 //	xenosctl user limit <email> <n>                    set a user's VM limit
 //	xenosctl user ban|unban <email>                    ban revokes sessions and suspends their VMs
+//	xenosctl user close <email> [--settle] [--delete-vms]   close an account (--settle: you have already paid out the wallet by hand)
+//	xenosctl user reopen <email>                       undo a closure during its 30-day grace period
+//	xenosctl retention list                            closed accounts whose financial records are past the retention period
 //	xenosctl flagged                                   VMs flagged for sustained high CPU (possible mining)
 //	xenosctl flag clear <vm-id>                        dismiss a flag after review
 //	xenosctl port25 allow|block <vm-id>                exempt a reviewed VM from the outbound SMTP block
@@ -23,6 +26,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/accounts"
 	"github.com/israel-duff/xenos/internal/billing"
@@ -84,6 +90,12 @@ func run(args []string) error {
 		return setLimit(ctx, st, args[2], n)
 	case len(args) == 3 && args[0] == "user" && (args[1] == "ban" || args[1] == "unban"):
 		return setBan(ctx, st, args[2], args[1] == "ban")
+	case len(args) >= 3 && args[0] == "user" && args[1] == "close":
+		return closeUser(ctx, cfg, st, args[2], args[3:])
+	case len(args) == 3 && args[0] == "user" && args[1] == "reopen":
+		return reopenUser(ctx, st, args[2])
+	case len(args) == 2 && args[0] == "retention" && args[1] == "list":
+		return retentionList(ctx, cfg, st)
 	case len(args) == 1 && args[0] == "flagged":
 		return listFlagged(ctx, st)
 	case len(args) == 3 && args[0] == "flag" && args[1] == "clear":
@@ -333,6 +345,88 @@ func preflightCmd(ctx context.Context, args []string) error {
 	fmt.Printf("\n%d ok, %d warnings, %d failures\n", ok, warn, fail)
 	if fail > 0 {
 		os.Exit(1)
+	}
+	return nil
+}
+
+func userByEmail(ctx context.Context, st *store.Store, email string) (db.User, error) {
+	u, err := st.Q.GetUserByEmail(ctx, strings.ToLower(email))
+	if err != nil {
+		return u, fmt.Errorf("no user with email %s", email)
+	}
+	return u, nil
+}
+
+// closeUser closes an account on the customer's behalf. A wallet that still holds credit blocks it until you
+// have settled it by hand and pass --settle.
+func closeUser(ctx context.Context, cfg config.Config, st *store.Store, email string, flags []string) error {
+	opt := accounts.CloseOptions{}
+	for _, f := range flags {
+		switch f {
+		case "--settle":
+			opt.Settled = true
+		case "--delete-vms":
+			opt.DeleteVMs = true
+		default:
+			return fmt.Errorf("unknown flag %q", f)
+		}
+	}
+	u, err := userByEmail(ctx, st, email)
+	if err != nil {
+		return err
+	}
+	var is billing.ISpend
+	if !opt.Settled {
+		if cfg.ISpendURL == "" {
+			return fmt.Errorf("XENOS_ISPEND_URL is not set: cannot check the wallet (use --settle once you have settled it by hand)")
+		}
+		c, err := billing.NewISWallet(billing.ISWalletConfig{BaseURL: cfg.ISpendURL, APIKey: cfg.ISpendAPIKey,
+			MerchantWallet: cfg.ISpendMerchantWallet, OwnerPrefix: cfg.ISpendOwnerPrefix, USDTDecimals: cfg.ISpendUSDTDecimals})
+		if err != nil {
+			return err
+		}
+		is = c
+	}
+	blockers, err := accounts.Close(ctx, st, jobs.New(st.Pool), is, u, opt)
+	if err != nil {
+		return err
+	}
+	if len(blockers) > 0 {
+		for _, b := range blockers {
+			fmt.Printf("blocked (%s): %s\n", b.Code, b.Message)
+		}
+		return fmt.Errorf("the account was not closed")
+	}
+	fmt.Println("ok: the account is closing; personal data is purged after 30 days")
+	return nil
+}
+
+func reopenUser(ctx context.Context, st *store.Store, email string) error {
+	u, err := userByEmail(ctx, st, email)
+	if err != nil {
+		return err
+	}
+	if err := accounts.Reopen(ctx, st, u.ID); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+// retentionList shows closed accounts whose ledger records have outlived the retention period. Nothing is
+// deleted automatically: review the list, then remove the rows yourself.
+func retentionList(ctx context.Context, cfg config.Config, st *store.Store) error {
+	cutoff := time.Now().AddDate(-cfg.FinancialRetentionYears, 0, 0)
+	rows, err := st.Q.ListClosedBefore(ctx, pgtype.Timestamptz{Time: cutoff, Valid: true})
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		fmt.Printf("no closed account is older than %d years\n", cfg.FinancialRetentionYears)
+		return nil
+	}
+	for _, r := range rows {
+		fmt.Printf("user %d closed %s\n", r.ID, r.ClosedAt.Time.Format("2006-01-02"))
 	}
 	return nil
 }

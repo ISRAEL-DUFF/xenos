@@ -61,7 +61,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		}
 		// A token is only valid on the transport it was issued for, so a
 		// cookie value pasted into a header (or the reverse) is rejected.
-		if row.Kind != kind || row.Status == "banned" {
+		if row.Kind != kind || cannotSignIn(row.Status) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -143,4 +143,9 @@ func userFromRow(r db.GetSessionUserRow) db.User {
 	return db.User{ID: r.ID, Email: r.Email, PasswordHash: r.PasswordHash, IspendCustomerID: r.IspendCustomerID,
 		EmailVerifiedAt: r.EmailVerifiedAt, Phone: r.Phone, Status: r.Status, IsAdmin: r.IsAdmin,
 		VmLimit: r.VmLimit, AutoConvert: r.AutoConvert, CreatedAt: r.CreatedAt}
+}
+
+// cannotSignIn is true for accounts that are banned or being closed: no session, no token.
+func cannotSignIn(status string) bool {
+	return status == "banned" || status == "closing" || status == "closed"
 }

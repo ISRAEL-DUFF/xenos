@@ -15,11 +15,13 @@ type Config struct {
 	HTTPAddr string
 	// MetricsAddr and WorkerMetricsAddr are loopback listeners for Prometheus ("off" disables one).
 	MetricsAddr, WorkerMetricsAddr string
-	DatabaseURL                    string
-	Region                         string
-	PublicURL                      string // base URL used in emailed links
-	CookieSecure                   bool   // set Secure on session cookies (disable only for local http)
-	TrustProxy                     bool   // trust X-Forwarded-For from the reverse proxy (Caddy)
+	// FinancialRetentionYears is how long ledger records of a closed account are kept (personal data goes after 30 days).
+	FinancialRetentionYears int
+	DatabaseURL             string
+	Region                  string
+	PublicURL               string // base URL used in emailed links
+	CookieSecure            bool   // set Secure on session cookies (disable only for local http)
+	TrustProxy              bool   // trust X-Forwarded-For from the reverse proxy (Caddy)
 	// TrustedProxies are extra proxy addresses (besides loopback) whose X-Forwarded-For is believed.
 	TrustedProxies                                   []netip.Prefix
 	SMTPHost, SMTPPort, SMTPUser, SMTPPass, MailFrom string // transactional email; any SMTP provider
@@ -127,6 +129,9 @@ func load(check bool) (Config, error) {
 	}
 	if c.IPv4PrefixLen, err = strconv.Atoi(get("XENOS_IPV4_PREFIX_LEN", "32")); err != nil || c.IPv4PrefixLen < 1 || c.IPv4PrefixLen > 32 {
 		return c, fmt.Errorf("XENOS_IPV4_PREFIX_LEN must be 1-32")
+	}
+	if c.FinancialRetentionYears, err = strconv.Atoi(get("XENOS_FINANCIAL_RETENTION_YEARS", "6")); err != nil || c.FinancialRetentionYears < 1 {
+		return c, fmt.Errorf("XENOS_FINANCIAL_RETENTION_YEARS must be a positive integer")
 	}
 	if c.DatabaseURL == "" {
 		return c, fmt.Errorf("XENOS_DATABASE_URL is required")

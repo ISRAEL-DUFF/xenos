@@ -203,6 +203,9 @@ type User struct {
 	VaBank               pgtype.Text        `json:"va_bank"`
 	VaAccountNumber      pgtype.Text        `json:"va_account_number"`
 	VaAccountName        pgtype.Text        `json:"va_account_name"`
+	ClosingAt            pgtype.Timestamptz `json:"closing_at"`
+	PurgeAfter           pgtype.Timestamptz `json:"purge_after"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
 }
 
 type Vm struct {

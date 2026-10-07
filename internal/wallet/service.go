@@ -133,6 +133,14 @@ func (s *Service) HandleDeposit(ctx context.Context, ev billing.Event) error {
 			return nil // redelivery
 		}
 		s.Cache.Invalidate(ev.WalletID)
+		if user.Status == "closing" || user.Status == "closed" {
+			// Money arrived for an account that is closing or closed: do not convert it. An operator decides
+			// (usually a refund to the sender), because nobody can use it.
+			s.alert(ctx, "deposit-closed:"+ev.DedupeKey(), 0, fmt.Sprintf(
+				"A deposit of %d kobo arrived for a %s account (user %d, wallet %s). It was not converted: refund it or reopen the account.",
+				ev.Amount, user.Status, user.ID, ev.WalletID))
+			return nil
+		}
 		if !user.AutoConvert || !user.EmailVerifiedAt.Valid {
 			// The naira stays in the NGN balance: the customer asked for that, or has not
 			// verified their email yet (it is converted when they do).

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "./api";
+import { api, ApiError, setCSRFHeader } from "./api";
 import { useAuth } from "./auth";
 import { formatDate } from "./format";
 import { Badge, Banner, Button, Card, CodeLine, ErrorText, Field, Input, PageHeader, statusTone } from "./ui";
@@ -93,6 +93,8 @@ export function AccountPage() {
         </p>
         <Button variant="secondary" onClick={() => logout()}>Log out</Button>
       </Card>
+
+      <DataAndClosure email={user.email} onClosed={() => window.location.assign("/login")} />
     </div>
   );
 }
@@ -177,5 +179,119 @@ function APITokens({ verified }: { verified: boolean }) {
       )}
       <ErrorText error={create.error ?? revoke.error ?? tokens.error} />
     </Card>
+  );
+}
+
+function DataAndClosure({ email, onClosed }: { email: string; onClosed: () => void }) {
+  const [exportPw, setExportPw] = useState("");
+  const [closing, setClosing] = useState(false);
+  const [pw, setPw] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [deleteVMs, setDeleteVMs] = useState(false);
+
+  const exp = useMutation({
+    mutationFn: async () => {
+      // Not through api(): the answer is a zip file, not JSON.
+      
+      const res = await fetch("/v1/account/export", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...setCSRFHeader() },
+        body: JSON.stringify({ password: exportPw }),
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        throw new ApiError(res.status, b.error ?? res.statusText);
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "xenos-export.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+    onSuccess: () => setExportPw(""),
+  });
+
+  const close = useMutation({
+    mutationFn: () => api("/account/close", { json: { password: pw, email: confirm, delete_vms: deleteVMs } }),
+    onSuccess: () => onClosed(),
+  });
+  const blockers = close.error instanceof ApiError && Array.isArray(close.error.body.blockers) ? (close.error.body.blockers as { code: string; message: string }[]) : [];
+
+  return (
+    <>
+      <Card>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            exp.mutate();
+          }}
+          className="space-y-3"
+        >
+          <h2 className="font-medium text-slate-900 dark:text-slate-50">Export my data</h2>
+          <p className="text-sm text-slate-600 dark:text-slate-300">A zip with your profile, SSH keys, VMs, charges, conversions and API token names (never secrets). Confirm with your password.</p>
+          <Field label="Password">
+            <Input type="password" autoComplete="current-password" required value={exportPw} onChange={(e) => setExportPw(e.target.value)} />
+          </Field>
+          <ErrorText error={exp.error} />
+          {exp.isSuccess && <Banner tone="ok">Your export was downloaded.</Banner>}
+          <Button variant="secondary" disabled={exp.isPending}>
+            {exp.isPending ? "Preparing…" : "Download export"}
+          </Button>
+        </form>
+      </Card>
+
+      <Card className="space-y-3">
+        <h2 className="font-medium text-red-700 dark:text-red-400">Close account</h2>
+        <p className="text-sm text-slate-600 dark:text-slate-300">
+          Closing signs you out everywhere and stops API tokens. Your personal data is erased after 30 days; billing records are kept as the law requires. You must have no
+          unpaid charges and no credit left in your wallet.
+        </p>
+        {!closing ? (
+          <Button variant="danger" onClick={() => setClosing(true)}>
+            Close my account…
+          </Button>
+        ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              close.mutate();
+            }}
+            className="space-y-3"
+          >
+            <Field label="Password">
+              <Input type="password" autoComplete="current-password" required value={pw} onChange={(e) => setPw(e.target.value)} />
+            </Field>
+            <Field label={`Type your email (${email}) to confirm`}>
+              <Input required value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            </Field>
+            <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200">
+              <input type="checkbox" checked={deleteVMs} onChange={(e) => setDeleteVMs(e.target.checked)} />
+              Permanently delete all my VMs
+            </label>
+            {blockers.length > 0 ? (
+              <Banner tone="danger">
+                <ul className="list-disc pl-4">
+                  {blockers.map((b) => (
+                    <li key={b.code}>{b.message}</li>
+                  ))}
+                </ul>
+              </Banner>
+            ) : (
+              <ErrorText error={close.error} />
+            )}
+            <div className="flex gap-2">
+              <Button variant="danger" disabled={close.isPending}>
+                {close.isPending ? "Closing…" : "Close account"}
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => setClosing(false)}>
+                Cancel
+              </Button>
+            </div>
+          </form>
+        )}
+      </Card>
+    </>
   );
 }

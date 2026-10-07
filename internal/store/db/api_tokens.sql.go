@@ -49,7 +49,7 @@ func (q *Queries) CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) 
 }
 
 const getAPITokenUser = `-- name: GetAPITokenUser :one
-SELECT t.id AS token_id, t.token_hash, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at, u.aup_accepted_at, u.va_bank, u.va_account_number, u.va_account_name
+SELECT t.id AS token_id, t.token_hash, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at, u.aup_accepted_at, u.va_bank, u.va_account_number, u.va_account_name, u.closing_at, u.purge_after, u.closed_at
 FROM api_tokens t JOIN users u ON u.id = t.user_id
 WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now())
 `
@@ -74,6 +74,9 @@ type GetAPITokenUserRow struct {
 	VaBank               pgtype.Text        `json:"va_bank"`
 	VaAccountNumber      pgtype.Text        `json:"va_account_number"`
 	VaAccountName        pgtype.Text        `json:"va_account_name"`
+	ClosingAt            pgtype.Timestamptz `json:"closing_at"`
+	PurgeAfter           pgtype.Timestamptz `json:"purge_after"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
 }
 
 func (q *Queries) GetAPITokenUser(ctx context.Context, tokenHash []byte) (GetAPITokenUserRow, error) {
@@ -99,6 +102,9 @@ func (q *Queries) GetAPITokenUser(ctx context.Context, tokenHash []byte) (GetAPI
 		&i.VaBank,
 		&i.VaAccountNumber,
 		&i.VaAccountName,
+		&i.ClosingAt,
+		&i.PurgeAfter,
+		&i.ClosedAt,
 	)
 	return i, err
 }

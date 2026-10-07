@@ -42,6 +42,8 @@ type Server struct {
 	consoleLimit *auth.Limiter
 	rebuildLimit *auth.Limiter
 	tokenLimit   *auth.Limiter
+	exportLimit  *auth.Limiter
+	closeLimit   *auth.Limiter
 
 	signupLimit, loginIPLimit, loginAcctLimit, resendLimit, resetLimit, resetTokenLimit, webhookFailLimit *auth.Limiter
 }
@@ -66,6 +68,8 @@ func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISp
 	s.consoleLimit = lim("console", 10, time.Minute)
 	s.rebuildLimit = lim("rebuild", 5, time.Hour)
 	s.tokenLimit = lim("api_token", 600, time.Minute)
+	s.exportLimit = lim("export", 3, 24*time.Hour)
+	s.closeLimit = lim("close_account", 5, time.Hour)
 	s.resetLimit = lim("forgot_password", 5, time.Hour)
 	s.resetTokenLimit = lim("reset_password", 20, 15*time.Minute)
 	return s
@@ -100,6 +104,10 @@ func (s *Server) Router() http.Handler {
 			r.With(s.requireSession).Post("/auth/logout", s.logout)
 			r.With(s.requireSession).Post("/auth/resend-verification", s.resendVerification)
 			r.With(s.requireSession).Post("/auth/change-password", s.changePassword)
+
+			// Export and closure need a person: not an API token, and the password again.
+			r.With(s.requireSession).Post("/account/export", s.exportAccount)
+			r.With(s.requireSession).Post("/account/close", s.closeAccount)
 
 			// API tokens are managed by a signed-in person only.
 			r.With(s.requireSession).Get("/tokens", s.listTokens)

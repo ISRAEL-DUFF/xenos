@@ -64,7 +64,7 @@ func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) error {
 }
 
 const getSessionUser = `-- name: GetSessionUser :one
-SELECT s.token_hash, s.kind, s.csrf_token, s.expires_at, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at, u.aup_accepted_at, u.va_bank, u.va_account_number, u.va_account_name
+SELECT s.token_hash, s.kind, s.csrf_token, s.expires_at, u.id, u.email, u.password_hash, u.ispend_customer_id, u.email_verified_at, u.phone, u.status, u.is_admin, u.vm_limit, u.auto_convert, u.created_at, u.grace_started_at, u.low_balance_notified_at, u.aup_accepted_at, u.va_bank, u.va_account_number, u.va_account_name, u.closing_at, u.purge_after, u.closed_at
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1 AND s.expires_at > now()
@@ -92,6 +92,9 @@ type GetSessionUserRow struct {
 	VaBank               pgtype.Text        `json:"va_bank"`
 	VaAccountNumber      pgtype.Text        `json:"va_account_number"`
 	VaAccountName        pgtype.Text        `json:"va_account_name"`
+	ClosingAt            pgtype.Timestamptz `json:"closing_at"`
+	PurgeAfter           pgtype.Timestamptz `json:"purge_after"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
 }
 
 func (q *Queries) GetSessionUser(ctx context.Context, tokenHash []byte) (GetSessionUserRow, error) {
@@ -119,6 +122,9 @@ func (q *Queries) GetSessionUser(ctx context.Context, tokenHash []byte) (GetSess
 		&i.VaBank,
 		&i.VaAccountNumber,
 		&i.VaAccountName,
+		&i.ClosingAt,
+		&i.PurgeAfter,
+		&i.ClosedAt,
 	)
 	return i, err
 }

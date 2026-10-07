@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/israel-duff/xenos/internal/accounts"
 	"github.com/israel-duff/xenos/internal/alert"
 	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/proxmox"
@@ -84,7 +85,7 @@ func (m *Monitor) Tick(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, check := range []func(context.Context) error{
-		m.failedJobs, m.hostCapacity, m.freeIPs, m.billing, m.webhooks, m.cpuWatch,
+		m.failedJobs, m.hostCapacity, m.freeIPs, m.billing, m.webhooks, m.cpuWatch, m.purgeClosed,
 	} {
 		if err := check(ctx); err != nil {
 			errs = append(errs, err)
@@ -242,4 +243,13 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// purgeClosed removes the personal data of accounts whose 30-day closing period has ended.
+func (m *Monitor) purgeClosed(ctx context.Context) error {
+	n, err := accounts.PurgeDue(ctx, m.Store, m.now())
+	if n > 0 {
+		m.Log.Info("closed accounts purged", "count", n)
+	}
+	return err
 }

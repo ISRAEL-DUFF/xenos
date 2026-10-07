@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -85,4 +88,21 @@ func TestSSHKeyLimit(t *testing.T) {
 	if code, _ := a.do("POST", "/v1/ssh-keys", map[string]any{"name": "k", "public_key": newPubKey(t)}, a.csrfHdr()); code != 409 {
 		t.Fatalf("over limit = %d", code)
 	}
+}
+
+// signupClientE signs up without a testing.T, for steps that only need to know it worked.
+func signupClientE(base, email string) (*client, error) {
+	c := &client{base: base, http: &http.Client{}}
+	jar, _ := cookieJar()
+	c.http.Jar = jar
+	b, _ := json.Marshal(map[string]any{"email": email, "password": "long-enough-pw", "phone": "+2348012345678", "accept_aup": true})
+	resp, err := c.http.Post(base+"/v1/auth/signup", "application/json", bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 201 {
+		return nil, fmt.Errorf("signup = %d", resp.StatusCode)
+	}
+	return c, nil
 }
