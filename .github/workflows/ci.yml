@@ -127,6 +127,7 @@ jobs:
           nohup /tmp/xenos-api > /tmp/xenos-api.log 2>&1 &
           sleep 5
           /tmp/xenosctl ip add 203.0.113.10-203.0.113.20 203.0.113.1
+          /tmp/xenosctl ip add-floating 198.51.100.10-198.51.100.12
       - name: Journey
         working-directory: web
         env:

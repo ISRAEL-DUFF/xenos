@@ -162,7 +162,10 @@ function PrivateNetworks() {
 
   return (
     <div className="space-y-4">
-      <PageHeader title="Private networks" subtitle="VMs of yours on one private network reach each other on 10.x addresses nobody else can see. They are not routed to the internet. Joining or leaving restarts the VM." />
+      <div>
+        <h2 className="text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-50">Private networks</h2>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">VMs of yours on one private network reach each other on 10.x addresses nobody else can see. They are not routed to the internet. Joining or leaving restarts the VM.</p>
+      </div>
       <ErrorText error={list.error ?? attach.error ?? detach.error} />
       {nets.length === 0 ? (
         <Empty title="No private networks">Create one, then add your VMs to it.</Empty>

@@ -204,7 +204,43 @@ const noOverflow = async (page, where) => {
   await page.goto(`${base}/vms`);
   await page.getByText("web-1").waitFor(); // still signed in after the session rotated
 
+  step("account page offers export and closure (not exercised: it would end the session)");
+  await page.goto(`${base}/account`);
+  await page.getByRole("heading", { name: "Export my data" }).waitFor();
+  await page.getByRole("heading", { name: "Close account" }).waitFor();
+  await page.getByRole("button", { name: "Close my account…" }).click();
+  await page.getByLabel(/^Type your email/).waitFor();
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  step("floating IP: allocate, attach, release");
+  await page.goto(`${base}/networking`);
+  await page.getByRole("heading", { name: "Networking" }).waitFor();
+  await page.getByLabel("Label (optional)").fill("e2e");
+  await page.getByRole("button", { name: "Allocate", exact: true }).click();
+  await page.getByText("not attached").waitFor({ timeout: 20_000 });
+  await page.locator('select[aria-label^="Attach "]').selectOption({ label: "web-1" });
+  await page.getByText("on web-1").waitFor({ timeout: 40_000 });
+  await shot(page, "05e-floating-ip");
+  await page.getByRole("button", { name: "Release", exact: true }).first().click();
+  await page.getByRole("dialog").getByRole("button", { name: "Release" }).click();
+  await page.getByText("No floating IPs").waitFor({ timeout: 20_000 });
+
+  step("private network: create, add the VM (it restarts), remove, delete");
+  await page.getByLabel(/^Name/).fill("e2e-net");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page.getByText("10.64.0.0/24").waitFor({ timeout: 20_000 });
+  await page.locator('select[aria-label^="Add a VM to"]').selectOption({ label: "web-1" });
+  await page.getByText("10.64.0.2").waitFor({ timeout: 20_000 });
+  await page.getByText(/attaching…/).waitFor({ state: "detached", timeout: 90_000 });
+  await shot(page, "05f-private-network");
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
+  await page.getByText("10.64.0.2").waitFor({ state: "detached", timeout: 90_000 });
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
+  await page.getByText("No private networks").waitFor({ timeout: 20_000 });
+
   step("delete needs the VM name typed");
+  await page.goto(`${base}/vms`);
   await page.getByText("web-1").click();
   await page.getByRole("button", { name: "Delete" }).click();
   const confirm = page.getByRole("dialog").getByRole("button", { name: "Delete VM" });
