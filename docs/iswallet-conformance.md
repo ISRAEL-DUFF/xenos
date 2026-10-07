@@ -1,0 +1,143 @@
+# Xenos ↔ iswallet: conformance report and open questions
+
+**For:** the iswallet team. **From:** Xenos engineering.
+**Against:** *iswallet → Xenos: Integration Guide v1.0* (5 October 2026).
+
+Thank you for the guide, and for being explicit about what is not built. We have adapted the integration to it. This document records what we did, what we cannot finish without your answers, and the changes you should know we made on the strength of the guide. The client is `internal/billing/iswallet.go`; its behaviour is covered by contract tests written from the guide (`internal/billing/iswallet_test.go`) because we do not yet have a sandbox key.
+
+---
+
+## 1. Status of our questions (v1.1 of the guide and iswallet's reply)
+
+All six blocking questions were answered. What we did with each:
+
+| Q | Answer | What we did |
+|---|---|---|
+| Q1 balances (verified live) | `GET /v1/wallets/{id}/balance`; read `balances[]`, use `available`; an absent currency is zero | Implemented. We read `available` and refuse any response whose `scale` is not what we expect (NGN 2, USDT 6). |
+| Q2 USDT scale | 6 decimals (micro-USDT); the guide's quote example was wrong | Setting kept as a guard with default 6. Their own correction of the quote example confirms our reading; the 6,000 micro-USDT charge example was right all along. |
+| Q3 webhook type | Envelope: `event_type` and stable `id` in the body, payload under `data` | Parser rewritten to the envelope. **The type-inference code is deleted**: a signed body with no `event_type` is rejected (400), never guessed at. |
+| Q4 which credits | Posted fires for `pull_inflow`, `wallet_transfer` (our adjustments) and legacy `va_deposit`; convert emits `convert.completed` instead | We convert only `NGN` + `pull_inflow`; everything else is acknowledged and ignored (tested for USDT, `wallet_transfer`, `va_deposit`). |
+| Q5 errors | `error.{code,message,request_id}`; `X-Request-ID` header; key reuse is `422 IDEMPOTENCY_KEY_REUSED`, non-retryable | Request id read from the header and from `error`. New `ErrIdempotencyKeyReused`: alerted to operators, never treated as an outage or as insufficient funds. |
+| Q6 consistency | A read after a convert/transfer response reflects it | We read balances straight after conversions. |
+| Merchant wallet | Do not create one: `GET /v1/platform/account` → `operating_wallet_id` | Charges and adjustments use it (resolved once and cached; `XENOS_ISPEND_MERCHANT_WALLET` is now an optional override). The admin revenue page shows its USDT balance, since admin credits are paid from it. |
+| Adjustments | Transfers in both directions are acceptable | Unchanged. We will move the staff note into structured metadata once transfers have it. We have noted the point about customers seeing a debit they did not initiate; it is a question for our terms of service. |
+
+## 1a. Still open
+
+1. *(Resolved in §1d: a typo.)* **§7.2 example still shows `credit_amount: 30781`** in the *execute response*, although v1.1 corrected the *quote* to 30,781,000. If the response really reports micro-USDT, that example is a typo; if it is accurate it contradicts the quote by 1,000×. We treat the **quote** as the binding amount, record it, and **raise an operator alert if the execute response disagrees** (tested). Please confirm which is right.
+2. **`GET /v1/wallets/{id}/virtual-accounts`** exists but the guide shows no response shape. We do not call it; we keep our own copy of the account issued at signup and re-issue idempotently if it is missing. Tell us the shape and we will use it to reconcile.
+3. Awaiting from you: the **sandbox key**, the **error catalogue**, **lookup by idempotency key**, **`Retry-After`**, **USDT limits**, and later the per-client rate limit and batch charge.
+
+---
+
+## 1e. Fixes deployed by iswallet, re-verified (6 October 2026)
+
+iswallet confirmed F11–F13 and the empty `original_response` as defects and fixed them; the 1.4% deposit fee (F4) is real (Flutterwave, capped at ₦2,000; `pass_through` by default, `absorb` available on request). Verified live, with our three workarounds **removed**:
+
+- A conversion credits the customer's own wallet: USDT appears in its `balances[]`. The `owner_ref` sibling lookup is deleted.
+- Charges and adjustments use `operating_wallet_id` directly, both directions. The USDT wallet we had created for the operating account is no longer used or created.
+- `WALLET_ALREADY_EXISTS` returns the existing wallet in `original_response`; the client recovers it (tested live).
+- Reversal with two customers: only the reversed customer's wallet changes, by the net amount, within seconds.
+
+Left over on iswallet's side: the per-currency wallets our earlier sandbox runs created (`acc998fc-…` and others) and `f0c01a29-…` still hold balances. Sandbox only; we have asked for them to be swept. Still outstanding from iswallet: error catalogue, **lookup by idempotency key** (they call it the top item), `Retry-After`, USDT limits, per-client rate limit and batch charge. Decision for the business: keep fee `pass_through` (customers see ₦49,300 of ₦50,000) or ask for `absorb`.
+
+---
+
+## 1d. Third live run, after the funding addendum (6 October 2026)
+
+*The three workarounds this section describes were removed after iswallet fixed them: see §1e.*
+
+Followed the addendum (liquidity seed, crypto-deposit). `TestSandboxEndToEnd` now passes in full. Verified live:
+
+| Check | Result |
+|---|---|
+| Convert (₦49,300 → 35.845933 USDT) | Works. Execute `credit_amount` equals the quote's, in micro-USDT. §1a.1 is resolved: the guide's `30781` example was a typo. |
+| Convert replay (same key) | Returns the original. A used quote under a new key is `QUOTE_ALREADY_USED`. |
+| Charge 0.006 USDT, replay, changed amount | Moves exactly 6,000 micro-USDT; replay returns the original; changed amount is `IDEMPOTENCY_KEY_REUSED`. |
+| Overcharge | `INSUFFICIENT_FUNDS` (once the customer holds USDT). |
+| Adjustments, both directions | Work, via the operating wallet's USDT wallet (see F11 and F12). |
+| `QUOTE_EXPIRED` after 61 s | Confirmed again, now that liquidity exists. |
+| Reversal | Run 1 of this session: reversed the net amount, leaving ₦0 (F9 resolved). See F13. |
+
+Two behaviours differ from the guide and cost us time. We adapted the client to both:
+
+| # | Finding |
+|---|---|
+| F11 | **A customer's USDT lives in a separate wallet.** `owner_ref` is the same but `currency` is `USDT` and the id differs; conversion creates it. The NGN wallet's `balances[]` never lists the USDT, so the guide's "one wallet, NGN + USDT balances" reading is wrong for customers. `Balances`, `Charge` and `Adjust` now find the sibling with `GET /v1/wallets?owner_ref=` (cached). Please confirm this is intended and stable. |
+| F12 | **The operating wallet is NGN-currency with a USDT balance entry, and transfers to or from it are refused** (`CURRENCY_MISMATCH: wallets must share currency USDT`), both directions. A USDT wallet is needed under the same `owner_ref`; we create it once (`POST /v1/wallets`, `owner_type` `client`, `currency` `USDT`, key `usdt-wallet:<operating id>`) and charge into that. A crypto deposit made earlier into the operating wallet itself (100 USDT, `bacc15af-…`) is stranded there. Is creating that sibling the intended path, or should `/v1/platform/account` expose a USDT wallet id? |
+| F13 | In the third run `simulate/reversal` answered `emitted` but the deposit stayed credited after more than a minute (runs 1 and 2 applied it within seconds). Same request shape. Is the reversal asynchronous, or can it be refused silently? Wallet `6fe69805-27d9-4f84-baf1-f9d03aeb5f72`. |
+
+Not yet verifiable: real webhook delivery (needs a public HTTPS URL), and whether the 1.4% deposit fee (F4) exists in production.
+
+---
+
+## 1c. Second live run, after FX was enabled (5 October 2026)
+
+FX works: `GET /v1/rates` gives ₦1,374.74 per USDT and quotes succeed. Re-run results:
+
+| # | Result | Request ids |
+|---|---|---|
+| F1 | **Rates and quotes now work.** F1 is resolved. | |
+| F7 **blocking** | **`POST /v1/convert` returns `422 INSUFFICIENT_LIQUIDITY: insufficient treasury liquidity for target currency`.** This is the documented path ("tell us if you see it"): the sandbox treasury holds no USDT. Convert, charge and adjustments all need USDT, so they remain untested. | `req_f1aff63d5dce59861feb5479`, `req_36bb9657d762605f2a55a247` |
+| F8 | `QUOTE_EXPIRED` confirmed: a quote executed 61 s after issue is refused. (Liquidity is evidently checked after expiry, or the order depends on the quote.) | |
+| F9 | **Reversal simulator works, and reverses the GROSS amount.** After a 5,000,000-kobo deposit that credited 4,930,000, `simulate/reversal` left the wallet at **-70,000 kobo**: the 70,000 deposit fee was also clawed back. Is that how live reversals behave (the customer ends up owing the fee)? We show a negative naira balance as-is. | wallet `381d4669-0ed5-4419-8d65-8c663d911b96` |
+| F10 | The quote's `fx_rate` is rounded to 8 decimals, which shifts the naira price we would display by about 0.06% (₦1,375.52 from `fx_rate`, ₦1,374.74 from the amounts and from `/v1/rates`). We now derive the displayed rate from the quote's amounts. No action needed; FYI. | |
+
+**To finish testing we need the sandbox treasury funded with USDT** (or a sandbox endpoint to fund it).
+
+---
+
+## 1b. Findings from the first live sandbox run (5 October 2026)
+
+We ran `go test -tags sandbox ./internal/billing` against `https://synledger.name.ng/iwallet` with our client key. What worked: wallet creation and its idempotent replay, issuing the virtual account, `IDEMPOTENCY_KEY_REUSED` on a changed payload, `GET …/balance` (scales asserted), `GET /v1/platform/account`, and `POST /v1/sandbox/simulate/deposit`. Where the sandbox differs from the guide, or blocks us, with request ids for your logs:
+
+| # | What we saw | Request ids | What we need |
+|---|---|---|---|
+| F1 *(resolved)* | **FX was unavailable.** `GET /v1/rates?from=NGN&to=USDT` returns **`500 INTERNAL "fx quote NGN/USDT: not found"`** (the guide documents `503 FX_UNAVAILABLE` for a paused rate), and `POST /v1/convert/quotes` returns `503 FX_UNAVAILABLE "fx rate unavailable, try again"`. Retried over several minutes. | `req_c5be55f4b8e9af159c7a781d`, `req_f14e2934c0c29f14c7a94f61`, `req_bf02c952d4f2101b24106223` (rates); `req_9a092566eb717f99035c87e3`, `req_2cedb0fa8ac40f9ac9611016` (quote) | Seed or enable an NGN/USDT rate in sandbox. Until then we cannot test convert, charge or adjustments, all of which need a USDT balance. |
+| F2 | **`POST /v1/wallets` requires `client_id`** in the body, equal to the API key's (`403 SCOPE_INSUFFICIENT: client_id must match your API key's client_id`). The guide's example omits it. | `req_639d6e209afd0ab76e3b756b` | Add it to the guide. We now send the value from `GET /v1/platform/account` (`"xenos"`). |
+| F3 | **`WALLET_ALREADY_EXISTS` carries an empty wallet** in `error.original_response` (every field blank), not the existing wallet as the guide says. We therefore cannot recover the wallet id from that 409. | `req_d9ddb5e39713c1fbba642d5a`, `req_4517175468fde2865e378faf` | Populate `original_response`, or give us a lookup by `owner_ref` (e.g. `GET /v1/wallets?owner_ref=`). Our stable per-user signup key avoids this path in normal operation, but it is our only recovery if a signup is interrupted after iswallet created the wallet under a *different* key. |
+| F4 | **A deposit fee is deducted.** `simulate/deposit` of 5,000,000 kobo (₦50,000) left **4,930,000 spendable**: a fee of 70,000 kobo, **1.40%**. | wallet `98aef08b-b727-4445-b931-d9dafe10b959` and others | Is this the mock provider's fee only, or what live bank transfers will cost? Customers will see it before our own margin and your 1.5% spread. We reconcile on the credited amount, as you advise. |
+| F5 | **Charging a wallet with no USDT returns `422 CURRENCY_MISMATCH` ("wallets must share currency USDT"), not `INSUFFICIENT_FUNDS`.** A customer who has never converted has no USDT balance. | `req_c452dc8136271ecd8cc0098c`, `req_1e66984e57072281bba02806` | Confirm this is intended. We now treat it as "cannot pay" when the customer's USDT is below the charge and alert otherwise. **Related:** does a transfer *into* an operating wallet that holds no USDT balance yet also return `CURRENCY_MISMATCH`? The first hourly charge would hit it. We can only test that once F1 is fixed. |
+| F6 | The simulator's reply and `/v1/sandbox/simulate/reversal` are undocumented beyond their paths. | | Request and response shapes for `simulate/reversal`. We have not called it. |
+
+Not yet exercised (blocked by F1, or needing a public webhook URL): quote, convert and replay, `QUOTE_EXPIRED`, `QUOTE_ALREADY_USED`, charge and replay, adjustments in both directions, the real webhook delivery and signature, reversals, the first charge into the operating wallet.
+
+---
+
+## 2. Changes we made because of the guide
+
+| Guide | What we did |
+|---|---|
+| §0.1 one wallet, no customer | `wallet_id` is our customer id. `CreateCustomer` does `POST /v1/wallets` then `POST …/virtual-account`. The interface no longer has separate NGN/USDT wallet ids. Balances come from `GET …/balance`. |
+| §0.2 spread is 1.5%, platform-wide | We no longer assume a configurable spread. Our margin lives in the per-hour VM price; naira prices are shown from `GET /v1/rates` `effective_rate` (converted to kobo per USDT with exact arithmetic). |
+| §0.3 no card | Removed card top-up end to end (API, interface, dashboard). The wallet page offers bank transfer only and states the account name, bank and limits. |
+| §3 idempotency, forever | We rely on it. Keys are `signup:<email>`, `conversion:<id>[:<attempt>]`, `vm:<id>:hour:<yyyymmddhh>`, `adjustment:<id>`, `va:<wallet>`, `xenos:sub:primary`. Convert sends the key in the header **and** as `client_idempotency_key`. |
+| §4 namespace `owner_ref` | `owner_ref = <prefix>:user:<id>`, prefix configurable (`XENOS_ISPEND_OWNER_PREFIX`, default `xenos`). Use a different prefix in sandbox: sandbox is never reset, so a rebuilt dev database would otherwise reuse refs. |
+| §4 `409 WALLET_ALREADY_EXISTS` | We would read the nested wallet as success, but the sandbox returns it empty (F3), so this surfaces as an error. |
+| §4.1 virtual account | Issued at signup; the account details are **stored in our database** (re-issuing is idempotent, so we do that lazily if signup could not). Shown to the customer only after email verification. |
+| §6.1 quotes last 60 s | The quote's `expires_at` is saved and shown as a live countdown; confirming an expired quote is refused locally without calling you. |
+| §6.2 replay after expiry | Every conversion **persists its quote and key before executing**, and a retry replays the *same* quote under the *same* key (a new quote under an old key would be a different payload and rejected). Only when the replay returns `QUOTE_EXPIRED`, which means it never executed, does an automatic conversion take a fresh quote under a new key (`conversion:<id>:2`). A customer's own quote is never silently replaced. |
+| §6.2 `INSUFFICIENT_LIQUIDITY` | Treated like a paused rate: the conversion stays pending and is retried by a sweep, the customer's naira is untouched, and operators are alerted (at most hourly). |
+| §6.2 `QUOTE_ALREADY_USED` | Fails the conversion and alerts operators to check the ledger. |
+| §7 transfer as the charge | `POST /v1/transfers` customer → merchant wallet. `narration` carries `vm:<id> hour:<yyyymmddhh>`, the only metadata we can attach. |
+| §8 webhook scheme | `X-iSpend-Signature: sha256=<hex>` over `"<timestamp>.<raw body>"`, timestamp tolerance 300 s, constant-time compare, raw body read before parsing. `wallet.credit.posted` starts an automatic conversion of the *credited* amount; `wallet.credit.reversed` is recorded and alerted (see below). |
+| §8.4 reversals | iswallet bears the loss and the customer keeps their credit, so we do nothing to the customer's balance; we record the reversal (`deposit_reversals`) and alert an operator once per event. |
+| §9 100 requests/min | Our client paces itself (default 80/min, burst 10) and charges are spread across the first 40 minutes of each hour by a stable per-VM offset (`XENOS_METER_SPREAD_MINUTES`) instead of firing at :00. A `429` is treated as a transient failure and retried by the next metering pass. |
+| §10 tiers | New accounts are TIER_1. The wallet page tells customers the ₦50,000 per-transfer and per-day limit (`XENOS_DEPOSIT_LIMIT_KOBO`). We have **no BVN / TIER_2 upgrade flow in V1**; customers who need to fund more must split transfers. |
+| §11 not built | We built nothing that depends on card, batch charge, structured transfer metadata, tenant reversal, lookup by idempotency key, or sandbox failure injection. |
+
+## 3. Decision confirmed by iswallet
+
+**Admin adjustments use transfers, both directions** (iswallet confirmed this is acceptable). Your guide says a tenant-initiated *debit* is not an API. We needed goodwill credits and corrections, so a credit is a transfer **merchant wallet → customer** and a debit is a transfer **customer → merchant wallet**, both with a mandatory staff note in the narration, both audited on our side. These are the same primitive we already use for hourly charges between two wallets of our own tenant. If a staff-initiated debit is not something you want a tenant to do through `/v1/transfers`, tell us and we will remove debits (credits would remain). We did not use `POST /v1/platform/credits`, because the guide gives no request shape.
+
+## 4. What we will need to go live
+
+- A **sandbox client key** (base URL `https://synledger.name.ng/iwallet`).
+- The **error catalogue** you plan to write (every code per endpoint, and which are retryable).
+- **USDT limits**, before launch (we show customers none).
+- A **per-client rate-limit override** and a **batch charge** before we pass about 100 running VMs (one charge per VM per hour; today we stay under 100 calls a minute by spreading them, which holds to roughly 2,000 VM-hours of headroom per hour but leaves little for balance reads as we grow).
+- **Lookup by idempotency key** and **`Retry-After` on 429**, when ready.
+
+## 5. How we will test against your sandbox
+
+Once we have a key we will run, in order: create a customer and issue its account; `POST /v1/sandbox/simulate/deposit` and confirm the webhook arrives, verifies, and converts exactly once even when redelivered; force `QUOTE_EXPIRED` by waiting 61 s; force `INSUFFICIENT_FUNDS` on a charge; `POST /v1/sandbox/simulate/reversal` and confirm the alert; replay a charge key after an hour and confirm one ledger effect. Failure injection we will simulate on our side, as you suggest.

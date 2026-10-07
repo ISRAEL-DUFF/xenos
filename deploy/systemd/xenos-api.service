@@ -1,0 +1,26 @@
+[Unit]
+Description=Xenos API and dashboard
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=xenos
+Group=xenos
+EnvironmentFile=/etc/xenos/xenos.env
+ExecStart=/opt/xenos/bin/xenos
+Restart=on-failure
+RestartSec=5
+# The API listens on localhost only; Caddy terminates TLS in front of it.
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

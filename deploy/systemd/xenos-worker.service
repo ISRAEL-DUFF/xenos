@@ -1,0 +1,29 @@
+[Unit]
+Description=Xenos worker (provisioning, billing, monitoring)
+After=network-online.target postgresql.service xenos-api.service
+Wants=network-online.target
+# The API applies database migrations on start; if the worker wins the race it
+# fails and systemd retries it a few seconds later.
+
+[Service]
+User=xenos
+Group=xenos
+EnvironmentFile=/etc/xenos/xenos.env
+ExecStart=/opt/xenos/bin/xenos-worker
+Restart=on-failure
+RestartSec=5
+# Give an in-flight provisioning job time to finish its current step on stop.
+TimeoutStopSec=60
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

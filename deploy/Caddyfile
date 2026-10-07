@@ -1,0 +1,21 @@
+# /etc/caddy/Caddyfile
+# Caddy gets and renews the TLS certificate automatically. Point api.example.com's
+# DNS A/AAAA records at this server first.
+api.example.com {
+	encode zstd gzip
+
+	# The API only listens on localhost. Set XENOS_TRUST_PROXY=true so the
+	# rightmost X-Forwarded-For entry (the one Caddy adds) is the client IP.
+	reverse_proxy 127.0.0.1:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	request_body {
+		max_size 1MB
+	}
+	log {
+		output file /var/log/caddy/xenos-access.log
+	}
+}

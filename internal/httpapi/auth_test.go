@@ -1,0 +1,307 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/israel-duff/xenos/internal/billing"
+	"github.com/israel-duff/xenos/internal/config"
+	"github.com/israel-duff/xenos/internal/jobs"
+	"github.com/israel-duff/xenos/internal/store"
+	"github.com/israel-duff/xenos/internal/testutil"
+	"github.com/israel-duff/xenos/web"
+)
+
+type captureMailer struct {
+	mu   sync.Mutex
+	last string
+	all  []string // every email as "subject|body"
+}
+
+func (m *captureMailer) Send(_ context.Context, _, subject, body string) error {
+	m.mu.Lock()
+	m.last = body
+	m.all = append(m.all, subject+"|"+body)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *captureMailer) count(substr string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, e := range m.all {
+		if strings.Contains(e, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+var tokenRe = regexp.MustCompile(`token=([A-Za-z0-9_-]+)`)
+
+func (m *captureMailer) token(t *testing.T) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	g := tokenRe.FindStringSubmatch(m.last)
+	if g == nil {
+		t.Fatalf("no token in email %q", m.last)
+	}
+	return g[1]
+}
+
+type testEnv struct {
+	ts     *httptest.Server
+	mailer *captureMailer
+	st     *store.Store
+	ispend *billing.Fake
+	srv    *Server
+}
+
+func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	st := testutil.DB(t)
+	env := &testEnv{mailer: &captureMailer{}, st: st, ispend: billing.NewFake(150_000)}
+	cfg := config.Config{PublicURL: "http://test", CookieSecure: false, Region: "test-1", ISpendWebhookSecret: testWebhookSecret, AlertEmail: "ops@test.example", DepositLimitKobo: 5_000_000}
+	env.srv = NewServer(cfg, st, jobs.New(st.Pool), env.ispend, env.mailer,
+		slog.New(slog.NewTextHandler(io.Discard, nil)), web.Dist())
+	env.ts = httptest.NewServer(env.srv.Router())
+	t.Cleanup(env.ts.Close)
+	return env
+}
+
+func newTestServer(t *testing.T) (*httptest.Server, *captureMailer) {
+	env := newTestEnv(t)
+	return env.ts, env.mailer
+}
+
+type client struct {
+	t    *testing.T
+	base string
+	http *http.Client
+	csrf string
+}
+
+func newClient(t *testing.T, base string) *client {
+	jar, _ := cookieJar()
+	return &client{t: t, base: base, http: &http.Client{Jar: jar}}
+}
+
+func (c *client) do(method, path string, body any, hdr map[string]string) (int, map[string]any) {
+	c.t.Helper()
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req, _ := http.NewRequest(method, c.base+path, rd)
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if tok, ok := out["csrf_token"].(string); ok && tok != "" {
+		c.csrf = tok
+	}
+	return resp.StatusCode, out
+}
+
+func (c *client) csrfHdr() map[string]string { return map[string]string{"X-CSRF-Token": c.csrf} }
+
+func TestAuthFlow(t *testing.T) {
+	ts, mailer := newTestServer(t)
+	c := newClient(t, ts.URL)
+	signup := map[string]any{"email": "Ada@Example.com", "password": "correct-horse-1", "phone": "+2348012345678", "accept_aup": true}
+
+	if code, _ := c.do("POST", "/v1/auth/signup", map[string]any{"email": "bad", "password": "x", "phone": "1"}, nil); code != 400 {
+		t.Fatalf("invalid signup = %d", code)
+	}
+	code, out := c.do("POST", "/v1/auth/signup", signup, nil)
+	if code != 201 {
+		t.Fatalf("signup = %d %v", code, out)
+	}
+	if code, _ := c.do("POST", "/v1/auth/signup", signup, nil); code != 409 {
+		t.Fatalf("duplicate signup = %d", code)
+	}
+
+	// Cookie session works; unsafe methods need CSRF.
+	if code, out := c.do("GET", "/v1/auth/me", nil, nil); code != 200 || out["user"].(map[string]any)["email"] != "ada@example.com" {
+		t.Fatalf("me = %d %v", code, out)
+	}
+	if code, _ := c.do("POST", "/v1/auth/resend-verification", nil, nil); code != 403 {
+		t.Fatalf("missing CSRF should be 403, got %d", code)
+	}
+
+	// Email verification.
+	tok := mailer.token(t)
+	if code, _ := c.do("POST", "/v1/auth/verify", map[string]any{"token": "nope"}, nil); code != 400 {
+		t.Fatalf("bad verify token = %d", code)
+	}
+	if code, _ := c.do("POST", "/v1/auth/verify", map[string]any{"token": tok}, nil); code != 200 {
+		t.Fatalf("verify = %d", code)
+	}
+	if code, _ := c.do("POST", "/v1/auth/verify", map[string]any{"token": tok}, nil); code != 400 {
+		t.Fatalf("verify token must be single-use, got %d", code)
+	}
+	if _, out := c.do("GET", "/v1/auth/me", nil, nil); out["user"].(map[string]any)["email_verified"] != true {
+		t.Fatal("email should be verified")
+	}
+
+	// Logout invalidates the session.
+	if code, _ := c.do("POST", "/v1/auth/logout", nil, c.csrfHdr()); code != 204 {
+		t.Fatalf("logout = %d", code)
+	}
+	if code, _ := c.do("GET", "/v1/auth/me", nil, nil); code != 401 {
+		t.Fatalf("me after logout = %d", code)
+	}
+
+	// Wrong password and unknown user look identical.
+	c2, _ := c.do("POST", "/v1/auth/login", map[string]any{"email": "ada@example.com", "password": "wrong-password"}, nil)
+	c3, _ := c.do("POST", "/v1/auth/login", map[string]any{"email": "ghost@example.com", "password": "wrong-password"}, nil)
+	if c2 != 401 || c3 != 401 {
+		t.Fatalf("bad logins = %d, %d", c2, c3)
+	}
+
+	// Bearer token: no CSRF needed, and a bearer token is not valid as a cookie.
+	b := newClient(t, ts.URL)
+	code, out = b.do("POST", "/v1/auth/login", map[string]any{"email": "ada@example.com", "password": "correct-horse-1", "token": true}, nil)
+	if code != 200 || out["token"] == nil {
+		t.Fatalf("bearer login = %d %v", code, out)
+	}
+	auth := map[string]string{"Authorization": "Bearer " + out["token"].(string)}
+	if code, _ := b.do("GET", "/v1/auth/me", nil, auth); code != 200 {
+		t.Fatalf("bearer me = %d", code)
+	}
+	if code, _ := b.do("POST", "/v1/auth/logout", nil, auth); code != 204 {
+		t.Fatalf("bearer logout (no CSRF) = %d", code)
+	}
+	if code, _ := b.do("GET", "/v1/auth/me", nil, auth); code != 401 {
+		t.Fatalf("revoked bearer = %d", code)
+	}
+}
+
+func TestPasswordResetAndChange(t *testing.T) {
+	ts, mailer := newTestServer(t)
+	c := newClient(t, ts.URL)
+	c.do("POST", "/v1/auth/signup", map[string]any{"email": "a@b.co", "password": "first-password-1", "phone": "+2348012345678", "accept_aup": true}, nil)
+
+	// Unknown email still gets 202 and sends nothing new.
+	if code, _ := c.do("POST", "/v1/auth/forgot-password", map[string]any{"email": "nobody@b.co"}, nil); code != 202 {
+		t.Fatalf("forgot unknown = %d", code)
+	}
+	if code, _ := c.do("POST", "/v1/auth/forgot-password", map[string]any{"email": "a@b.co"}, nil); code != 202 {
+		t.Fatalf("forgot = %d", code)
+	}
+	tok := mailer.token(t)
+	if code, _ := c.do("POST", "/v1/auth/reset-password", map[string]any{"token": tok, "password": "second-password-2"}, nil); code != 200 {
+		t.Fatalf("reset = %d", code)
+	}
+	if code, _ := c.do("POST", "/v1/auth/reset-password", map[string]any{"token": tok, "password": "third-password-3"}, nil); code != 400 {
+		t.Fatalf("reset token reuse = %d", code)
+	}
+	// Reset signs everyone out, old password stops working.
+	if code, _ := c.do("GET", "/v1/auth/me", nil, nil); code != 401 {
+		t.Fatalf("session should be revoked, got %d", code)
+	}
+	if code, _ := c.do("POST", "/v1/auth/login", map[string]any{"email": "a@b.co", "password": "first-password-1"}, nil); code != 401 {
+		t.Fatalf("old password = %d", code)
+	}
+	if code, _ := c.do("POST", "/v1/auth/login", map[string]any{"email": "a@b.co", "password": "second-password-2"}, nil); code != 200 {
+		t.Fatalf("new password login = %d", code)
+	}
+
+	// Change password requires the current one and rotates the session.
+	if code, _ := c.do("POST", "/v1/auth/change-password", map[string]any{"current": "nope", "new": "fourth-password-4"}, c.csrfHdr()); code != 401 {
+		t.Fatalf("change with wrong current = %d", code)
+	}
+	if code, _ := c.do("POST", "/v1/auth/change-password", map[string]any{"current": "second-password-2", "new": "fourth-password-4"}, c.csrfHdr()); code != 200 {
+		t.Fatalf("change = %d", code)
+	}
+	if code, _ := c.do("GET", "/v1/auth/me", nil, nil); code != 200 {
+		t.Fatalf("fresh session after change = %d", code)
+	}
+}
+
+func TestRateLimits(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := newClient(t, ts.URL)
+	for i := 0; i < 3; i++ {
+		c.do("POST", "/v1/auth/signup", map[string]any{"email": "u" + string(rune('a'+i)) + "@b.co", "password": "long-enough-pw", "phone": "+2348012345678", "accept_aup": true}, nil)
+	}
+	if code, _ := c.do("POST", "/v1/auth/signup", map[string]any{"email": "ud@b.co", "password": "long-enough-pw", "phone": "+2348012345678", "accept_aup": true}, nil); code != 429 {
+		t.Fatalf("4th signup from one IP = %d", code)
+	}
+	for i := 0; i < 8; i++ {
+		c.do("POST", "/v1/auth/login", map[string]any{"email": "ua@b.co", "password": "bad-password-x"}, nil)
+	}
+	if code, _ := c.do("POST", "/v1/auth/login", map[string]any{"email": "ua@b.co", "password": "long-enough-pw"}, nil); code != 429 {
+		t.Fatalf("login after lockout = %d", code)
+	}
+}
+
+func TestAdminAndAnonymousGuards(t *testing.T) {
+	ts, _ := newTestServer(t)
+	c := newClient(t, ts.URL)
+	if code, _ := c.do("GET", "/v1/vms", nil, nil); code != 401 {
+		t.Fatalf("anonymous /vms = %d", code)
+	}
+}
+
+// A bad reset token must be refused before any argon2 work, and the route is rate limited per IP.
+func TestResetPasswordIsRateLimitedAndChecksTokenFirst(t *testing.T) {
+	env := newTestEnv(t)
+	c := newClient(t, env.ts.URL)
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		if code, _ := c.do("POST", "/v1/auth/reset-password", map[string]string{"token": "nope", "password": "a-long-enough-password"}, nil); code != http.StatusBadRequest {
+			t.Fatalf("attempt %d: status %d, want 400", i, code)
+		}
+	}
+	if d := time.Since(start); d > 5*time.Second { // 20 argon2 hashes would take far longer
+		t.Errorf("20 bad-token requests took %v: the hash must not run before the token is checked", d)
+	}
+	if code, _ := c.do("POST", "/v1/auth/reset-password", map[string]string{"token": "nope", "password": "a-long-enough-password"}, nil); code != http.StatusTooManyRequests {
+		t.Fatalf("21st attempt: status %d, want 429", code)
+	}
+}
+
+// X-Forwarded-For is believed only when the TCP peer is the proxy; anyone else could be forging it.
+func TestClientIPTrustsForwardedForOnlyFromTheProxy(t *testing.T) {
+	s := &Server{Cfg: config.Config{TrustProxy: true, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.1.0.0/16")}}}
+	cases := []struct{ peer, xff, want string }{
+		{"127.0.0.1:5000", "9.9.9.9, 1.2.3.4", "1.2.3.4"},
+		{"10.1.2.3:5000", "1.2.3.4", "1.2.3.4"},
+		{"203.0.113.7:5000", "1.2.3.4", "203.0.113.7"}, // not the proxy: header ignored
+	}
+	for _, tc := range cases {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = tc.peer
+		r.Header.Set("X-Forwarded-For", tc.xff)
+		if got := s.clientIP(r); got != tc.want {
+			t.Errorf("peer %s xff %q: got %s, want %s", tc.peer, tc.xff, got, tc.want)
+		}
+	}
+	s.Cfg.TrustProxy = false
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "127.0.0.1:5000"
+	r.Header.Set("X-Forwarded-For", "1.2.3.4")
+	if got := s.clientIP(r); got != "127.0.0.1" {
+		t.Errorf("proxy trust off: got %s", got)
+	}
+}

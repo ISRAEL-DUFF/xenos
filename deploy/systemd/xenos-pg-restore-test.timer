@@ -1,0 +1,9 @@
+[Unit]
+Description=Monthly Xenos backup restore test
+
+[Timer]
+OnCalendar=monthly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
