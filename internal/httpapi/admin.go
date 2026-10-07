@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/accounts"
 	"github.com/israel-duff/xenos/internal/billing"
@@ -41,7 +42,7 @@ func (s *Server) auditErr(r *http.Request, action, target string, detail any) er
 		b = []byte("{}")
 	}
 	return s.Store.Q.InsertAudit(r.Context(), db.InsertAuditParams{
-		AdminID: principalFrom(r.Context()).User.ID, Action: action, Target: target, Detail: b})
+		AdminID: pgtype.Int8{Int64: principalFrom(r.Context()).User.ID, Valid: true}, Action: action, Target: target, Detail: b})
 }
 
 func likeEscape(q string) string {

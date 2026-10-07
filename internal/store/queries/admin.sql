@@ -52,7 +52,7 @@ FROM adjustments a JOIN users adm ON adm.id = a.admin_id
 WHERE a.user_id = $1 ORDER BY a.id DESC LIMIT 20;
 
 -- name: InsertAudit :exec
-INSERT INTO admin_audit (admin_id, action, target, detail) VALUES ($1, $2, $3, $4);
+INSERT INTO admin_audit (admin_id, source, action, target, detail) VALUES ($1, $2, $3, $4, $5);
 
 -- name: ListJobsByStatus :many
 SELECT id, kind, payload, status, attempts, COALESCE(last_error, '')::text AS last_error, created_at

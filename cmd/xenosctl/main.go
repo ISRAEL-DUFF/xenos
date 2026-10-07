@@ -9,6 +9,8 @@
 //	xenosctl flag clear <vm-id>                        dismiss a flag after review
 //	xenosctl port25 allow|block <vm-id>                exempt a reviewed VM from the outbound SMTP block
 //	xenosctl firewall nft [bridge]                     print the nftables ruleset to load on the Proxmox host
+//	xenosctl plan list|add|price|disable|enable        manage the plans customers can choose (run with no arguments for usage)
+//	xenosctl template list|add|disable|enable          manage the templates (images)
 //	xenosctl preflight [--send-test <email>]           check config, database, iswallet, Proxmox, email and the worker before launch (exit 1 on any FAIL)
 //	xenosctl ispend subscribe <https-url>              register our webhook endpoint with iswallet (prints the signing secret ONCE)
 package main
@@ -58,6 +60,10 @@ func run(args []string) error {
 		return err
 	}
 	defer st.Close()
+
+	if handled, err := catalogueCmd(ctx, cfg, st, args); handled {
+		return err
+	}
 
 	switch {
 	case len(args) >= 4 && args[0] == "ip" && args[1] == "add":

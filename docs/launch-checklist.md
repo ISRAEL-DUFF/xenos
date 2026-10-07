@@ -36,6 +36,8 @@ Run `xenosctl preflight` on the server first (add `--send-test you@example.com` 
 - [ ] **host** Rebuild a VM onto another template: the new OS answers SSH at the same IP with the chosen key (the VMID is reused, so the old guest must be fully destroyed first)
 - [ ] **auto** API tokens work only for VMs, keys and reading the wallet, stop on revoke, expiry, ban and password reset; create is at-most-once per Idempotency-Key; labels filter; the boot script runs once, is erased, and is never re-run after an interruption: `internal/httpapi/tokens_test.go`, `TestBootScript*`
 - [ ] **host** The boot script runs through the real guest agent (`agent/exec`): check the API token role has the guest-agent privilege, the template has `qemu-guest-agent` with exec enabled, and a script's exit code and output come back
+- [ ] **auto** Plans and templates: validation, immutable sizes, price changes preview then confirm, disabled plans hidden but existing VMs still bill, audit for CLI and web: `internal/catalogue/catalogue_test.go`, `TestAdminCatalogue`
+- [ ] **host** Add a template with `xenosctl template add` against the real host: it is refused for a VMID that does not exist there
 - [ ] **host** Take two snapshots, change a file, restore the first: the file change is gone and the VM comes back. Check the API token role has the snapshot privileges
 - [ ] **host** The browser console shows the login prompt of a running VM and accepts typing (the host's VNC password handshake and `vncwebsocket` authentication with the API token are only proven against the real host)
 - [ ] **host** The `root` login works over SSH with the injected key (Ubuntu cloud images may refuse direct root login; confirm and adjust `templates.ci_user`)

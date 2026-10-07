@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -416,5 +417,76 @@ func TestSuspendedAccountCannotStartThings(t *testing.T) {
 	}
 	if code, _ := user.do("GET", "/v1/vms", nil, nil); code != 200 {
 		t.Errorf("a suspended user can still read: %d", code)
+	}
+}
+
+func TestAdminCatalogue(t *testing.T) {
+	env := newTestEnv(t)
+	admin := makeAdmin(t, env, "admin@x.co")
+	user := signupClient(t, env.ts.URL, "u@x.co")
+	pve := proxmox.NewFake()
+	env.srv.PVE = pve
+
+	// Only admins reach it.
+	if code, _ := user.do("GET", "/v1/admin/plans", nil, nil); code != 403 {
+		t.Fatalf("a customer on the catalogue = %d, want 403", code)
+	}
+	if code, _ := user.do("POST", "/v1/admin/plans", map[string]any{"slug": "x"}, user.csrfHdr()); code != 403 {
+		t.Fatalf("a customer adding a plan = %d, want 403", code)
+	}
+
+	code, out := admin.do("POST", "/v1/admin/plans", map[string]any{"slug": "d-small", "vcpu": 2, "ram_mb": 4096, "disk_gb": 40, "price_uusdt_hourly": 48_000}, admin.csrfHdr())
+	if code != 201 {
+		t.Fatalf("add plan = %d %v", code, out)
+	}
+	if code, out := admin.do("POST", "/v1/admin/plans", map[string]any{"slug": "d-small", "vcpu": 2, "ram_mb": 4096, "disk_gb": 40, "price_uusdt_hourly": 48_000}, admin.csrfHdr()); code != 400 || !strings.Contains(out["error"].(string), "already exists") {
+		t.Fatalf("duplicate plan = %d %v", code, out)
+	}
+	// Customers now see it.
+	resp, _ := http.Get(env.ts.URL + "/v1/plans")
+	var plans []map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&plans)
+	resp.Body.Close()
+	seen := false
+	for _, p := range plans {
+		seen = seen || p["slug"] == "d-small"
+	}
+	if !seen {
+		t.Fatal("the new plan must be offered")
+	}
+
+	// A price change reports its impact and applies only when confirmed.
+	code, out = admin.do("POST", "/v1/admin/plans/d-small/price", map[string]any{"price_uusdt_hourly": 50_000}, admin.csrfHdr())
+	if code != 200 || out["applied"] != false || out["new_hourly_uusdt"] != float64(50_000) {
+		t.Fatalf("price preview = %d %v", code, out)
+	}
+	code, out = admin.do("POST", "/v1/admin/plans/d-small/price", map[string]any{"price_uusdt_hourly": 50_000, "confirm": true}, admin.csrfHdr())
+	if code != 200 || out["applied"] != true {
+		t.Fatalf("price applied = %d %v", code, out)
+	}
+	if code, _ := admin.do("POST", "/v1/admin/plans/d-small/price", map[string]any{"price_uusdt_hourly": 0, "confirm": true}, admin.csrfHdr()); code != 400 {
+		t.Fatalf("a zero price = %d, want 400", code)
+	}
+	if code, _ := admin.do("POST", "/v1/admin/plans/ghost/price", map[string]any{"price_uusdt_hourly": 1, "confirm": true}, admin.csrfHdr()); code != 404 {
+		t.Fatalf("an unknown plan = %d, want 404", code)
+	}
+	if code, _ := admin.do("POST", "/v1/admin/plans/d-small/active", map[string]any{"active": false}, admin.csrfHdr()); code != 200 {
+		t.Fatalf("disable = %d", code)
+	}
+	if n := count(t, env, `SELECT count(*) FROM plans WHERE slug='d-small' AND active`); n != 0 {
+		t.Fatal("the plan should be disabled")
+	}
+
+	// Templates: the VMID must exist on the host.
+	body := map[string]any{"slug": "alma-9", "name": "AlmaLinux 9", "proxmox_template_id": 9002, "ci_user": "almalinux"}
+	if code, _ := admin.do("POST", "/v1/admin/templates", body, admin.csrfHdr()); code != 400 {
+		t.Fatalf("a VMID missing on the host = %d, want 400", code)
+	}
+	pve.VMs[9002] = &proxmox.FakeVM{ID: 9002}
+	if code, out := admin.do("POST", "/v1/admin/templates", body, admin.csrfHdr()); code != 201 {
+		t.Fatalf("add template = %d %v", code, out)
+	}
+	if n := count(t, env, `SELECT count(*) FROM admin_audit WHERE action IN ('plan.add','plan.price','plan.active','template.add') AND admin_id IS NOT NULL`); n != 4 {
+		t.Fatalf("audit rows for the web actions: %d, want 4 (a preview is not audited)", n)
 	}
 }

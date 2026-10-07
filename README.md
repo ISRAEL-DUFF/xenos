@@ -108,6 +108,8 @@ All five phases are code-complete and tested against fakes. What is **not** veri
 
 *Rebuild* reinstalls a VM from a template (same or another) into the same VMID, IP, plan and hostname, optionally with new SSH keys (the way back in after losing a key); it erases the disk and snapshots, needs the VM name typed, and a permanently failed rebuild marks the VM errored and stops its billing, since the old guest is already gone.
 
+**Catalogue:** plans and templates are managed with `xenosctl plan|template ...` or Admin → Catalogue, not SQL. A plan's size cannot be edited (add a new slug); its hourly price can, and applies to existing VMs from the next charged hour, after a preview of how many VMs it touches and an explicit confirmation; disabling a plan or template only stops new VMs. Changes are audited (CLI changes carry `xenosctl:<user>` as the source).
+
 **Programmatic use:** API tokens (`xt_…`, managed in Account) let a program manage VMs and read the wallet but not change the account or move money; VMs take labels, a once-only create `Idempotency-Key`, and a boot script run once as root through the guest agent. See [docs/pgdock-provider-contract.md](docs/pgdock-provider-contract.md), which maps this to PGDock's provider interface and lists the gaps (HA placement, floating IPs, volumes, private networks).
 
 Not built: BVN / TIER_2 upgrade, card funding (iswallet has none), a second host and the rest of the plan's backlog.

@@ -3,6 +3,7 @@ import { Route, Routes } from "react-router-dom";
 import { Layout, RequireAdmin, RequireAuth } from "./Layout";
 import { AdminCapacity, AdminJobs, AdminLayout, AdminRevenue, AdminUserDetail, AdminUsers, AdminVMs } from "./pages-admin";
 import { AccountPage } from "./pages-account";
+import { AdminCatalogue } from "./pages-catalogue";
 import { ForgotPassword, Login, ResetPassword, Signup, VerifyEmail } from "./pages-auth";
 import { AUP, Home, NotFound } from "./pages-misc";
 import { SSHKeys } from "./pages-sshkeys";
@@ -40,6 +41,7 @@ export default function App() {
               <Route path="capacity" element={<AdminCapacity />} />
               <Route path="jobs" element={<AdminJobs />} />
               <Route path="revenue" element={<AdminRevenue />} />
+              <Route path="catalogue" element={<AdminCatalogue />} />
             </Route>
           </Route>
         </Route>

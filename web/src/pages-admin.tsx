@@ -17,6 +17,7 @@ const tabs = [
   { to: "/admin/capacity", label: "Capacity" },
   { to: "/admin/jobs", label: "Jobs" },
   { to: "/admin/revenue", label: "Revenue" },
+  { to: "/admin/catalogue", label: "Catalogue" },
 ];
 
 export function AdminLayout() {

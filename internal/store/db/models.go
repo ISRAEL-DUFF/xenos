@@ -25,12 +25,13 @@ type Adjustment struct {
 }
 
 type AdminAudit struct {
-	ID      int64     `json:"id"`
-	AdminID int64     `json:"admin_id"`
-	Action  string    `json:"action"`
-	Target  string    `json:"target"`
-	Detail  []byte    `json:"detail"`
-	At      time.Time `json:"at"`
+	ID      int64       `json:"id"`
+	AdminID pgtype.Int8 `json:"admin_id"`
+	Action  string      `json:"action"`
+	Target  string      `json:"target"`
+	Detail  []byte      `json:"detail"`
+	At      time.Time   `json:"at"`
+	Source  pgtype.Text `json:"source"`
 }
 
 type AlertsSent struct {

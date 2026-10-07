@@ -199,3 +199,36 @@ export interface Revenue {
   totals: { converted_ngn_kobo: number; converted_uusdt: number; usage_uusdt: number };
   merchant_uusdt: number | null; // USDT in the Xenos operating wallet; admin credits are paid from it
 }
+
+export interface AdminPlan {
+  id: number;
+  slug: string;
+  vcpu: number;
+  ram_mb: number;
+  disk_gb: number;
+  price_uusdt_hourly: number;
+  price_uusdt_monthly_cap: number;
+  active: boolean;
+  vm_count: number;
+}
+
+export interface AdminTemplate {
+  id: number;
+  slug: string;
+  name: string;
+  proxmox_template_id: number;
+  ci_user: string;
+  active: boolean;
+  vm_count: number;
+}
+
+export interface PriceImpact {
+  slug: string;
+  old_hourly_uusdt: number;
+  new_hourly_uusdt: number;
+  old_monthly_cap_uusdt: number;
+  new_monthly_cap_uusdt: number;
+  billing_vms: number;
+  monthly_delta_uusdt: number;
+  applied: boolean;
+}

@@ -239,6 +239,17 @@ if (process.env.E2E_PROMOTE) {
     await page.getByRole("navigation", { name: "Admin" }).getByRole("link", { name: tab }).click();
     await page.getByText(text).first().waitFor();
   }
+  await page.getByRole("navigation", { name: "Admin" }).getByRole("link", { name: "Catalogue" }).click();
+  await page.getByRole("heading", { name: "Plans" }).waitFor();
+  await page.getByLabel("Slug").first().fill("e2e-plan");
+  await page.getByLabel("USDT per hour").fill("0.05");
+  await page.getByRole("button", { name: "Add plan" }).click();
+  await page.getByRole("cell", { name: "e2e-plan" }).waitFor();
+  await page.getByRole("row", { name: /e2e-plan/ }).getByRole("button", { name: "Change price" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Preview" }).click();
+  await page.getByText(/VM\(s\) are billing on this plan/).waitFor();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+  await shot(page, "12b-admin-catalogue");
   await shot(page, "12-admin-revenue");
   check(problems.length === 0, `admin console problems:\n    ${problems.join("\n    ")}`);
   await page.context().close();

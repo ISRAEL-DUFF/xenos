@@ -141,6 +141,13 @@ func (s *Server) Router() http.Handler {
 			r.Get("/jobs", s.adminListJobs)
 			r.Post("/jobs/{id}/retry", s.adminRetryJob)
 			r.Get("/revenue", s.adminRevenue)
+			r.Get("/plans", s.adminListPlans)
+			r.Post("/plans", s.adminAddPlan)
+			r.Post("/plans/{slug}/price", s.adminSetPlanPrice)
+			r.Post("/plans/{slug}/active", s.adminSetPlanActive)
+			r.Get("/templates", s.adminListTemplates)
+			r.Post("/templates", s.adminAddTemplate)
+			r.Post("/templates/{slug}/active", s.adminSetTemplateActive)
 		})
 
 		// Authenticated by webhook signature instead of a session (Phase 3).

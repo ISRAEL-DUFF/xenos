@@ -253,19 +253,21 @@ func (q *Queries) GetAdjustmentByRequest(ctx context.Context, arg GetAdjustmentB
 }
 
 const insertAudit = `-- name: InsertAudit :exec
-INSERT INTO admin_audit (admin_id, action, target, detail) VALUES ($1, $2, $3, $4)
+INSERT INTO admin_audit (admin_id, source, action, target, detail) VALUES ($1, $2, $3, $4, $5)
 `
 
 type InsertAuditParams struct {
-	AdminID int64  `json:"admin_id"`
-	Action  string `json:"action"`
-	Target  string `json:"target"`
-	Detail  []byte `json:"detail"`
+	AdminID pgtype.Int8 `json:"admin_id"`
+	Source  pgtype.Text `json:"source"`
+	Action  string      `json:"action"`
+	Target  string      `json:"target"`
+	Detail  []byte      `json:"detail"`
 }
 
 func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error {
 	_, err := q.db.Exec(ctx, insertAudit,
 		arg.AdminID,
+		arg.Source,
 		arg.Action,
 		arg.Target,
 		arg.Detail,
