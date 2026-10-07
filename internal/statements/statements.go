@@ -42,6 +42,15 @@ type VMLine struct {
 	RefundedUUSDT int64             `json:"refunded_uusdt"`
 }
 
+// FloatingLine is one floating IP's charges in the month.
+type FloatingLine struct {
+	ID            int64  `json:"floating_ip_id"`
+	Address       string `json:"address"`
+	ChargedHours  int    `json:"charged_hours"`
+	ChargedUUSDT  int64  `json:"charged_uusdt"`
+	RefundedUUSDT int64  `json:"refunded_uusdt"`
+}
+
 type GroupLine struct {
 	Value        string `json:"value"` // the label's value, or "(none)"
 	VMs          int    `json:"vms"`
@@ -78,6 +87,7 @@ type Statement struct {
 	To          time.Time        `json:"to"`
 	Totals      Totals           `json:"totals"`
 	VMs         []VMLine         `json:"vms"`
+	Floating    []FloatingLine   `json:"floating_ips"`
 	GroupBy     string           `json:"group_by,omitempty"`
 	Groups      []GroupLine      `json:"groups,omitempty"`
 	Conversions []ConversionLine `json:"conversions"`
@@ -90,7 +100,7 @@ func Build(ctx context.Context, st *store.Store, userID int64, month, groupLabel
 	if err != nil {
 		return Statement{}, err
 	}
-	out := Statement{Month: month, From: from, To: to, VMs: []VMLine{}, Conversions: []ConversionLine{}, Adjustments: []AdjustmentLine{}}
+	out := Statement{Month: month, From: from, To: to, VMs: []VMLine{}, Floating: []FloatingLine{}, Conversions: []ConversionLine{}, Adjustments: []AdjustmentLine{}}
 	rows, err := st.Q.StatementCharges(ctx, db.StatementChargesParams{UserID: userID, Hour: from, Hour_2: to})
 	if err != nil {
 		return out, err
@@ -121,6 +131,34 @@ func Build(ctx context.Context, st *store.Store, userID int64, month, groupLabel
 		out.Totals.RefundedUUSDT += l.RefundedUUSDT
 		out.Totals.ChargedHours += l.ChargedHours
 		out.Totals.CappedHours += l.CappedHours
+	}
+	frows, err := st.Q.StatementFloatingCharges(ctx, db.StatementFloatingChargesParams{UserID: userID, Hour: from, Hour_2: to})
+	if err != nil {
+		return out, err
+	}
+	byFIP := map[int64]*FloatingLine{}
+	var forder []int64
+	for _, r := range frows {
+		id := r.FloatingIpID.Int64
+		l := byFIP[id]
+		if l == nil {
+			l = &FloatingLine{ID: id, Address: r.Address}
+			byFIP[id] = l
+			forder = append(forder, id)
+		}
+		if r.Status == "refunded" {
+			l.RefundedUUSDT += r.AmountUusdt
+		} else {
+			l.ChargedHours++
+			l.ChargedUUSDT += r.AmountUusdt
+		}
+	}
+	for _, id := range forder {
+		l := *byFIP[id]
+		out.Floating = append(out.Floating, l)
+		out.Totals.ChargedUUSDT += l.ChargedUUSDT
+		out.Totals.RefundedUUSDT += l.RefundedUUSDT
+		out.Totals.ChargedHours += l.ChargedHours
 	}
 	if out.Totals.UnpaidUUSDT, err = st.Q.StatementUnpaid(ctx, userID); err != nil {
 		return out, err
@@ -203,6 +241,17 @@ func WriteCSV(ctx context.Context, w io.Writer, st *store.Store, userID int64, m
 		}
 		rec := []string{fmt.Sprint(r.VmID), safeCell(r.Hostname), safeCell(r.PlanSlug), r.Hour.UTC().Format("2006-01-02T15:04:05Z"),
 			fmt.Sprint(r.AmountUusdt), fmt.Sprintf("%d.%06d", r.AmountUusdt/1_000_000, r.AmountUusdt%1_000_000), r.Status, safeCell(strings.Join(parts, ";"))}
+		if err := cw.Write(rec); err != nil {
+			return err
+		}
+	}
+	frows, err := st.Q.StatementFloatingCharges(ctx, db.StatementFloatingChargesParams{UserID: userID, Hour: from, Hour_2: to})
+	if err != nil {
+		return err
+	}
+	for _, r := range frows {
+		rec := []string{"", "floating-ip " + r.Address, "floating-ip", r.Hour.UTC().Format("2006-01-02T15:04:05Z"),
+			fmt.Sprint(r.AmountUusdt), fmt.Sprintf("%d.%06d", r.AmountUusdt/1_000_000, r.AmountUusdt%1_000_000), r.Status, ""}
 		if err := cw.Write(rec); err != nil {
 			return err
 		}

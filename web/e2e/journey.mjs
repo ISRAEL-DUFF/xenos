@@ -276,7 +276,7 @@ if (process.env.E2E_PROMOTE) {
   await noOverflow(page, "overview");
   await shot(page, "20-phone-overview");
 
-  for (const [name, path] of [["VMs", "/vms"], ["Create", "/vms/new"], ["Wallet", "/wallet"], ["SSH keys", "/ssh-keys"], ["Account", "/account"], ["Admin users", "/admin"], ["Admin VMs", "/admin/vms"], ["Admin revenue", "/admin/revenue"]]) {
+  for (const [name, path] of [["VMs", "/vms"], ["Create", "/vms/new"], ["Wallet", "/wallet"], ["SSH keys", "/ssh-keys"], ["Networking", "/networking"], ["Account", "/account"], ["Admin users", "/admin"], ["Admin VMs", "/admin/vms"], ["Admin revenue", "/admin/revenue"]]) {
     await page.goto(`${base}${path}`);
     await page.waitForLoadState("networkidle");
     await noOverflow(page, `phone ${name}`);

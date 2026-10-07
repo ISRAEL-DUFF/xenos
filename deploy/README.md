@@ -77,6 +77,7 @@ The API applies database migrations when it starts. Check `curl https://api.exam
 
 ```sh
 export $(grep -v '^#' /etc/xenos/xenos.env | xargs)
+/opt/xenos/bin/xenosctl ip add-floating 198.51.100.10-198.51.100.20   # addresses customers can move between their VMs (a different range from the pool above)
 /opt/xenos/bin/xenosctl ip add 203.0.113.10-203.0.113.14 203.0.113.1   # your routed IPs and the gateway VMs use
 # sign up in the dashboard, then:
 /opt/xenos/bin/xenosctl admin grant you@example.com

@@ -58,6 +58,8 @@ type Meter struct {
 	// firing every charge at :00. iswallet rate-limits to 100 calls a minute per key and sends
 	// no Retry-After, so a burst at the top of the hour would be mostly refused. 0 disables it.
 	SpreadMinutes int
+	// FloatingIPPriceUUSDT is what one floating IP costs per hour, attached or not. 0 means free.
+	FloatingIPPriceUUSDT int64
 }
 
 // chargeOffset is how long after the top of the hour a VM's charge becomes due: a stable per-VM
@@ -117,7 +119,7 @@ func (m *Meter) Tick(ctx context.Context) error {
 	started := time.Now()
 	t := &tick{m: m, now: m.now(), balances: map[string]billing.Balances{}}
 	var errs []error
-	for _, step := range []func(context.Context) error{t.retryOpen, t.chargeNew, t.finishBilling, t.enforce, t.warnLow} {
+	for _, step := range []func(context.Context) error{t.retryOpen, t.chargeNew, t.chargeFloating, t.finishBilling, t.enforce, t.warnLow} {
 		if err := step(ctx); err != nil {
 			errs = append(errs, err)
 		}
@@ -139,6 +141,7 @@ type tick struct {
 
 type charge struct {
 	id, userID, vmID int64
+	fipID            int64 // set instead of vmID for a floating IP's hour
 	hour             time.Time
 	amount           int64
 	status           string
@@ -178,7 +181,7 @@ func (t *tick) retryOpen(ctx context.Context) error {
 		if !r.IspendCustomerID.Valid {
 			continue
 		}
-		c := charge{r.ID, r.UserID, r.VmID, r.Hour, r.AmountUusdt, r.Status, r.IspendCustomerID.String}
+		c := charge{r.ID, r.UserID, r.VmID, r.FloatingIpID, r.Hour, r.AmountUusdt, r.Status, r.IspendCustomerID.String}
 		if c.status == "unpaid" {
 			bal, ok := t.balance(ctx, c.customer)
 			if !ok || bal.USDTMicro < c.amount {
@@ -199,7 +202,12 @@ func (t *tick) attempt(ctx context.Context, c charge) error {
 		return nil
 	}
 	narration := fmt.Sprintf("vm:%d hour:%s", c.vmID, c.hour.UTC().Format("2006010215"))
-	mv, err := t.m.ISpend.Charge(ctx, billing.ChargeKey(c.vmID, c.hour), c.customer, c.amount, narration)
+	key := billing.ChargeKey(c.vmID, c.hour)
+	if c.fipID != 0 {
+		narration = fmt.Sprintf("floating-ip:%d hour:%s", c.fipID, c.hour.UTC().Format("2006010215"))
+		key = billing.FloatingChargeKey(c.fipID, c.hour)
+	}
+	mv, err := t.m.ISpend.Charge(ctx, key, c.customer, c.amount, narration)
 	switch {
 	case err == nil:
 		delete(t.balances, c.customer)
@@ -304,7 +312,7 @@ func (t *tick) chargeNew(ctx context.Context) error {
 func (t *tick) record(ctx context.Context, v db.ListBillingVMsRow, h time.Time) (*charge, error) {
 	amount := v.PriceUusdtHourly
 	monthStart := time.Date(h.Year(), h.Month(), 1, 0, 0, 0, 0, time.UTC)
-	charged, err := t.m.Store.Q.MonthChargedForVM(ctx, db.MonthChargedForVMParams{VmID: v.ID, Hour: monthStart, Hour_2: monthStart.AddDate(0, 1, 0)})
+	charged, err := t.m.Store.Q.MonthChargedForVM(ctx, db.MonthChargedForVMParams{VmID: v.ID, HourFrom: monthStart, HourTo: monthStart.AddDate(0, 1, 0)})
 	if err != nil {
 		return nil, err
 	}
@@ -337,10 +345,68 @@ func (t *tick) record(ctx context.Context, v db.ListBillingVMsRow, h time.Time) 
 	if err != nil || !u.IspendCustomerID.Valid {
 		return nil, err // no wallet yet: stays pending until the account is linked
 	}
-	return &charge{id, v.UserID, v.ID, h, amount, "pending", u.IspendCustomerID.String}, nil
+	return &charge{id, v.UserID, v.ID, 0, h, amount, "pending", u.IspendCustomerID.String}, nil
+}
+
+// chargeFloating bills each floating IP by the hour from the hour it was allocated until the hour it was
+// released, attached or not. It follows the same cursor scheme as VMs, so a crash never skips or repeats an hour.
+func (t *tick) chargeFloating(ctx context.Context) error {
+	if t.m.FloatingIPPriceUUSDT <= 0 {
+		return nil
+	}
+	rows, err := t.m.Store.Q.ListBillingFloating(ctx)
+	if err != nil {
+		return err
+	}
+	for _, f := range rows {
+		end := t.now
+		if f.BillingUntil.Valid && f.BillingUntil.Time.Before(end) {
+			end = f.BillingUntil.Time
+		}
+		last := end.UTC().Truncate(hour)
+		for h := f.BillingFrom.Time.UTC().Truncate(hour); !h.After(last); h = h.Add(hour) {
+			if t.now.Before(h.Add(t.m.chargeOffset(f.ID + 1_000_003))) {
+				break
+			}
+			var id int64
+			inserted := true
+			err := t.m.Store.InTx(ctx, func(q *db.Queries, _ pgx.Tx) error {
+				var err error
+				id, err = q.InsertFloatingCharge(ctx, db.InsertFloatingChargeParams{UserID: f.UserID.Int64, FloatingIpID: pgtype.Int8{Int64: f.ID, Valid: true},
+					Hour: h, AmountUusdt: t.m.FloatingIPPriceUUSDT, Status: "pending"})
+				if errors.Is(err, pgx.ErrNoRows) {
+					inserted, err = false, nil
+				}
+				if err != nil {
+					return err
+				}
+				return q.SetFloatingBillingFrom(ctx, db.SetFloatingBillingFromParams{ID: f.ID, BillingFrom: tsOf(h.Add(hour))})
+			})
+			if err != nil {
+				return err
+			}
+			if !inserted {
+				continue
+			}
+			u, err := t.m.Store.Q.GetUserByID(ctx, f.UserID.Int64)
+			if err != nil {
+				return err
+			}
+			if !u.IspendCustomerID.Valid {
+				continue // stays pending until the account has a wallet
+			}
+			if err := t.attempt(ctx, charge{id: id, userID: u.ID, fipID: f.ID, hour: h, amount: t.m.FloatingIPPriceUUSDT, status: "pending", customer: u.IspendCustomerID.String}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (t *tick) finishBilling(ctx context.Context) error {
+	if err := t.m.Store.Q.FinishFloatingBilling(ctx); err != nil {
+		return err
+	}
 	return t.m.Store.Q.FinishBilling(ctx)
 }
 

@@ -56,7 +56,7 @@ func (q *Queries) StatementAdjustments(ctx context.Context, arg StatementAdjustm
 }
 
 const statementCharges = `-- name: StatementCharges :many
-SELECT c.vm_id, v.hostname, v.labels, p.slug AS plan_slug, c.hour, c.amount_uusdt, c.status
+SELECT v.id AS vm_id, v.hostname, v.labels, p.slug AS plan_slug, c.hour, c.amount_uusdt, c.status
 FROM usage_charges c
 JOIN vms v ON v.id = c.vm_id
 JOIN plans p ON p.id = v.plan_id

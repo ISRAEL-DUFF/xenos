@@ -254,3 +254,15 @@ export interface Statement {
   conversions: { id: number; at: string; amount_ngn_kobo: number; amount_uusdt: number; rate_kobo_per_usdt: string }[];
   adjustments: { id: number; at: string; amount_uusdt: number; note: string }[];
 }
+
+export interface FloatingIP {
+  id: number;
+  address: string;
+  region: string;
+  label: string;
+  vm_id: number | null;
+  /** True once the guest has been configured to match vm_id. */
+  applied: boolean;
+  allocated_at: string;
+  price_uusdt_hourly: number;
+}

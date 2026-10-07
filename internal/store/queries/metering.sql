@@ -7,7 +7,7 @@ ORDER BY v.id;
 
 -- name: InsertUsageCharge :one
 INSERT INTO usage_charges (user_id, vm_id, hour, amount_uusdt, status)
-VALUES ($1, $2, $3, $4, $5)
+VALUES (sqlc.arg(user_id), sqlc.arg(vm_id)::bigint, sqlc.arg(hour), sqlc.arg(amount_uusdt), sqlc.arg(status))
 ON CONFLICT (vm_id, hour) DO NOTHING
 RETURNING id;
 
@@ -16,10 +16,10 @@ UPDATE vms SET billing_from = $2 WHERE id = $1;
 
 -- name: MonthChargedForVM :one
 SELECT COALESCE(sum(amount_uusdt), 0)::bigint FROM usage_charges
-WHERE vm_id = $1 AND hour >= $2 AND hour < $3 AND status <> 'refunded';
+WHERE vm_id = sqlc.arg(vm_id)::bigint AND hour >= sqlc.arg(hour_from) AND hour < sqlc.arg(hour_to) AND status <> 'refunded';
 
 -- name: ListOpenCharges :many
-SELECT c.id, c.user_id, c.vm_id, c.hour, c.amount_uusdt, c.status, u.ispend_customer_id
+SELECT c.id, c.user_id, COALESCE(c.vm_id, 0)::bigint AS vm_id, COALESCE(c.floating_ip_id, 0)::bigint AS floating_ip_id, c.hour, c.amount_uusdt, c.status, u.ispend_customer_id
 FROM usage_charges c JOIN users u ON u.id = c.user_id
 WHERE c.status IN ('pending', 'unpaid')
 ORDER BY c.hour, c.id

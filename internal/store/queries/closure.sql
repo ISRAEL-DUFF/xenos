@@ -45,7 +45,7 @@ LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
 WHERE v.user_id = $1 ORDER BY v.id;
 
 -- name: ExportCharges :many
-SELECT c.id, c.vm_id, c.hour, c.amount_uusdt, c.status FROM usage_charges c WHERE c.user_id = $1 ORDER BY c.hour, c.id;
+SELECT c.id, COALESCE(c.vm_id, 0)::bigint AS vm_id, COALESCE(c.floating_ip_id, 0)::bigint AS floating_ip_id, c.hour, c.amount_uusdt, c.status FROM usage_charges c WHERE c.user_id = $1 ORDER BY c.hour, c.id;
 
 -- name: ExportConversions :many
 SELECT id, amount_ngn_kobo, amount_uusdt, COALESCE(rate::text, '')::text AS rate, status, created_at

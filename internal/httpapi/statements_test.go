@@ -149,3 +149,31 @@ func TestStatementsAreReadableWithAnAPIToken(t *testing.T) {
 		t.Fatalf("token statement = %d %v", code, out)
 	}
 }
+
+func TestStatementIncludesFloatingIPHours(t *testing.T) {
+	env := newTestEnv(t)
+	a := newVMUser(t, env, "a@x.co", 0)
+	ctx := context.Background()
+	var uid, fid int64
+	_ = env.st.Pool.QueryRow(ctx, `SELECT id FROM users WHERE email='a@x.co'`).Scan(&uid)
+	if err := env.st.Pool.QueryRow(ctx, `INSERT INTO floating_ips (address, region, user_id) VALUES ('198.51.100.10', 'test-1', $1) RETURNING id`, uid).Scan(&fid); err != nil {
+		t.Fatal(err)
+	}
+	for h := 0; h < 3; h++ {
+		if _, err := env.st.Pool.Exec(ctx, `INSERT INTO usage_charges (user_id, floating_ip_id, hour, amount_uusdt, status) VALUES ($1, $2, $3, 2000, 'paid')`,
+			uid, fid, time.Date(2025, 12, 1, h, 0, 0, 0, time.UTC)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out := a.c.do("GET", "/v1/statements/2025-12", nil, nil)
+	if code != 200 {
+		t.Fatalf("statement = %d", code)
+	}
+	fl := out["floating_ips"].([]any)
+	if len(fl) != 1 || fl[0].(map[string]any)["charged_uusdt"].(float64) != 6000 || fl[0].(map[string]any)["address"] != "198.51.100.10" {
+		t.Fatalf("floating = %v", fl)
+	}
+	if out["totals"].(map[string]any)["charged_uusdt"].(float64) != 6000 {
+		t.Fatalf("totals = %v", out["totals"])
+	}
+}

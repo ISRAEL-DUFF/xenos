@@ -112,15 +112,16 @@ func (q *Queries) ExportAdjustments(ctx context.Context, userID int64) ([]Export
 }
 
 const exportCharges = `-- name: ExportCharges :many
-SELECT c.id, c.vm_id, c.hour, c.amount_uusdt, c.status FROM usage_charges c WHERE c.user_id = $1 ORDER BY c.hour, c.id
+SELECT c.id, COALESCE(c.vm_id, 0)::bigint AS vm_id, COALESCE(c.floating_ip_id, 0)::bigint AS floating_ip_id, c.hour, c.amount_uusdt, c.status FROM usage_charges c WHERE c.user_id = $1 ORDER BY c.hour, c.id
 `
 
 type ExportChargesRow struct {
-	ID          int64     `json:"id"`
-	VmID        int64     `json:"vm_id"`
-	Hour        time.Time `json:"hour"`
-	AmountUusdt int64     `json:"amount_uusdt"`
-	Status      string    `json:"status"`
+	ID           int64     `json:"id"`
+	VmID         int64     `json:"vm_id"`
+	FloatingIpID int64     `json:"floating_ip_id"`
+	Hour         time.Time `json:"hour"`
+	AmountUusdt  int64     `json:"amount_uusdt"`
+	Status       string    `json:"status"`
 }
 
 func (q *Queries) ExportCharges(ctx context.Context, userID int64) ([]ExportChargesRow, error) {
@@ -135,6 +136,7 @@ func (q *Queries) ExportCharges(ctx context.Context, userID int64) ([]ExportChar
 		if err := rows.Scan(
 			&i.ID,
 			&i.VmID,
+			&i.FloatingIpID,
 			&i.Hour,
 			&i.AmountUusdt,
 			&i.Status,

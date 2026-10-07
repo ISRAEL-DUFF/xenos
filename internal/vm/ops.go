@@ -108,7 +108,7 @@ func (p *Provisioner) doResize(ctx context.Context, w db.GetResizeWorkRow) error
 		return errors.New("resize claim was lost")
 	}
 	p.Log.Info("vm resized", "vm_id", w.ID, "plan_id", w.ResizePlanID.Int64)
-	return nil
+	return p.reapplyFloating(ctx, w.ID) // the guest was restarted
 }
 
 // ---- snapshots ----
@@ -248,6 +248,7 @@ func (p *Provisioner) restore(ctx context.Context, j *jobs.Job, in Payload) erro
 	switch {
 	case err == nil:
 		p.release(ctx, in.VMID)
+		_ = p.reapplyFloating(ctx, in.VMID)
 	case finalFailure(ctx, j):
 		p.Log.Error("restore failed permanently; releasing the VM", "vm_id", w.ID, "err", err)
 		p.release(ctx, in.VMID)
@@ -309,7 +310,7 @@ func (p *Provisioner) doRebuild(ctx context.Context, w db.GetRebuildWorkRow) err
 	}
 	if err := p.createGuest(ctx, guestSpec{
 		VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.TemplateVmid), CIUser: w.CiUser, Keys: w.RebuildKeys.String,
-		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: w.Ipv6.String, Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
+		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: w.Ipv6.String, Extra: p.floatingAddrs(ctx, w.ID), Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
 		return err
 	}
 	err := p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
@@ -319,6 +320,9 @@ func (p *Provisioner) doRebuild(ctx context.Context, w db.GetRebuildWorkRow) err
 		}
 		if n == 0 {
 			return errors.New("rebuild claim was lost")
+		}
+		if err := reapplyFloatingTx(ctx, q, tx, w.ID); err != nil {
+			return err
 		}
 		if w.RebuildBootScript.Valid {
 			return jobs.EnqueueTx(ctx, tx, JobBootScript, Payload{VMID: w.ID})

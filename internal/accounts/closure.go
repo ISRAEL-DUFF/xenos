@@ -61,6 +61,11 @@ func CloseBlockers(ctx context.Context, st *store.Store, is billing.ISpend, u db
 			out = append(out, Blocker{"vms", "Delete your VMs first, or tick the box that deletes them for you."})
 		}
 	}
+	if n, err := st.Q.CountUserFloatingIPs(ctx, pgtype.Int8{Int64: u.ID, Valid: true}); err != nil {
+		return nil, err
+	} else if n > 0 {
+		out = append(out, Blocker{"floating", "Release your floating IPs first: they are billed by the hour until you do."})
+	}
 	if owed, err := st.Q.UserUnpaidTotal(ctx, u.ID); err != nil {
 		return nil, err
 	} else if owed > 0 {
@@ -91,6 +96,11 @@ func Close(ctx context.Context, st *store.Store, q *jobs.Queue, is billing.ISpen
 			return err
 		} else if status != "active" {
 			return errors.New("the account is not active")
+		}
+		if n, err := qr.CountUserFloatingIPs(ctx, pgtype.Int8{Int64: u.ID, Valid: true}); err != nil {
+			return err
+		} else if n > 0 {
+			return errStillHasFloating
 		}
 		if !opt.DeleteVMs {
 			if live, err := qr.UserHasLiveVMs(ctx, u.ID); err != nil {
@@ -123,11 +133,16 @@ func Close(ctx context.Context, st *store.Store, q *jobs.Queue, is billing.ISpen
 		}
 		return nil
 	})
+	if errors.Is(err, errStillHasFloating) {
+		return []Blocker{{"floating", "Release your floating IPs first: they are billed by the hour until you do."}}, nil
+	}
 	if errors.Is(err, errStillHasVMs) {
 		return []Blocker{{"vms", "Delete your VMs first, or tick the box that deletes them for you."}}, nil
 	}
 	return nil, err
 }
+
+var errStillHasFloating = errors.New("the account still has floating IPs")
 
 var errStillHasVMs = errors.New("the account still has VMs")
 
@@ -273,9 +288,9 @@ func Export(ctx context.Context, w io.Writer, st *store.Store, u db.User) error 
 	if cw, err = file("charges.csv"); err != nil {
 		return err
 	}
-	_ = cw.Write([]string{"id", "vm_id", "hour_utc", "amount_uusdt", "status"})
+	_ = cw.Write([]string{"id", "vm_id", "floating_ip_id", "hour_utc", "amount_uusdt", "status"})
 	for _, c := range charges {
-		_ = cw.Write([]string{strconv.FormatInt(c.ID, 10), strconv.FormatInt(c.VmID, 10), ts(c.Hour), strconv.FormatInt(c.AmountUusdt, 10), c.Status})
+		_ = cw.Write([]string{strconv.FormatInt(c.ID, 10), strconv.FormatInt(c.VmID, 10), strconv.FormatInt(c.FloatingIpID, 10), ts(c.Hour), strconv.FormatInt(c.AmountUusdt, 10), c.Status})
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {

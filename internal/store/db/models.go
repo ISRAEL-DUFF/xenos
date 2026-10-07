@@ -94,6 +94,21 @@ type EmailVerification struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type FloatingIp struct {
+	ID            int64              `json:"id"`
+	Address       netip.Addr         `json:"address"`
+	Region        string             `json:"region"`
+	UserID        pgtype.Int8        `json:"user_id"`
+	VmID          pgtype.Int8        `json:"vm_id"`
+	AppliedVmID   pgtype.Int8        `json:"applied_vm_id"`
+	AppliedAt     pgtype.Timestamptz `json:"applied_at"`
+	Label         string             `json:"label"`
+	AllocatedAt   pgtype.Timestamptz `json:"allocated_at"`
+	BillingUserID pgtype.Int8        `json:"billing_user_id"`
+	BillingFrom   pgtype.Timestamptz `json:"billing_from"`
+	BillingUntil  pgtype.Timestamptz `json:"billing_until"`
+}
+
 type Heartbeat struct {
 	Name string    `json:"name"`
 	At   time.Time `json:"at"`
@@ -177,12 +192,13 @@ type Template struct {
 type UsageCharge struct {
 	ID               int64       `json:"id"`
 	UserID           int64       `json:"user_id"`
-	VmID             int64       `json:"vm_id"`
+	VmID             pgtype.Int8 `json:"vm_id"`
 	Hour             time.Time   `json:"hour"`
 	AmountUusdt      int64       `json:"amount_uusdt"`
 	IspendMovementID pgtype.Text `json:"ispend_movement_id"`
 	Status           string      `json:"status"`
 	CreatedAt        time.Time   `json:"created_at"`
+	FloatingIpID     pgtype.Int8 `json:"floating_ip_id"`
 }
 
 type User struct {

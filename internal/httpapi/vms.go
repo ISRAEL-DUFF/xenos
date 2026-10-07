@@ -295,7 +295,7 @@ func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
 	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput)
 	now := time.Now().UTC()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	cost, err := s.Store.Q.MonthChargedForVM(r.Context(), db.MonthChargedForVMParams{VmID: id, Hour: monthStart, Hour_2: monthStart.AddDate(0, 1, 0)})
+	cost, err := s.Store.Q.MonthChargedForVM(r.Context(), db.MonthChargedForVMParams{VmID: id, HourFrom: monthStart, HourTo: monthStart.AddDate(0, 1, 0)})
 	if err != nil {
 		s.fail(w, r, err)
 		return

@@ -36,6 +36,7 @@ const (
 	JobRestore        = "vm.restore"         // roll the disk back to a snapshot
 	JobRebuild        = "vm.rebuild"         // reinstall from a template, keeping the VM's IP and plan
 	JobBootScript     = "vm.bootscript"      // run the customer's boot script once, through the guest agent
+	JobFloating       = "vm.floating"        // make a floating IP's firewall set and guest address match where it points
 )
 
 // Power actions accepted by JobPower.
@@ -50,6 +51,8 @@ type Payload struct {
 	Action string `json:"action,omitempty"`
 	// SnapshotID is the snapshots row a snapshot, delete or restore job works on.
 	SnapshotID int64 `json:"snapshot_id,omitempty"`
+	// FloatingID is the floating_ips row a floating job reconciles (VMID is unused then).
+	FloatingID int64 `json:"floating_id,omitempty"`
 }
 
 type Config struct {
@@ -118,6 +121,7 @@ func (p *Provisioner) Handlers() map[string]jobs.Handler {
 		JobRestore:        p.handle(p.restore),
 		JobRebuild:        p.handle(p.rebuild),
 		JobBootScript:     p.handle(p.bootScript),
+		JobFloating:       p.floating,
 	}
 }
 
@@ -355,7 +359,9 @@ func (p *Provisioner) power(ctx context.Context, _ *jobs.Job, in Payload) error 
 				return err
 			}
 		}
-		_, err = p.transition(ctx, w.ID, []string{"stopped"}, "running")
+		if _, err = p.transition(ctx, w.ID, []string{"stopped"}, "running"); err == nil {
+			err = p.reapplyFloating(ctx, w.ID) // the addresses live only in the running guest
+		}
 	case ActionStop:
 		if w.State != "running" && w.State != "stopped" {
 			return nil
@@ -370,7 +376,9 @@ func (p *Provisioner) power(ctx context.Context, _ *jobs.Job, in Payload) error 
 		if w.State != "running" {
 			return nil
 		}
-		err = p.run(ctx, vmid, "reboot")
+		if err = p.run(ctx, vmid, "reboot"); err == nil {
+			err = p.reapplyFloating(ctx, w.ID)
+		}
 	default:
 		return fmt.Errorf("unknown power action %q", in.Action)
 	}
@@ -410,6 +418,13 @@ func (p *Provisioner) delete(ctx context.Context, _ *jobs.Job, in Payload) error
 		return fmt.Errorf("destroy: %w", err)
 	}
 	if err := p.Store.Q.ReleaseIPForVM(ctx, pgtype.Int8{Int64: w.ID, Valid: true}); err != nil {
+		return err
+	}
+	// Its floating IPs stay with the account but no longer point here.
+	if err := p.Store.Q.DetachFloatingFromVM(ctx, pgtype.Int8{Int64: w.ID, Valid: true}); err != nil {
+		return err
+	}
+	if err := p.Store.Q.ClearFloatingApplied(ctx, pgtype.Int8{Int64: w.ID, Valid: true}); err != nil {
 		return err
 	}
 	return p.Store.Q.MarkVMDeleted(ctx, w.ID)

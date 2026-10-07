@@ -250,8 +250,8 @@ func (q *Queries) ListStalledConversions(ctx context.Context) ([]int64, error) {
 }
 
 const listUserCharges = `-- name: ListUserCharges :many
-SELECT c.id, c.vm_id, v.hostname, c.hour, c.amount_uusdt, c.status
-FROM usage_charges c JOIN vms v ON v.id = c.vm_id
+SELECT c.id, COALESCE(c.vm_id, 0)::bigint AS vm_id, COALESCE(v.hostname, 'floating ' || host(f.address))::text AS hostname, c.hour, c.amount_uusdt, c.status
+FROM usage_charges c LEFT JOIN vms v ON v.id = c.vm_id LEFT JOIN floating_ips f ON f.id = c.floating_ip_id
 WHERE c.user_id = $1 ORDER BY c.hour DESC, c.id DESC LIMIT 24
 `
 

@@ -16,10 +16,12 @@ import (
 
 	"github.com/israel-duff/xenos/internal/accounts"
 	"github.com/israel-duff/xenos/internal/alert"
+	jobqueue "github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
+	"github.com/israel-duff/xenos/internal/vm"
 )
 
 // Thresholds. The plan specifies the pool at 80%, RAM at 90% and CPU at 90% for 6 hours.
@@ -85,7 +87,7 @@ func (m *Monitor) Tick(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, check := range []func(context.Context) error{
-		m.failedJobs, m.hostCapacity, m.freeIPs, m.billing, m.webhooks, m.cpuWatch, m.purgeClosed,
+		m.failedJobs, m.hostCapacity, m.freeIPs, m.billing, m.webhooks, m.cpuWatch, m.purgeClosed, m.floatingCheck,
 	} {
 		if err := check(ctx); err != nil {
 			errs = append(errs, err)
@@ -252,4 +254,19 @@ func (m *Monitor) purgeClosed(ctx context.Context) error {
 		m.Log.Info("closed accounts purged", "count", n)
 	}
 	return err
+}
+
+// floatingCheck queues a reconcile for attached floating IPs that have not been confirmed on their guest for an
+// hour (or whose guest moved on), which also repairs an address lost to a guest-side reboot or network restart.
+func (m *Monitor) floatingCheck(ctx context.Context) error {
+	ids, err := m.Store.Q.FloatingDueForCheck(ctx, pgtype.Timestamptz{Time: m.now().Add(-time.Hour), Valid: true})
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := jobqueue.EnqueueTx(ctx, m.Store.Pool, vm.JobFloating, vm.Payload{FloatingID: id}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

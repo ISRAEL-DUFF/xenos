@@ -136,6 +136,13 @@ func (s *Server) Router() http.Handler {
 			r.Delete("/vms/{id}/snapshots/{sid}", s.deleteSnapshot)
 			r.With(s.requireActive).Post("/vms/{id}/snapshots/{sid}/restore", s.restoreSnapshot)
 
+			r.Get("/floating-ips", s.listFloatingIPs)
+			r.With(s.requireActive).Post("/floating-ips", s.allocateFloatingIP)
+			r.Get("/floating-ips/{id}", s.getFloatingIP)
+			r.With(s.requireActive).Post("/floating-ips/{id}/attach", s.attachFloatingIP)
+			r.With(s.requireActive).Post("/floating-ips/{id}/detach", s.detachFloatingIP)
+			r.Delete("/floating-ips/{id}", s.releaseFloatingIP)
+
 			r.Get("/statements", s.listStatements)
 			r.Get("/statements/{month}", s.getStatement)
 

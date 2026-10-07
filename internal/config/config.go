@@ -54,8 +54,11 @@ type Config struct {
 	TelegramChatID       string
 	AlertEmail           string // operator alerts by email in addition to / instead of Telegram
 	DepositLimitKobo     int64  // shown to customers: the most a basic (TIER_1) account may receive per transfer and per day; 0 hides it
-	MeterSpreadMinutes   int    // spread hourly charges over this many minutes after the hour, to stay under iswallet's rate limit
-	FakeISpendCredit     int64  // dev only: USDT (micro) given to each new customer of the fake iSpend
+	// FloatingIPPriceUUSDT is the hourly price of one floating IP in micro-USDT (attached or not); FloatingIPLimit is how many one account may hold.
+	FloatingIPPriceUUSDT int64
+	FloatingIPLimit      int
+	MeterSpreadMinutes   int   // spread hourly charges over this many minutes after the hour, to stay under iswallet's rate limit
+	FakeISpendCredit     int64 // dev only: USDT (micro) given to each new customer of the fake iSpend
 }
 
 // LoadUnchecked is Load without the production checks, for tools (preflight) that report problems instead of
@@ -117,6 +120,12 @@ func load(check bool) (Config, error) {
 	}
 	if c.DepositLimitKobo, err = strconv.ParseInt(get("XENOS_DEPOSIT_LIMIT_KOBO", "5000000"), 10, 64); err != nil {
 		return c, fmt.Errorf("XENOS_DEPOSIT_LIMIT_KOBO: %w", err)
+	}
+	if c.FloatingIPPriceUUSDT, err = strconv.ParseInt(get("XENOS_FLOATING_IP_PRICE_UUSDT_HOURLY", "2000"), 10, 64); err != nil || c.FloatingIPPriceUUSDT < 0 {
+		return c, fmt.Errorf("XENOS_FLOATING_IP_PRICE_UUSDT_HOURLY must be a non-negative integer (micro-USDT per hour)")
+	}
+	if c.FloatingIPLimit, err = strconv.Atoi(get("XENOS_FLOATING_IP_LIMIT", "3")); err != nil || c.FloatingIPLimit < 0 {
+		return c, fmt.Errorf("XENOS_FLOATING_IP_LIMIT must be a non-negative integer")
 	}
 	if c.MeterSpreadMinutes, err = strconv.Atoi(get("XENOS_METER_SPREAD_MINUTES", "40")); err != nil || c.MeterSpreadMinutes < 0 || c.MeterSpreadMinutes > 55 {
 		return c, fmt.Errorf("XENOS_METER_SPREAD_MINUTES must be 0-55")

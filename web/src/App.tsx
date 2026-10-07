@@ -8,6 +8,7 @@ import { ForgotPassword, Login, ResetPassword, Signup, VerifyEmail } from "./pag
 import { AUP, Home, NotFound } from "./pages-misc";
 import { SSHKeys } from "./pages-sshkeys";
 import { VMCreate, VMDetail, VMList } from "./pages-vms";
+import { NetworkingPage } from "./pages-networking";
 import { StatementList, StatementPage } from "./pages-statements";
 import { WalletPage } from "./pages-wallet";
 
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="/vms/:id" element={<VMDetail />} />
           <Route path="/vms/:id/console" element={<Suspense fallback={null}><ConsolePage /></Suspense>} />
           <Route path="/ssh-keys" element={<SSHKeys />} />
+          <Route path="/networking" element={<NetworkingPage />} />
           <Route path="/wallet" element={<WalletPage />} />
           <Route path="/statements" element={<StatementList />} />
           <Route path="/statements/:month" element={<StatementPage />} />

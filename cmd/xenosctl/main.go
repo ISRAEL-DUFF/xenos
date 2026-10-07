@@ -1,6 +1,7 @@
 // Command xenosctl is the operator CLI for tasks that have no admin UI yet.
 //
 //	xenosctl ip add <first>-<last> <gateway> [region]   load addresses into the IP pool
+//	xenosctl ip add-floating <first>-<last> [region]   load addresses into the floating IP pool (customers hold and move these)
 //	xenosctl ip list                                   show the pool and what uses each address
 //	xenosctl admin grant <email>                       make a user an admin
 //	xenosctl user limit <email> <n>                    set a user's VM limit
@@ -78,6 +79,12 @@ func run(args []string) error {
 			region = args[4]
 		}
 		return ipAdd(ctx, st, args[2], args[3], region)
+	case len(args) >= 3 && args[0] == "ip" && args[1] == "add-floating":
+		region := cfg.Region
+		if len(args) > 3 {
+			region = args[3]
+		}
+		return floatingAdd(ctx, st, args[2], region)
 	case len(args) == 2 && args[0] == "ip" && args[1] == "list":
 		return ipList(ctx, st)
 	case len(args) == 3 && args[0] == "admin" && args[1] == "grant":
@@ -210,7 +217,8 @@ func ipAdd(ctx context.Context, st *store.Store, rng, gateway, region string) er
 			return fmt.Errorf("gateway %s is inside the range", gw)
 		}
 		tag, err := st.Pool.Exec(ctx,
-			`INSERT INTO ip_addresses (address, gateway, region) VALUES ($1::inet, $2::inet, $3) ON CONFLICT (address) DO NOTHING`,
+			`INSERT INTO ip_addresses (address, gateway, region) SELECT $1::inet, $2::inet, $3
+			 WHERE NOT EXISTS (SELECT 1 FROM floating_ips WHERE address = $1::inet) ON CONFLICT (address) DO NOTHING`,
 			ip.String(), gw.String(), region)
 		if err != nil {
 			return err
@@ -238,7 +246,23 @@ func ipList(ctx context.Context, st *store.Store) error {
 		}
 		fmt.Printf("%-16s gw %-16s %-10s vm %s\n", a, g, r, v)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	frows, err := st.Pool.Query(ctx,
+		`SELECT host(address), region, COALESCE(user_id::text, '-'), COALESCE(vm_id::text, '-') FROM floating_ips ORDER BY address`)
+	if err != nil {
+		return err
+	}
+	defer frows.Close()
+	for frows.Next() {
+		var a, r, u, v string
+		if err := frows.Scan(&a, &r, &u, &v); err != nil {
+			return err
+		}
+		fmt.Printf("%-16s floating %-10s user %-6s vm %s\n", a, r, u, v)
+	}
+	return frows.Err()
 }
 
 func setAdmin(ctx context.Context, st *store.Store, email string) error {
@@ -428,5 +452,47 @@ func retentionList(ctx context.Context, cfg config.Config, st *store.Store) erro
 	for _, r := range rows {
 		fmt.Printf("user %d closed %s\n", r.ID, r.ClosedAt.Time.Format("2006-01-02"))
 	}
+	return nil
+}
+
+// floatingAdd loads addresses into the floating pool. A floating address must not also be a VM's own address.
+func floatingAdd(ctx context.Context, st *store.Store, rng, region string) error {
+	first, last, ok := strings.Cut(rng, "-")
+	if !ok {
+		last = first
+	}
+	a, err := netip.ParseAddr(first)
+	if err != nil {
+		return fmt.Errorf("first address: %w", err)
+	}
+	b, err := netip.ParseAddr(last)
+	if err != nil {
+		return fmt.Errorf("last address: %w", err)
+	}
+	if a.Is4() != b.Is4() || b.Less(a) {
+		return fmt.Errorf("need a range first<=last of one address family")
+	}
+	n := 0
+	for ip, count := a, 0; ; ip, count = ip.Next(), count+1 {
+		if count >= 4096 {
+			return fmt.Errorf("at most 4096 addresses per call")
+		}
+		var taken bool
+		if err := st.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM ip_addresses WHERE address = $1::inet)`, ip.String()).Scan(&taken); err != nil {
+			return err
+		}
+		if taken {
+			return fmt.Errorf("%s is already in the VM address pool", ip)
+		}
+		tag, err := st.Pool.Exec(ctx, `INSERT INTO floating_ips (address, region) VALUES ($1::inet, $2) ON CONFLICT (address) DO NOTHING`, ip.String(), region)
+		if err != nil {
+			return err
+		}
+		n += int(tag.RowsAffected())
+		if ip == b {
+			break
+		}
+	}
+	fmt.Printf("added %d floating address(es) to %s\n", n, region)
 	return nil
 }

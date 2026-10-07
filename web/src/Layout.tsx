@@ -7,6 +7,7 @@ const customerLinks = [
   { to: "/", label: "Overview", end: true },
   { to: "/vms", label: "VMs" },
   { to: "/ssh-keys", label: "SSH keys" },
+  { to: "/networking", label: "Networking" },
   { to: "/wallet", label: "Wallet" },
   { to: "/account", label: "Account" },
 ];

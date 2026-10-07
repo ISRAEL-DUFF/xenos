@@ -40,6 +40,7 @@ cd web && npm run dev        # dashboard dev server, proxies /v1 to :8080
 make test                    # integration tests skip unless XENOS_TEST_DATABASE_URL is set
 go run ./cmd/worker          # separate process: provisions VMs (fake Proxmox when XENOS_PVE_URL is empty)
 go run ./cmd/xenosctl ip add 203.0.113.10-203.0.113.14 203.0.113.1   # load the IP pool
+go run ./cmd/xenosctl ip add-floating 198.51.100.10-198.51.100.20       # load the floating IP pool
 ```
 
 Integration tests create a throwaway schema per test inside `XENOS_TEST_DATABASE_URL` (the URL must contain `test`) and drop it afterwards; nothing else in that database is touched.
@@ -111,6 +112,8 @@ All five phases are code-complete and tested against fakes. What is **not** veri
 **Metrics:** Prometheus metrics on loopback-only listeners (API `127.0.0.1:9090`, worker `127.0.0.1:9091`; never the public port), with scrape config and alert rules in `deploy/prometheus/`. Route labels are patterns, not paths, so cardinality stays bounded; a test checks every metric an alert rule names exists.
 
 **Statements:** `GET /v1/statements` and `/v1/statements/{yyyy-mm}` (UTC months; JSON, or `?format=csv` with one row per charged hour; `?group_by=label:<key>` totals VMs by a label, for cost per node). Every total is a sum of the rows in `usage_charges`, conversions and adjustments. The dashboard has Wallet → Statements with a print layout (the browser's Save as PDF is the PDF; there are no numbered invoices). API tokens may read statements.
+
+**Floating IPs:** `POST /v1/floating-ips` (`label`, optional `vm_id`), `GET /v1/floating-ips`, `GET /v1/floating-ips/{id}`, `POST …/attach {vm_id}` (moves it when attached elsewhere), `POST …/detach`, `DELETE …/{id}`. Addresses come from the pool loaded with `xenosctl ip add-floating`; an account may hold `XENOS_FLOATING_IP_LIMIT` (default 3), each billed `XENOS_FLOATING_IP_PRICE_UUSDT_HOURLY` (default 2000 = 0.002 USDT) per hour attached or not, as `usage_charges` rows that appear on statements. A worker job puts the address in the target VM's Proxmox firewall set and on its interface through the guest agent, and removes it from the previous VM (a dead one does not block the move). Every guest is created with MAC and IP filtering, so only the VM an address points at can use it. Closing an account requires releasing them. Same host and region only; see `docs/pgdock-provider-contract.md`.
 
 **Account closure and data export:** `POST /v1/account/export` (password; a zip of your own data, never secrets; 3 a day) and `POST /v1/account/close` (password, typed email, optional `delete_vms`; 409 with `blockers` while VMs, unpaid charges or wallet credit remain). Both are session-only (API tokens cannot call them). Closing signs the account out everywhere, revokes API tokens and starts a 30-day grace; support can undo it with `xenosctl user reopen <email>`. After the grace the worker erases personal data (see `docs/data-retention.md`). A wallet with credit above 0.50 USDT / ₦100 is refused: settle it by hand, then `xenosctl user close <email> --settle`.
 

@@ -24,7 +24,7 @@ Errors are `{"error": "message"}` with the usual status codes (`400` bad input, 
 | `ListServers(filter)` | `GET /v1/vms?label=k=v&label=k2=v2` | Labels are ANDed. Without a filter you get every VM of the account. |
 | `PriceCatalog` | `GET /v1/plans` | Prices are **micro-USDT per hour** (`price_uusdt_hourly`, 1 USDT = 1,000,000). Convert to naira with `GET /v1/wallet` → `rate_kobo_per_usdt` for display only. |
 | `CreateVolume` / `AttachVolume` | not supported | §6. Disk comes with the plan. |
-| `AssignFloatingIP` | not supported | §6. |
+| `AssignFloatingIP` | `POST /v1/floating-ips` (allocate), `POST /v1/floating-ips/{id}/attach {"vm_id"}` (attach or **move**), `POST …/detach`, `DELETE /v1/floating-ips/{id}` (release), `GET /v1/floating-ips` | §6. Same host and region only. Token-callable. Billed hourly attached or not (`price_uusdt_hourly` in the response). Attach returns `202`; `applied: true` on `GET` means the guest has the address. Attaching to the VM it already points at is a `200` no-op. |
 | Placement group | not supported | §6. |
 
 ### Sizes
@@ -112,7 +112,7 @@ Check `runway_hours` before creating servers: a create needs the balance to cove
 | PGDock V3 expects | Xenos today | Plan |
 |---|---|---|
 | **HA on different physical hosts** (§2.2, placement group) | One Proxmox host. Two VMs share a host, so a host failure takes both. | A second host and a placement rule are on the Xenos backlog. **Until then do not sell the HA SLA on Xenos-backed nodes.** |
-| **Floating IP** for the pooler pair (§2.1) | Each VM has one fixed routed address. VRRP between two VMs on the **same host's bridge** may work (they share layer 2) but is untested and nothing stops other tenants spoofing the address; across hosts it cannot work. | Reassignable, billed floating IPs with anti-spoofing are planned (docs/build-plan-next.md #6). Workaround for now: DNS-based failover for the pooler, with the health checker updating a low-TTL record. |
+| **Floating IP** for the pooler pair (§2.1) | **Supported on one host** (docs/build-plan-next.md #6): an account allocates addresses from a floating pool and points one at any of its running or stopped VMs; moving it takes seconds (the old VM's firewall set and interface lose it, the new VM's gain it, with a gratuitous ARP). Every guest is anti-spoof filtered (MAC and IP), so only the VM the address points at can use it. If the old VM is dead the move still succeeds. The address is re-applied after every start, reboot, resize, restore and rebuild, and checked hourly. | Limits: same host and region (cross-host needs shared layer 2, see #8); the guest needs `iproute2` and `arping`; the address lives in the running guest only, not in its netplan, so your health checker should move it with the API rather than rely on the guest keeping it. **Untested on a real host** until the launch-checklist check is done. |
 | **Volumes** (`CreateVolume`/`AttachVolume`) | None. Disk is part of the plan and can grow by resizing the plan. | Use larger plans for storage-heavy nodes. Separate volumes are not planned for V1. |
 | **Private network** between nodes (§5.1 cloud-init joins one) | VMs have public addresses only, on the same bridge. | Use WireGuard between PGDock nodes, or restrict by firewall to the known addresses. A private network is a Xenos backlog item. |
 | **cloud-init user data** | Boot script via the guest agent (§4). | As §4. |

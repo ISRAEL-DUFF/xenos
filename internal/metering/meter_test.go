@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -616,5 +617,58 @@ func TestCurrencyMismatchDespiteFundsIsAlertedNotSuspended(t *testing.T) {
 	}
 	if n := e.n(`SELECT count(*) FROM users WHERE grace_started_at IS NOT NULL`); n != 0 {
 		t.Fatal("a funded customer must never be suspended for iswallet's mismatch")
+	}
+}
+
+func TestFloatingIPIsBilledByTheHourUntilReleased(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	e.meter.FloatingIPPriceUUSDT = 2000
+	uid, cust := e.user("a@x.co", 1_000_000)
+	ctx := context.Background()
+	must(e.t, e.st.Q.AddFloatingIP(ctx, db.AddFloatingIPParams{Column1: netip.MustParseAddr("198.51.100.10"), Region: "r"}))
+	f, err := e.st.Q.ClaimFloatingIP(ctx, db.ClaimFloatingIPParams{UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingFrom: pgtype.Timestamptz{Time: at(10, 0), Valid: true}, WantRegion: "r"})
+	must(t, err)
+
+	// Unattached, and ticked many times: one charge per hour, 10:00, 11:00 and 12:00.
+	for _, tm := range []time.Time{at(10, 20), at(10, 21), at(11, 30), at(11, 31), at(12, 59)} {
+		e.tickAt(tm)
+	}
+	if n := e.n(`SELECT count(*) FROM usage_charges WHERE floating_ip_id=$1 AND status='paid'`, f.ID); n != 3 {
+		t.Fatalf("charges = %d, want 3", n)
+	}
+	if got := e.balance(cust); got != 1_000_000-3*2000 {
+		t.Fatalf("balance = %d", got)
+	}
+
+	// Released at 13:10: the 13:00 hour was charged in advance; nothing after it.
+	e.tickAt(at(13, 5))
+	if _, err := e.st.Q.ReleaseFloatingIP(ctx, db.ReleaseFloatingIPParams{ID: f.ID, UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingUntil: pgtype.Timestamptz{Time: at(13, 10), Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tm := range []time.Time{at(13, 20), at(14, 5), at(15, 5)} {
+		e.tickAt(tm)
+	}
+	if n := e.n(`SELECT count(*) FROM usage_charges WHERE floating_ip_id=$1`, f.ID); n != 4 {
+		t.Fatalf("charges after release = %d, want 4 (10, 11, 12, 13)", n)
+	}
+	if e.n(`SELECT count(*) FROM floating_ips WHERE id=$1 AND billing_from IS NULL AND billing_user_id IS NULL`, f.ID) != 1 {
+		t.Fatal("billing should have finished")
+	}
+	// The address is free again for someone else.
+	if _, err := e.st.Q.ClaimFloatingIP(ctx, db.ClaimFloatingIPParams{UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingFrom: pgtype.Timestamptz{Time: at(16, 0), Valid: true}, WantRegion: "r"}); err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+}
+
+func TestFloatingIPChargesAreFreeWhenThePriceIsZero(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	uid, _ := e.user("a@x.co", 1_000_000)
+	ctx := context.Background()
+	must(e.t, e.st.Q.AddFloatingIP(ctx, db.AddFloatingIPParams{Column1: netip.MustParseAddr("198.51.100.10"), Region: "r"}))
+	_, err := e.st.Q.ClaimFloatingIP(ctx, db.ClaimFloatingIPParams{UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingFrom: pgtype.Timestamptz{Time: at(10, 0), Valid: true}, WantRegion: "r"})
+	must(t, err)
+	e.tickAt(at(11, 30))
+	if n := e.n(`SELECT count(*) FROM usage_charges WHERE floating_ip_id IS NOT NULL`); n != 0 {
+		t.Fatalf("charges = %d with a zero price", n)
 	}
 }

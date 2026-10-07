@@ -34,7 +34,7 @@ func (q *Queries) FinishBilling(ctx context.Context) error {
 
 const insertUsageCharge = `-- name: InsertUsageCharge :one
 INSERT INTO usage_charges (user_id, vm_id, hour, amount_uusdt, status)
-VALUES ($1, $2, $3, $4, $5)
+VALUES ($1, $2::bigint, $3, $4, $5)
 ON CONFLICT (vm_id, hour) DO NOTHING
 RETURNING id
 `
@@ -212,7 +212,7 @@ func (q *Queries) ListGraceVMsToSuspend(ctx context.Context) ([]int64, error) {
 }
 
 const listOpenCharges = `-- name: ListOpenCharges :many
-SELECT c.id, c.user_id, c.vm_id, c.hour, c.amount_uusdt, c.status, u.ispend_customer_id
+SELECT c.id, c.user_id, COALESCE(c.vm_id, 0)::bigint AS vm_id, COALESCE(c.floating_ip_id, 0)::bigint AS floating_ip_id, c.hour, c.amount_uusdt, c.status, u.ispend_customer_id
 FROM usage_charges c JOIN users u ON u.id = c.user_id
 WHERE c.status IN ('pending', 'unpaid')
 ORDER BY c.hour, c.id
@@ -223,6 +223,7 @@ type ListOpenChargesRow struct {
 	ID               int64       `json:"id"`
 	UserID           int64       `json:"user_id"`
 	VmID             int64       `json:"vm_id"`
+	FloatingIpID     int64       `json:"floating_ip_id"`
 	Hour             time.Time   `json:"hour"`
 	AmountUusdt      int64       `json:"amount_uusdt"`
 	Status           string      `json:"status"`
@@ -242,6 +243,7 @@ func (q *Queries) ListOpenCharges(ctx context.Context) ([]ListOpenChargesRow, er
 			&i.ID,
 			&i.UserID,
 			&i.VmID,
+			&i.FloatingIpID,
 			&i.Hour,
 			&i.AmountUusdt,
 			&i.Status,
@@ -358,17 +360,17 @@ func (q *Queries) MarkVMRunning(ctx context.Context, arg MarkVMRunningParams) (i
 
 const monthChargedForVM = `-- name: MonthChargedForVM :one
 SELECT COALESCE(sum(amount_uusdt), 0)::bigint FROM usage_charges
-WHERE vm_id = $1 AND hour >= $2 AND hour < $3 AND status <> 'refunded'
+WHERE vm_id = $1::bigint AND hour >= $2 AND hour < $3 AND status <> 'refunded'
 `
 
 type MonthChargedForVMParams struct {
-	VmID   int64     `json:"vm_id"`
-	Hour   time.Time `json:"hour"`
-	Hour_2 time.Time `json:"hour_2"`
+	VmID     int64     `json:"vm_id"`
+	HourFrom time.Time `json:"hour_from"`
+	HourTo   time.Time `json:"hour_to"`
 }
 
 func (q *Queries) MonthChargedForVM(ctx context.Context, arg MonthChargedForVMParams) (int64, error) {
-	row := q.db.QueryRow(ctx, monthChargedForVM, arg.VmID, arg.Hour, arg.Hour_2)
+	row := q.db.QueryRow(ctx, monthChargedForVM, arg.VmID, arg.HourFrom, arg.HourTo)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
