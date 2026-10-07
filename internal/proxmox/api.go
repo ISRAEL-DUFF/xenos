@@ -37,11 +37,22 @@ type API interface {
 	Console(ctx context.Context, vmid int) (ConsoleTicket, error)
 	DialConsole(ctx context.Context, vmid int, t ConsoleTicket) (ConsoleConn, error)
 
+	// Isolate turns on the guest's firewall with MAC and IP filtering, so it can only send from its own MAC
+	// and from the addresses in allowed (plain IPv4/IPv6 addresses). It is idempotent: calling it again with a
+	// different list replaces the set, which is how floating addresses are added and removed.
+	Isolate(ctx context.Context, vmid int, allowed []string) error
+	// HostFirewall reports whether the firewall is enabled at datacenter and node level; without both, the
+	// per-guest filters do nothing.
+	HostFirewall(ctx context.Context) (HostFirewallState, error)
+
 	// Monitoring.
 	Guests(ctx context.Context) ([]Guest, error)
 	StoragePool(ctx context.Context, storage string) (Usage, error)
 	NodeInfo(ctx context.Context) (NodeInfo, error)
 }
+
+// HostFirewallState is whether the Proxmox firewall is switched on above the guests.
+type HostFirewallState struct{ Cluster, Node bool }
 
 // ConsoleTicket is a one-time VNC session on the host.
 type ConsoleTicket struct {

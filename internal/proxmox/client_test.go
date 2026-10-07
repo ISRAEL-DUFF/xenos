@@ -280,3 +280,58 @@ func TestAgentExecRequestShapes(t *testing.T) {
 		t.Fatalf("status request: %+v", r)
 	}
 }
+
+func TestIsolateSetsFirewallAndSyncsTheIPSet(t *testing.T) {
+	c, got := testClient(t, func(r recorded) string {
+		switch {
+		case r.method == "GET" && strings.HasSuffix(r.path, "/config"):
+			return `{"net0":"virtio=BC:24:11:AA:BB:CC,bridge=vmbr0"}`
+		case r.method == "GET" && strings.HasSuffix(r.path, "/firewall/ipset"):
+			return `[{"name":"ipfilter-net0"}]`
+		case r.method == "GET" && strings.HasSuffix(r.path, "/firewall/ipset/ipfilter-net0"):
+			return `[{"cidr":"203.0.113.9"},{"cidr":"203.0.113.10/32"}]`
+		}
+		return `null`
+	})
+	if err := c.Isolate(context.Background(), 105, []string{"203.0.113.10", "2001:db8::10"}); err != nil {
+		t.Fatal(err)
+	}
+	var net0, opts url.Values
+	var deleted, added []string
+	for _, r := range *got {
+		switch {
+		case r.method == "PUT" && strings.HasSuffix(r.path, "/qemu/105/config"):
+			net0 = r.form
+		case r.method == "PUT" && strings.HasSuffix(r.path, "/firewall/options"):
+			opts = r.form
+		case r.method == "DELETE":
+			deleted = append(deleted, r.path)
+		case r.method == "POST" && strings.HasSuffix(r.path, "/ipfilter-net0"):
+			added = append(added, r.form.Get("cidr"))
+		}
+	}
+	if net0.Get("net0") != "virtio=BC:24:11:AA:BB:CC,bridge=vmbr0,firewall=1" {
+		t.Fatalf("net0 = %q", net0.Get("net0"))
+	}
+	if opts.Get("enable") != "1" || opts.Get("ipfilter") != "1" || opts.Get("macfilter") != "1" || opts.Get("policy_in") != "ACCEPT" {
+		t.Fatalf("options = %v", opts)
+	}
+	if len(deleted) != 1 || !strings.HasSuffix(deleted[0], "/ipfilter-net0/203.0.113.9") {
+		t.Fatalf("stale entry not removed: %v", deleted)
+	}
+	if len(added) != 1 || added[0] != "2001:db8::10" {
+		t.Fatalf("added = %v (an address already in the set must not be added twice)", added)
+	}
+}
+
+func TestWithFirewallKeepsTheNIC(t *testing.T) {
+	for in, want := range map[string]string{
+		"virtio=AA,bridge=vmbr0":                  "virtio=AA,bridge=vmbr0,firewall=1",
+		"virtio=AA,bridge=vmbr0,firewall=0":       "virtio=AA,bridge=vmbr0,firewall=1",
+		"virtio=AA,firewall=1,bridge=vmbr0,tag=5": "virtio=AA,firewall=1,bridge=vmbr0,tag=5",
+	} {
+		if got := withFirewall(in); got != want {
+			t.Errorf("withFirewall(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

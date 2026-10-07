@@ -283,6 +283,14 @@ func proxmoxChecks(ctx context.Context, d Deps) []Result {
 		r = append(r, res(g, "storage", OK, "pool %q %.0f%% used of %.0f GiB", d.Cfg.PVEStorage, f*100, float64(u.Total)/(1<<30)))
 	}
 
+	if fw, err := d.PVE.HostFirewall(ctx); err != nil {
+		r = append(r, res(g, "firewall", Warn, "cannot read the firewall state (the API token needs Sys.Audit): %v", err))
+	} else if !fw.Cluster || !fw.Node {
+		r = append(r, res(g, "firewall", Fail, "the Proxmox firewall is off at datacenter=%t node=%t: anti-spoofing filters on guests do nothing until both are on", fw.Cluster, fw.Node))
+	} else {
+		r = append(r, res(g, "firewall", OK, "on at datacenter and node level: guests are MAC and IP filtered"))
+	}
+
 	if d.Store != nil {
 		rows, err := d.Store.Pool.Query(ctx, `SELECT slug, proxmox_template_id FROM templates WHERE active ORDER BY id`)
 		if err == nil {

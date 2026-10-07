@@ -221,7 +221,20 @@ type guestSpec struct {
 	VMID, TemplateVMID      int
 	Name, CIUser, Keys      string
 	IPv4, Gateway, IPv6     string
+	Extra                   []string // further allowed addresses (floating IPs)
 	Cores, MemoryMB, DiskGB int
+}
+
+// allowedAddrs is the set of source addresses the guest may use.
+func (g guestSpec) allowedAddrs() []string {
+	var out []string
+	if g.IPv4 != "" {
+		out = append(out, g.IPv4)
+	}
+	if g.IPv6 != "" {
+		out = append(out, g.IPv6)
+	}
+	return append(out, g.Extra...)
 }
 
 // createGuest clones the template into spec.VMID, configures it, grows the disk, starts it and waits for the
@@ -246,6 +259,10 @@ func (p *Provisioner) createGuest(ctx context.Context, g guestSpec) error {
 	}
 	if err := p.PVE.ResizeDisk(ctx, g.VMID, p.Cfg.Disk, g.DiskGB); err != nil {
 		return fmt.Errorf("resize: %w", err)
+	}
+	// Before the guest ever runs: it may only use its own MAC and the addresses it was given.
+	if err := p.PVE.Isolate(ctx, g.VMID, g.allowedAddrs()); err != nil {
+		return fmt.Errorf("firewall: %w", err)
 	}
 	if upid, err = p.PVE.Power(ctx, g.VMID, "start"); err != nil {
 		return fmt.Errorf("start: %w", err)

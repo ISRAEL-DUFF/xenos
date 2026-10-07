@@ -108,6 +108,24 @@ func TestProvisionHappyPath(t *testing.T) {
 			t.Fatalf("unexpected guest %+v", g)
 		}
 	}
+	// The guest is locked to its own address before it ever ran.
+	for _, g := range e.pve.VMs {
+		if !g.Isolated || len(g.Allowed) != 1 || g.Allowed[0] != "203.0.113.10" {
+			t.Fatalf("guest must be isolated to its address, got isolated=%v allowed=%v", g.Isolated, g.Allowed)
+		}
+	}
+	iso, start := -1, -1
+	for i, c := range e.pve.Calls {
+		if strings.HasPrefix(c, "isolate:") {
+			iso = i
+		}
+		if strings.HasPrefix(c, "start:") && start < 0 {
+			start = i
+		}
+	}
+	if iso < 0 || iso > start {
+		t.Fatalf("isolate must run before start: %v", e.pve.Calls)
+	}
 	// Re-running a finished job changes nothing.
 	must(t, e.call(e.prov, JobProvision, id, "", 1))
 	if len(e.pve.VMs) != 1 {

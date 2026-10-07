@@ -26,6 +26,8 @@ type Fake struct {
 	Execs []ExecCall
 	// Consoles lists the console connections opened so far.
 	Consoles []*FakeConsole
+	// HostFirewallOff makes HostFirewall report the firewall as disabled.
+	HostFirewallOff bool
 	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
 	BeforeOp func(op string, vmid int)
 }
@@ -41,6 +43,9 @@ type FakeVM struct {
 	Snapshots []string
 	Cores     int
 	MemoryMB  int
+	// Isolated is true once the guest firewall (MAC and IP filtering) is on; Allowed is the ipfilter set.
+	Isolated bool
+	Allowed  []string
 }
 
 func NewFake() *Fake {
@@ -404,4 +409,26 @@ func (f *Fake) AgentExecStatus(_ context.Context, _ int, pid int) (ExecStatus, e
 	}
 	c := f.Execs[pid-1]
 	return ExecStatus{Exited: true, ExitCode: c.Exit, Output: c.Output}, nil
+}
+
+func (f *Fake) Isolate(_ context.Context, vmid int, allowed []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("isolate", vmid); err != nil {
+		return err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ErrFakeNotFound
+	}
+	vm.Isolated = true
+	vm.Allowed = append([]string(nil), allowed...)
+	return nil
+}
+
+func (f *Fake) HostFirewall(context.Context) (HostFirewallState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	on := !f.HostFirewallOff
+	return HostFirewallState{Cluster: on, Node: on}, nil
 }
