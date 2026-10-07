@@ -29,7 +29,7 @@ export function Layout() {
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur dark:border-slate-700 dark:bg-slate-900/90">
+      <header className="sticky top-0 z-40 print:hidden border-b border-slate-200 bg-white/90 backdrop-blur dark:border-slate-700 dark:bg-slate-900/90">
         <div className="mx-auto flex max-w-5xl items-center gap-2 px-4 py-2.5">
           <Link to="/" className="mr-2 text-lg font-bold tracking-tight text-indigo-600 dark:text-indigo-400">
             Xenos
@@ -95,7 +95,7 @@ export function Layout() {
         <Outlet />
       </main>
 
-      <footer className="mx-auto max-w-5xl px-4 pb-8 text-xs text-slate-500 dark:text-slate-400">
+      <footer className="mx-auto max-w-5xl px-4 pb-8 text-xs print:hidden text-slate-500 dark:text-slate-400">
         <Link to="/aup" className="underline">
           Acceptable use policy
         </Link>

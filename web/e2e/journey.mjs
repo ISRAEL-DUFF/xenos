@@ -186,6 +186,15 @@ const noOverflow = async (page, where) => {
   await page.goto(`${base}/wallet`);
   await page.getByText("web-1").first().waitFor({ timeout: 90_000 });
 
+  step("statement for the current month");
+  await page.getByRole("link", { name: "Statements" }).click();
+  await page.getByRole("heading", { name: "Statements" }).waitFor();
+  await page.locator("li a").first().click();
+  await page.getByRole("heading", { name: /^Statement for / }).waitFor();
+  await page.getByText("web-1").first().waitFor();
+  await page.getByRole("link", { name: "Download CSV" }).waitFor();
+  await shot(page, "06-statement");
+
   step("account page and password change");
   await page.goto(`${base}/account`);
   await page.getByLabel("Current password").fill(password);

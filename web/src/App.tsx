@@ -8,6 +8,7 @@ import { ForgotPassword, Login, ResetPassword, Signup, VerifyEmail } from "./pag
 import { AUP, Home, NotFound } from "./pages-misc";
 import { SSHKeys } from "./pages-sshkeys";
 import { VMCreate, VMDetail, VMList } from "./pages-vms";
+import { StatementList, StatementPage } from "./pages-statements";
 import { WalletPage } from "./pages-wallet";
 
 const ConsolePage = lazy(() => import("./pages-console")); // pulls in noVNC only when opened
@@ -31,6 +32,8 @@ export default function App() {
           <Route path="/vms/:id/console" element={<Suspense fallback={null}><ConsolePage /></Suspense>} />
           <Route path="/ssh-keys" element={<SSHKeys />} />
           <Route path="/wallet" element={<WalletPage />} />
+          <Route path="/statements" element={<StatementList />} />
+          <Route path="/statements/:month" element={<StatementPage />} />
           <Route path="/account" element={<AccountPage />} />
 
           <Route element={<RequireAdmin />}>

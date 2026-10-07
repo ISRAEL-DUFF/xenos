@@ -120,6 +120,9 @@ func (s *Server) Router() http.Handler {
 			r.Delete("/vms/{id}/snapshots/{sid}", s.deleteSnapshot)
 			r.With(s.requireActive).Post("/vms/{id}/snapshots/{sid}/restore", s.restoreSnapshot)
 
+			r.Get("/statements", s.listStatements)
+			r.Get("/statements/{month}", s.getStatement)
+
 			r.Get("/wallet", s.getWallet)
 			r.With(s.requireSession).Patch("/wallet/settings", s.walletSettings)
 			// Starting a top-up or conversion needs a verified email.

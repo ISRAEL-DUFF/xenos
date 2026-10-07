@@ -232,3 +232,22 @@ export interface PriceImpact {
   monthly_delta_uusdt: number;
   applied: boolean;
 }
+
+export interface StatementVM {
+  vm_id: number;
+  hostname: string;
+  plan: string;
+  labels: Record<string, string>;
+  charged_hours: number;
+  capped_hours: number;
+  charged_uusdt: number;
+  refunded_uusdt: number;
+}
+
+export interface Statement {
+  month: string;
+  totals: { charged_uusdt: number; refunded_uusdt: number; charged_hours: number; capped_hours: number; unpaid_uusdt: number };
+  vms: StatementVM[];
+  conversions: { id: number; at: string; amount_ngn_kobo: number; amount_uusdt: number; rate_kobo_per_usdt: string }[];
+  adjustments: { id: number; at: string; amount_uusdt: number; note: string }[];
+}

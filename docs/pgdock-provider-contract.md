@@ -102,6 +102,7 @@ If PGDock prefers, it can ignore this and SSH in with the key it supplied; the b
 | Bigger plan | `POST /v1/vms/{id}/resize` `{"plan":"d-medium"}`: the VM restarts, the disk grows, the new price applies from the next charged hour. Refused with snapshots, or on a smaller plan. |
 | Snapshot / restore | `POST /v1/vms/{id}/snapshots` `{"name":…}` (2 per VM), `POST …/snapshots/{sid}/restore` `{"confirm":true}`, `DELETE …/snapshots/{sid}` |
 | Reinstall | `POST /v1/vms/{id}/rebuild` `{"template":…,"ssh_key_ids":[…],"boot_script":…,"confirm":true}`: erases the disk, keeps IP and plan |
+| Cost per node | `GET /v1/statements/{yyyy-mm}?group_by=label:pgdock.node` (JSON) or `?format=csv` (one row per charged hour); token-readable |
 | Cost and budget | `GET /v1/wallet`: `usdt_uusdt` (credit), `hourly_uusdt` (current burn), `runway_hours`, `unpaid_uusdt`, `grace_ends_at` |
 
 Check `runway_hours` before creating servers: a create needs the balance to cover 24 hours of usage for **all** the account's VMs, and an empty wallet suspends the VMs after the charges go unpaid (72-hour grace, then deletion).

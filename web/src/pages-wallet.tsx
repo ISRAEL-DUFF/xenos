@@ -25,7 +25,7 @@ export function WalletPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Wallet" subtitle="Top up in naira. We convert it once into USDT compute credit at the rate shown at the time, and VMs are billed in USDT." />
+      <PageHeader title="Wallet" subtitle="Top up in naira. We convert it once into USDT compute credit at the rate shown at the time, and VMs are billed in USDT." actions={<Link to="/statements" className="text-sm font-medium text-indigo-600 underline-offset-2 hover:underline dark:text-indigo-400">Statements</Link>} />
 
       {wallet.quoting_paused && (
         <Banner tone="warn">Conversion is paused right now. Anything you deposit stays safe in your naira balance and can be converted as soon as it resumes.</Banner>
