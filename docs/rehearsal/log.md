@@ -42,3 +42,14 @@ Conventions: see [README.md](README.md). Times are UTC. The VPS address is writt
 **Root cause:** same as 0a. That the user can log in from their own computer proves the VPS and its credentials are fine; it says nothing about the sandbox, whose outbound network policy still does not forward port 22. Nothing about the VPS is wrong.
 
 **Still needed:** the environment's Network access setting must allow the VPS (or SSH), or sshd must also listen on 443 and that must be reachable through the proxy.
+
+---
+
+### Step 0c: Retry with Network access set to "Full"   FAIL (open)
+2026-10-07 ~12:50 UTC
+
+The user showed the environment settings: Network access is already **Full** (and the three `SSH_*` variables are set). Retested from the sandbox: raw TCP to `<vps-ip>:22` still blocked, `ssh` still `Connection timed out`, proxy status unchanged (`enabled: true`, `selective: false`).
+
+**Conclusion:** the access levels decide which *domains* the sandbox's proxy will relay, and the proxy relays web (HTTP/HTTPS) traffic only. Even at "Full", a raw SSH connection on port 22 is not a thing the proxy forwards. This is a property of the sandbox, not of the setting or the VPS.
+
+**Next to try:** have the VPS's sshd also listen on port 443, then `ssh -o ProxyCommand` through an HTTP `CONNECT` to `<vps-ip>:443` (the proxy does open tunnels to port 443). The result of that attempt is the next entry.
