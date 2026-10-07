@@ -1,4 +1,4 @@
-.PHONY: web build run test lint db sqlc release e2e
+.PHONY: web build run test lint db sqlc release e2e ci
 web:
 	cd web && npm install && npm run build
 build: web
@@ -24,3 +24,11 @@ sqlc:
 # Browser journey test; needs the stack running with the fakes (see web/e2e/README.md).
 e2e:
 	cd web && npm run e2e
+
+# The same checks CI runs (needs XENOS_TEST_DATABASE_URL for the integration tests; see README).
+ci:
+	@out=$$(gofmt -l cmd internal web/embed.go); if [ -n "$$out" ]; then echo "Not gofmt-formatted:"; echo "$$out"; exit 1; fi
+	go vet ./...
+	sqlc diff
+	go test ./... -count=1
+	cd web && npx tsc --noEmit && npm run build
