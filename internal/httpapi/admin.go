@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -460,6 +461,62 @@ type capacityJSON struct {
 		Total int64 `json:"total"`
 	} `json:"ips"`
 	HostReachable bool `json:"host_reachable"`
+	// Hosts is every Proxmox host with its own figures (the fields above are the whole fleet).
+	Hosts []hostCapacityJSON `json:"hosts"`
+}
+
+type hostCapacityJSON struct {
+	Name           string   `json:"name"`
+	Status         string   `json:"status"`
+	Reachable      bool     `json:"reachable"`
+	VMs            int64    `json:"vms"`
+	FreeIPs        int64    `json:"free_ips"`
+	CommittedRAMMB int64    `json:"committed_ram_mb"`
+	PhysicalRAMMB  *int64   `json:"physical_ram_mb"`
+	PoolFraction   *float64 `json:"pool_fraction"`
+}
+
+func (s *Server) hostCapacities(ctx context.Context) []hostCapacityJSON {
+	if s.Hosts == nil {
+		return []hostCapacityJSON{}
+	}
+	status := map[string]string{}
+	if rows, err := s.Store.Q.ListHosts(ctx); err == nil {
+		for _, r := range rows {
+			status[r.Name] = r.Status
+		}
+	}
+	vms, free, ram := map[string]int64{}, map[string]int64{}, map[string]int64{}
+	if rows, err := s.Store.Q.HostVMCounts(ctx); err == nil {
+		for _, r := range rows {
+			vms[r.Host] = int64(r.Vms)
+		}
+	}
+	if rows, err := s.Store.Q.HostFreeIPs(ctx); err == nil {
+		for _, r := range rows {
+			free[r.Host] = int64(r.Free)
+		}
+	}
+	if rows, err := s.Store.Q.HostCommittedRAM(ctx); err == nil {
+		for _, r := range rows {
+			ram[r.Host] = r.RamMb
+		}
+	}
+	out := []hostCapacityJSON{}
+	for _, h := range s.Hosts.All() {
+		c := hostCapacityJSON{Name: h.Name, Status: status[h.Name], VMs: vms[h.Name], FreeIPs: free[h.Name], CommittedRAMMB: ram[h.Name]}
+		if node, err := h.API.NodeInfo(ctx); err == nil {
+			c.Reachable = true
+			mb := node.MemTotal >> 20
+			c.PhysicalRAMMB = &mb
+			if pool, err := h.API.StoragePool(ctx, h.Storage); err == nil {
+				f := pool.Fraction()
+				c.PoolFraction = &f
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 func (s *Server) adminCapacity(w http.ResponseWriter, r *http.Request) {
@@ -482,6 +539,7 @@ func (s *Server) adminCapacity(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	out.Hosts = s.hostCapacities(ctx)
 	if s.PVE != nil {
 		if node, err := s.PVE.NodeInfo(ctx); err == nil {
 			cpus, ramMB := int64(node.CPUs), node.MemTotal>>20

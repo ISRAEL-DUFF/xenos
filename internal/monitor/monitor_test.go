@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/alert"
+	"github.com/israel-duff/xenos/internal/hosts"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
@@ -286,5 +287,28 @@ func TestFlagQueries(t *testing.T) {
 	must(e.st.Q.ClearVMFlag(context.Background(), id))
 	if rows, _ = e.st.Q.ListFlaggedVMs(context.Background()); len(rows) != 0 {
 		t.Fatal("flag should clear")
+	}
+}
+
+func TestEachHostIsWatchedAndAlertedByName(t *testing.T) {
+	e := newEnv(t)
+	good, bad := proxmox.NewFake(), proxmox.NewFake()
+	bad.Fail["memory"] = fmt.Errorf("connection refused")
+	set := hosts.NewSet(&hosts.Host{Name: "pve1", API: good, Storage: "vmdata"}, &hosts.Host{Name: "pve2", API: bad, Storage: "vmdata"})
+	if err := set.Attach(context.Background(), e.st); err != nil {
+		t.Fatal(err)
+	}
+	e.mon.Hosts = set
+	e.tick()
+	if e.box.count("host pve2") != 1 || e.box.count("host pve1") != 0 {
+		t.Fatalf("alerts = %v", e.box.sent)
+	}
+	// A disabled host is left alone.
+	e.exec(`UPDATE hosts SET status='disabled' WHERE name='pve2'`)
+	e.now = e.now.Add(2 * time.Hour)
+	before := e.box.count("host pve2")
+	e.tick()
+	if e.box.count("host pve2") != before {
+		t.Fatal("a disabled host must not alert")
 	}
 }

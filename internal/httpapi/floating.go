@@ -20,6 +20,7 @@ type floatingJSON struct {
 	ID          int64     `json:"id"`
 	Address     string    `json:"address"`
 	Region      string    `json:"region"`
+	Host        string    `json:"host"`
 	Label       string    `json:"label"`
 	VMID        *int64    `json:"vm_id"`
 	Applied     bool      `json:"applied"` // the guest has been configured to match vm_id
@@ -27,8 +28,8 @@ type floatingJSON struct {
 	PriceUUSDT  int64     `json:"price_uusdt_hourly"`
 }
 
-func (s *Server) floatingView(id int64, addr, region, label string, vmID, applied pgtype.Int8, at pgtype.Timestamptz) floatingJSON {
-	f := floatingJSON{ID: id, Address: addr, Region: region, Label: label, AllocatedAt: at.Time, PriceUUSDT: s.Cfg.FloatingIPPriceUUSDT}
+func (s *Server) floatingView(id int64, addr, region, host, label string, vmID, applied pgtype.Int8, at pgtype.Timestamptz) floatingJSON {
+	f := floatingJSON{ID: id, Address: addr, Region: region, Host: host, Label: label, AllocatedAt: at.Time, PriceUUSDT: s.Cfg.FloatingIPPriceUUSDT}
 	if vmID.Valid {
 		f.VMID = &vmID.Int64
 		f.Applied = applied.Valid && applied.Int64 == vmID.Int64
@@ -55,7 +56,7 @@ func (s *Server) ownedFloating(w http.ResponseWriter, r *http.Request) (db.GetUs
 }
 
 func viewOf(s *Server, f db.GetUserFloatingIPRow) floatingJSON {
-	return s.floatingView(f.ID, f.Address, f.Region, f.Label, f.VmID, f.AppliedVmID, f.AllocatedAt)
+	return s.floatingView(f.ID, f.Address, f.Region, f.Host, f.Label, f.VmID, f.AppliedVmID, f.AllocatedAt)
 }
 
 func (s *Server) listFloatingIPs(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +67,7 @@ func (s *Server) listFloatingIPs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]floatingJSON, 0, len(rows))
 	for _, f := range rows {
-		out = append(out, s.floatingView(f.ID, f.Address, f.Region, f.Label, f.VmID, f.AppliedVmID, f.AllocatedAt))
+		out = append(out, s.floatingView(f.ID, f.Address, f.Region, f.Host, f.Label, f.VmID, f.AppliedVmID, f.AllocatedAt))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"floating_ips": out, "limit": s.Cfg.FloatingIPLimit, "price_uusdt_hourly": s.Cfg.FloatingIPPriceUUSDT})
 }
@@ -145,13 +146,13 @@ func (s *Server) allocateFloatingIP(w http.ResponseWriter, r *http.Request) {
 			apiErr = &apiError{http.StatusPaymentRequired, fmt.Sprintf("balance must cover %d hours of usage (%d micro-USDT needed, %d available)", minRunwayHours, need, bal.USDTMicro)}
 			return errAbort
 		}
-		region := s.Cfg.Region
+		region, wantHost := s.Cfg.Region, ""
 		if in.VMID != nil {
-			region = target.Region
+			region, wantHost = target.Region, target.Host
 		}
 		created, err = q.ClaimFloatingIP(ctx, db.ClaimFloatingIPParams{
 			UserID: pgtype.Int8{Int64: user.ID, Valid: true}, Label: label,
-			BillingFrom: pgtype.Timestamptz{Time: time.Now().UTC().Truncate(time.Hour), Valid: true}, WantRegion: region})
+			BillingFrom: pgtype.Timestamptz{Time: time.Now().UTC().Truncate(time.Hour), Valid: true}, WantRegion: region, WantHost: wantHost})
 		if errors.Is(err, pgx.ErrNoRows) {
 			apiErr = &apiError{http.StatusServiceUnavailable, "no floating IPs available right now, try again later"}
 			return errAbort
@@ -174,7 +175,7 @@ func (s *Server) allocateFloatingIP(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	f := s.floatingView(created.ID, created.Address, created.Region, created.Label, pgtype.Int8{}, pgtype.Int8{}, created.AllocatedAt)
+	f := s.floatingView(created.ID, created.Address, created.Region, created.Host, created.Label, pgtype.Int8{}, pgtype.Int8{}, created.AllocatedAt)
 	if in.VMID != nil {
 		f.VMID, f.Applied = in.VMID, false
 	}
@@ -214,6 +215,10 @@ func (s *Server) attachFloatingIP(w http.ResponseWriter, r *http.Request) {
 	}
 	if v.Region != f.Region {
 		writeErr(w, http.StatusConflict, "the floating IP and the VM are in different regions")
+		return
+	}
+	if v.Host != f.Host {
+		writeErr(w, http.StatusConflict, "the floating IP lives on a different host than the VM: a floating IP can only move between VMs on the same host")
 		return
 	}
 	if msg := attachable(v); msg != "" {

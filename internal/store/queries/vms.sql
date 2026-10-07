@@ -20,10 +20,11 @@ SELECT public_key FROM ssh_keys WHERE user_id = $1 AND id = ANY($2::bigint[]) OR
 
 -- name: CreateVM :one
 INSERT INTO vms (user_id, region, plan_id, template_id, proxmox_vmid, hostname, authorized_keys,
-                 labels, client_token, boot_script, boot_script_status)
+                 labels, client_token, boot_script, boot_script_status, host, spread_group)
 VALUES (sqlc.arg(user_id), sqlc.arg(region), sqlc.arg(plan_id), sqlc.arg(template_id), nextval('vmid_seq')::int,
         sqlc.arg(hostname), sqlc.arg(authorized_keys), COALESCE(sqlc.narg(labels)::jsonb, '{}'::jsonb),
-        sqlc.narg(client_token), sqlc.narg(boot_script), COALESCE(NULLIF(sqlc.arg(boot_script_status)::text, ''), 'none'))
+        sqlc.narg(client_token), sqlc.narg(boot_script), COALESCE(NULLIF(sqlc.arg(boot_script_status)::text, ''), 'none'),
+        COALESCE(NULLIF(sqlc.arg(host)::text, ''), 'default'), sqlc.narg(spread_group))
 RETURNING id;
 
 -- name: GetVMByClientToken :one
@@ -37,7 +38,7 @@ UPDATE vms SET labels = $3 WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 -- name: ClaimFreeIP :one
 SELECT id, host(address)::text AS address, host(gateway)::text AS gateway
 FROM ip_addresses
-WHERE vm_id IS NULL AND region = $1
+WHERE vm_id IS NULL AND region = sqlc.arg(region) AND host = sqlc.arg(host)
 ORDER BY id
 FOR UPDATE SKIP LOCKED
 LIMIT 1;
@@ -55,7 +56,7 @@ UPDATE vms SET ipv6 = $2 WHERE id = $1;
 UPDATE ip_addresses SET vm_id = NULL WHERE vm_id = $1;
 
 -- name: ListUserVMs :many
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
+SELECT v.id, v.region, v.host, v.spread_group, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
        p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
@@ -67,7 +68,7 @@ WHERE v.user_id = $1 AND v.deleted_at IS NULL
 ORDER BY v.id DESC;
 
 -- name: GetUserVM :one
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
+SELECT v.id, v.region, v.host, v.spread_group, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
        p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4

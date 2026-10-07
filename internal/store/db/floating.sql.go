@@ -14,25 +14,26 @@ import (
 )
 
 const addFloatingIP = `-- name: AddFloatingIP :exec
-INSERT INTO floating_ips (address, region) VALUES ($1::inet, $2) ON CONFLICT (address) DO NOTHING
+INSERT INTO floating_ips (address, region, host) VALUES ($1::inet, $2, COALESCE(NULLIF($3::text, ''), 'default')) ON CONFLICT (address) DO NOTHING
 `
 
 type AddFloatingIPParams struct {
 	Column1 netip.Addr `json:"column_1"`
 	Region  string     `json:"region"`
+	Column3 string     `json:"column_3"`
 }
 
 func (q *Queries) AddFloatingIP(ctx context.Context, arg AddFloatingIPParams) error {
-	_, err := q.db.Exec(ctx, addFloatingIP, arg.Column1, arg.Region)
+	_, err := q.db.Exec(ctx, addFloatingIP, arg.Column1, arg.Region, arg.Column3)
 	return err
 }
 
 const claimFloatingIP = `-- name: ClaimFloatingIP :one
 UPDATE floating_ips SET user_id = $1, label = $2, allocated_at = now(),
        billing_user_id = $1, billing_from = $3, billing_until = NULL
-WHERE floating_ips.id = (SELECT p.id FROM floating_ips p WHERE p.region = $4 AND p.user_id IS NULL AND p.billing_from IS NULL AND p.applied_vm_id IS NULL
+WHERE floating_ips.id = (SELECT p.id FROM floating_ips p WHERE p.region = $4 AND ($5::text = '' OR p.host = $5::text) AND p.user_id IS NULL AND p.billing_from IS NULL AND p.applied_vm_id IS NULL
             ORDER BY p.id LIMIT 1 FOR UPDATE SKIP LOCKED)
-RETURNING id, host(address)::text AS address, region, user_id, vm_id, label, allocated_at
+RETURNING id, host(address)::text AS address, region, host, user_id, vm_id, label, allocated_at
 `
 
 type ClaimFloatingIPParams struct {
@@ -40,12 +41,14 @@ type ClaimFloatingIPParams struct {
 	Label       string             `json:"label"`
 	BillingFrom pgtype.Timestamptz `json:"billing_from"`
 	WantRegion  string             `json:"want_region"`
+	WantHost    string             `json:"want_host"`
 }
 
 type ClaimFloatingIPRow struct {
 	ID          int64              `json:"id"`
 	Address     string             `json:"address"`
 	Region      string             `json:"region"`
+	Host        string             `json:"host"`
 	UserID      pgtype.Int8        `json:"user_id"`
 	VmID        pgtype.Int8        `json:"vm_id"`
 	Label       string             `json:"label"`
@@ -59,12 +62,14 @@ func (q *Queries) ClaimFloatingIP(ctx context.Context, arg ClaimFloatingIPParams
 		arg.Label,
 		arg.BillingFrom,
 		arg.WantRegion,
+		arg.WantHost,
 	)
 	var i ClaimFloatingIPRow
 	err := row.Scan(
 		&i.ID,
 		&i.Address,
 		&i.Region,
+		&i.Host,
 		&i.UserID,
 		&i.VmID,
 		&i.Label,
@@ -198,7 +203,7 @@ func (q *Queries) GetFloatingForWork(ctx context.Context, id int64) (GetFloating
 }
 
 const getUserFloatingIP = `-- name: GetUserFloatingIP :one
-SELECT id, host(address)::text AS address, region, user_id, vm_id, applied_vm_id, label, allocated_at
+SELECT id, host(address)::text AS address, region, host, user_id, vm_id, applied_vm_id, label, allocated_at
 FROM floating_ips WHERE id = $1 AND user_id = $2
 `
 
@@ -211,6 +216,7 @@ type GetUserFloatingIPRow struct {
 	ID          int64              `json:"id"`
 	Address     string             `json:"address"`
 	Region      string             `json:"region"`
+	Host        string             `json:"host"`
 	UserID      pgtype.Int8        `json:"user_id"`
 	VmID        pgtype.Int8        `json:"vm_id"`
 	AppliedVmID pgtype.Int8        `json:"applied_vm_id"`
@@ -225,6 +231,7 @@ func (q *Queries) GetUserFloatingIP(ctx context.Context, arg GetUserFloatingIPPa
 		&i.ID,
 		&i.Address,
 		&i.Region,
+		&i.Host,
 		&i.UserID,
 		&i.VmID,
 		&i.AppliedVmID,
@@ -300,7 +307,7 @@ func (q *Queries) ListBillingFloating(ctx context.Context) ([]ListBillingFloatin
 }
 
 const listFloatingPool = `-- name: ListFloatingPool :many
-SELECT f.id, host(f.address)::text AS address, f.region, f.user_id, f.vm_id, f.label
+SELECT f.id, host(f.address)::text AS address, f.region, f.host, f.user_id, f.vm_id, f.label
 FROM floating_ips f ORDER BY f.id
 `
 
@@ -308,6 +315,7 @@ type ListFloatingPoolRow struct {
 	ID      int64       `json:"id"`
 	Address string      `json:"address"`
 	Region  string      `json:"region"`
+	Host    string      `json:"host"`
 	UserID  pgtype.Int8 `json:"user_id"`
 	VmID    pgtype.Int8 `json:"vm_id"`
 	Label   string      `json:"label"`
@@ -326,6 +334,7 @@ func (q *Queries) ListFloatingPool(ctx context.Context) ([]ListFloatingPoolRow, 
 			&i.ID,
 			&i.Address,
 			&i.Region,
+			&i.Host,
 			&i.UserID,
 			&i.VmID,
 			&i.Label,
@@ -341,7 +350,7 @@ func (q *Queries) ListFloatingPool(ctx context.Context) ([]ListFloatingPoolRow, 
 }
 
 const listUserFloatingIPs = `-- name: ListUserFloatingIPs :many
-SELECT id, host(address)::text AS address, region, user_id, vm_id, applied_vm_id, label, allocated_at
+SELECT id, host(address)::text AS address, region, host, user_id, vm_id, applied_vm_id, label, allocated_at
 FROM floating_ips WHERE user_id = $1 ORDER BY id
 `
 
@@ -349,6 +358,7 @@ type ListUserFloatingIPsRow struct {
 	ID          int64              `json:"id"`
 	Address     string             `json:"address"`
 	Region      string             `json:"region"`
+	Host        string             `json:"host"`
 	UserID      pgtype.Int8        `json:"user_id"`
 	VmID        pgtype.Int8        `json:"vm_id"`
 	AppliedVmID pgtype.Int8        `json:"applied_vm_id"`
@@ -369,6 +379,7 @@ func (q *Queries) ListUserFloatingIPs(ctx context.Context, userID pgtype.Int8) (
 			&i.ID,
 			&i.Address,
 			&i.Region,
+			&i.Host,
 			&i.UserID,
 			&i.VmID,
 			&i.AppliedVmID,

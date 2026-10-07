@@ -37,8 +37,9 @@ type Server struct {
 	Wallet  *wallet.Service
 	Cache   *billing.BalanceCache
 	Metrics *metrics.Metrics // optional; nil records nothing
-	Hosts   *hosts.Set       // the Proxmox hosts (placement, capacity); nil in tests that only need PVE
-	PVE     proxmox.API      // optional; the admin capacity view reports the host as unreachable without it
+	health  healthCache
+	Hosts   *hosts.Set  // the Proxmox hosts (placement, capacity); nil in tests that only need PVE
+	PVE     proxmox.API // optional; the admin capacity view reports the host as unreachable without it
 
 	consoles     consoleStore
 	consoleLimit *auth.Limiter

@@ -27,7 +27,15 @@ SELECT host, count(*)::int AS free FROM ip_addresses WHERE vm_id IS NULL GROUP B
 -- RAM promised to live VMs per host, in MB.
 SELECT v.host, COALESCE(sum(p.ram_mb), 0)::bigint AS ram_mb
 FROM vms v JOIN plans p ON p.id = v.plan_id
-WHERE v.state NOT IN ('deleted', 'error') GROUP BY v.host;
+WHERE v.state IN ('pending', 'provisioning', 'running', 'stopped') GROUP BY v.host;
 
 -- name: HostTemplateVMIDInUse :one
 SELECT EXISTS (SELECT 1 FROM host_templates WHERE host = $1 AND proxmox_template_id = $2 AND template_id <> $3);
+
+-- name: HostHasTemplate :one
+SELECT EXISTS (SELECT 1 FROM host_templates WHERE host = $1 AND template_id = $2);
+
+-- name: SpreadGroupHosts :many
+-- Hosts already holding a live VM of this account's spread group.
+SELECT DISTINCT host FROM vms
+WHERE user_id = $1 AND spread_group = $2 AND state NOT IN ('deleted', 'deleting', 'error');

@@ -1,24 +1,24 @@
 -- name: AddFloatingIP :exec
-INSERT INTO floating_ips (address, region) VALUES ($1::inet, $2) ON CONFLICT (address) DO NOTHING;
+INSERT INTO floating_ips (address, region, host) VALUES ($1::inet, $2, COALESCE(NULLIF($3::text, ''), 'default')) ON CONFLICT (address) DO NOTHING;
 
 -- name: ListFloatingPool :many
-SELECT f.id, host(f.address)::text AS address, f.region, f.user_id, f.vm_id, f.label
+SELECT f.id, host(f.address)::text AS address, f.region, f.host, f.user_id, f.vm_id, f.label
 FROM floating_ips f ORDER BY f.id;
 
 -- name: ClaimFloatingIP :one
 -- Takes the lowest free address of the region for the account and starts its billing at the top of the hour.
 UPDATE floating_ips SET user_id = sqlc.arg(user_id), label = sqlc.arg(label), allocated_at = now(),
        billing_user_id = sqlc.arg(user_id), billing_from = sqlc.arg(billing_from), billing_until = NULL
-WHERE floating_ips.id = (SELECT p.id FROM floating_ips p WHERE p.region = sqlc.arg(want_region) AND p.user_id IS NULL AND p.billing_from IS NULL AND p.applied_vm_id IS NULL
+WHERE floating_ips.id = (SELECT p.id FROM floating_ips p WHERE p.region = sqlc.arg(want_region) AND (sqlc.arg(want_host)::text = '' OR p.host = sqlc.arg(want_host)::text) AND p.user_id IS NULL AND p.billing_from IS NULL AND p.applied_vm_id IS NULL
             ORDER BY p.id LIMIT 1 FOR UPDATE SKIP LOCKED)
-RETURNING id, host(address)::text AS address, region, user_id, vm_id, label, allocated_at;
+RETURNING id, host(address)::text AS address, region, host, user_id, vm_id, label, allocated_at;
 
 -- name: GetUserFloatingIP :one
-SELECT id, host(address)::text AS address, region, user_id, vm_id, applied_vm_id, label, allocated_at
+SELECT id, host(address)::text AS address, region, host, user_id, vm_id, applied_vm_id, label, allocated_at
 FROM floating_ips WHERE id = $1 AND user_id = $2;
 
 -- name: ListUserFloatingIPs :many
-SELECT id, host(address)::text AS address, region, user_id, vm_id, applied_vm_id, label, allocated_at
+SELECT id, host(address)::text AS address, region, host, user_id, vm_id, applied_vm_id, label, allocated_at
 FROM floating_ips WHERE user_id = $1 ORDER BY id;
 
 -- name: CountUserFloatingIPs :one

@@ -44,6 +44,9 @@ type vmJSON struct {
 	BootScript *bootScriptJSON `json:"boot_script,omitempty"`
 	// Busy is set while the worker resizes, snapshots or restores the VM; power actions wait until it clears.
 	Busy string `json:"busy,omitempty"`
+	// Host is the Proxmox host the VM lives on; SpreadGroup is the anti-affinity group it was created with.
+	Host        string `json:"host"`
+	SpreadGroup string `json:"spread_group,omitempty"`
 	// Detail view only: what this VM has cost so far this UTC month.
 	MonthCostUUSDT *int64 `json:"month_cost_uusdt,omitempty"`
 }
@@ -65,6 +68,11 @@ func (v vmJSON) withExtras(labels []byte, bsStatus string, bsExit pgtype.Int4, b
 		}
 		v.BootScript = b
 	}
+	return v
+}
+
+func (v vmJSON) placed(host string, group pgtype.Text) vmJSON {
+	v.Host, v.SpreadGroup = host, group.String
 	return v
 }
 
@@ -94,6 +102,9 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		// Labels tag the VM so a program can find it again; BootScript runs once as root after it is up.
 		Labels     map[string]string `json:"labels"`
 		BootScript string            `json:"boot_script"`
+		// SpreadGroup puts VMs of one group on different hosts; Spread "prefer" lets them share when no other host fits.
+		SpreadGroup string `json:"spread_group"`
+		Spread      string `json:"spread"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -102,6 +113,13 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 	labels, msg := validLabels(in.Labels)
 	if msg == "" {
 		msg = validBootScript(in.BootScript)
+	}
+	group, gmsg := spreadGroupOf(in.SpreadGroup, in.Labels)
+	if msg == "" {
+		msg = gmsg
+	}
+	if msg == "" && in.Spread != "" && in.Spread != "require" && in.Spread != "prefer" {
+		msg = `spread is "require" or "prefer"`
 	}
 	if msg != "" {
 		writeErr(w, http.StatusBadRequest, msg)
@@ -210,10 +228,19 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("balance must cover %d hours of usage for all your VMs (%d micro-USDT needed, %d available)", minRunwayHours, need, bal.USDTMicro)}
 			return errAbort
 		}
-		cp := db.CreateVMParams{UserID: user.ID, Region: s.Cfg.Region, PlanID: plan.ID,
+		host, perr := s.placeVM(ctx, placeRequest{UserID: user.ID, TemplateID: tpl.ID, PlanRAMMB: int64(plan.RamMb),
+			SpreadGroup: group, SpreadPrefer: in.Spread == "prefer"})
+		if perr != nil {
+			apiErr = perr
+			return errAbort
+		}
+		cp := db.CreateVMParams{Host: host, UserID: user.ID, Region: s.Cfg.Region, PlanID: plan.ID,
 			TemplateID: tpl.ID, Hostname: hostname, AuthorizedKeys: strings.Join(keys, "\n"), Labels: labels}
 		if clientToken != "" {
 			cp.ClientToken = textOf(clientToken)
+		}
+		if group != "" {
+			cp.SpreadGroup = textOf(group)
 		}
 		if in.BootScript != "" {
 			cp.BootScript, cp.BootScriptStatus = textOf(in.BootScript), "pending"
@@ -222,7 +249,7 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		ip, err := q.ClaimFreeIP(ctx, s.Cfg.Region)
+		ip, err := q.ClaimFreeIP(ctx, db.ClaimFreeIPParams{Region: s.Cfg.Region, Host: host})
 		if errors.Is(err, pgx.ErrNoRows) {
 			apiErr = &apiError{http.StatusServiceUnavailable, "no capacity available right now, try again later"}
 			return errAbort
@@ -273,7 +300,7 @@ func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
 		if !labelsMatch(v.Labels, want) {
 			continue
 		}
-		out = append(out, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput))
+		out = append(out, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput).placed(v.Host, v.SpreadGroup))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -292,7 +319,7 @@ func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput)
+	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput).placed(v.Host, v.SpreadGroup)
 	now := time.Now().UTC()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	cost, err := s.Store.Q.MonthChargedForVM(r.Context(), db.MonthChargedForVMParams{VmID: id, HourFrom: monthStart, HourTo: monthStart.AddDate(0, 1, 0)})
@@ -314,7 +341,7 @@ func (s *Server) respondVM(w http.ResponseWriter, r *http.Request, id, userID in
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, status, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput))
+	writeJSON(w, status, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput).placed(v.Host, v.SpreadGroup))
 }
 
 // powerAction validates the request against the VM's current state and queues

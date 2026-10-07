@@ -57,6 +57,8 @@ type Config struct {
 	// HostsFile is a YAML file describing several Proxmox hosts (with their secrets). Empty: the single host
 	// described by XENOS_PVE_* is the only one, named "default".
 	HostsFile string
+	// RAMCommitLimit is how much of a host's RAM placement may promise to VMs (1.0 = 100%).
+	RAMCommitLimit float64
 	// FloatingIPPriceUUSDT is the hourly price of one floating IP in micro-USDT (attached or not); FloatingIPLimit is how many one account may hold.
 	FloatingIPPriceUUSDT int64
 	FloatingIPLimit      int
@@ -124,6 +126,9 @@ func load(check bool) (Config, error) {
 	}
 	if c.DepositLimitKobo, err = strconv.ParseInt(get("XENOS_DEPOSIT_LIMIT_KOBO", "5000000"), 10, 64); err != nil {
 		return c, fmt.Errorf("XENOS_DEPOSIT_LIMIT_KOBO: %w", err)
+	}
+	if c.RAMCommitLimit, err = strconv.ParseFloat(get("XENOS_RAM_COMMIT_LIMIT", "1.0"), 64); err != nil || c.RAMCommitLimit <= 0 || c.RAMCommitLimit > 4 {
+		return c, fmt.Errorf("XENOS_RAM_COMMIT_LIMIT must be a number above 0 and at most 4 (1.0 = 100%%)")
 	}
 	if c.FloatingIPPriceUUSDT, err = strconv.ParseInt(get("XENOS_FLOATING_IP_PRICE_UUSDT_HOURLY", "2000"), 10, 64); err != nil || c.FloatingIPPriceUUSDT < 0 {
 		return c, fmt.Errorf("XENOS_FLOATING_IP_PRICE_UUSDT_HOURLY must be a non-negative integer (micro-USDT per hour)")

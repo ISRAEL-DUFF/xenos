@@ -59,4 +59,30 @@ qm stop 9999 && qm destroy 9999 --purge
 
 The control plane reaches the host only through the Proxmox API (port 8006) with an API token, so allow 8006 **only** from the control-plane VM's IP and your own IP, and port 22 only from your IP (Proxmox firewall or the provider's firewall). Create the token with the narrowest role that can clone, configure, resize, power and destroy VMs on `vmdata` and the bridge, plus read access to node and storage status (used by the monitor). Do not use `root@pam`. The role needs, besides clone/config/power/destroy: `VM.Snapshot` and `VM.Snapshot.Rollback` (customer snapshots), `VM.Config.CPU`, `VM.Config.Memory` and `VM.Config.Disk` (resize), `VM.Console` (browser console) and `VM.GuestAgent.Unrestricted` (the boot script runs through the guest agent; on Proxmox 8 this is `VM.Monitor`). The console needs the guest to keep a **VGA display** (`qm set <template> --vga std`): a template that sets `--vga serial0` shows a blank console. Snapshots need snapshot-capable storage (LVM-thin is); they use pool space, so keep an eye on the pool alert.
 
+**More than one host.** Hosts are standalone Proxmox nodes (no cluster, no shared storage), each with its own routed subnet. Describe them in a YAML file on the control plane (mode 0600, it holds the API secrets) and point `XENOS_HOSTS_FILE` at it:
+
+```yaml
+hosts:
+  - name: pve1               # lowercase letters, digits, hyphens; never change it once VMs exist
+    region: lagos-1          # default XENOS_REGION; only hosts in the platform region receive VMs
+    url: https://10.0.0.1:8006
+    node: pve1
+    token_id: xenos@pve!control
+    token_secret: "…"
+    insecure_tls: false
+    storage: vmdata          # defaults come from XENOS_PVE_STORAGE / XENOS_PVE_DISK / XENOS_PVE_BRIDGE / XENOS_NAMESERVERS
+    disk: scsi0
+    bridge: vmbr0
+    ipv6_prefix: 2001:db8:1::/64
+    ipv6_gateway: 2001:db8:1::1
+    nameservers: 1.1.1.1 1.0.0.1
+  - name: pve2
+    url: https://10.0.0.2:8006
+    node: pve2
+    token_id: xenos@pve!control
+    token_secret: "…"
+```
+
+Unknown keys are refused. Without the file the `XENOS_PVE_*` variables describe one host named `default`, so an upgrade changes nothing. After adding a host: start the API or worker once (it registers the host), then load its addresses with `xenosctl ip add <range> <gateway> --host pve2` (and `ip add-floating … --host pve2`), tell Xenos where each template lives with `xenosctl template host <slug> pve2 <vmid>` (VMIDs may differ per host but must be unique on a host), and run `xenosctl preflight`, which checks every host and every template on it. A host with a template or addresses missing is skipped by placement. VMIDs come from one global sequence, so a VMID identifies its host: do not create VMs by hand on a Xenos host with VMIDs from Xenos's range. `xenosctl host drain <name>` stops new VMs landing on a host (existing ones keep running); `enable` undoes it. Placement picks the host with the lowest committed-RAM fraction (`XENOS_RAM_COMMIT_LIMIT`, default 1.0 = 100%, bounds how much RAM may be promised) and VMs of one `spread_group` go on different hosts. A VM stays on its host for life.
+
 **Anti-spoofing (required).** Every guest is created with the Proxmox VM firewall on, with `macfilter` and `ipfilter` and an `ipfilter-net0` set holding exactly its own IPv4 and IPv6 (and later its floating IPs), so one VM cannot answer ARP for, or send from, another VM's address. This only works when the firewall is **enabled at both datacenter and node level** (Datacenter → Firewall → Options → Firewall: Yes; the same on the node); `xenosctl preflight` fails if it is not. The guest's own input/output policy is set to ACCEPT, so what reaches guests is still decided by your host rules. The API token's role also needs `VM.Config.Network` (set NIC firewall, edit the VM firewall and its IP set) and `Sys.Audit` (preflight reads the firewall state). Link-local IPv6 (`fe80::`) derived from the guest's MAC is allowed automatically by Proxmox. **Host check:** from one test VM try `ip addr add <another VM's address>/32 dev eth0` and ping out, or answer ARP for it with `arping -U -I eth0 <address>`: the traffic must be dropped.

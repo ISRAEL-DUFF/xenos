@@ -107,6 +107,7 @@ type FloatingIp struct {
 	BillingUserID pgtype.Int8        `json:"billing_user_id"`
 	BillingFrom   pgtype.Timestamptz `json:"billing_from"`
 	BillingUntil  pgtype.Timestamptz `json:"billing_until"`
+	Host          string             `json:"host"`
 }
 
 type Heartbeat struct {

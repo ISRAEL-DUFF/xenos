@@ -76,6 +76,8 @@ export interface VM {
   id: number;
   hostname: string;
   region: string;
+  host?: string;
+  spread_group?: string;
   plan: string;
   template: string;
   state: VMState;
@@ -184,6 +186,18 @@ export interface Capacity {
   pool: { name: string; used_bytes: number; total_bytes: number; fraction: number } | null;
   ips: { free: number; total: number };
   host_reachable: boolean;
+  hosts: HostCapacity[];
+}
+
+export interface HostCapacity {
+  name: string;
+  status: "active" | "draining" | "disabled";
+  reachable: boolean;
+  vms: number;
+  free_ips: number;
+  committed_ram_mb: number;
+  physical_ram_mb: number | null;
+  pool_fraction: number | null;
 }
 
 export interface AdminJob {

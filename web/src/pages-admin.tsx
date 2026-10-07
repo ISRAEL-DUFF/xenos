@@ -336,6 +336,25 @@ export function AdminCapacity() {
         {c.pool && <Gauge label={`Disk pool “${c.pool.name}”`} used={Math.round(c.pool.used_bytes / 2 ** 30)} total={Math.round(c.pool.total_bytes / 2 ** 30)} unit="GiB" detail={bytesToGiB(c.pool.total_bytes - c.pool.used_bytes) + " free"} />}
         <Gauge label="IPv4 addresses in use" used={c.ips.total - c.ips.free} total={c.ips.total} unit="IPs" detail={`${c.ips.free} free`} />
       </div>
+      {c.hosts.length > 1 && (
+        <div className={tableWrap}>
+          <table className="w-full min-w-[40rem] text-sm">
+            <thead className={thead}><tr><th className={th}>Host</th><th className={th}>Status</th><th className={th}>VMs</th><th className={th}>Free IPs</th><th className={th}>RAM committed</th><th className={th}>Pool</th></tr></thead>
+            <tbody className={tbody}>
+              {c.hosts.map((h) => (
+                <tr key={h.name}>
+                  <td className="px-3 py-2 font-medium">{h.name}</td>
+                  <td className="px-3 py-2"><Badge tone={!h.reachable ? "red" : h.status === "active" ? "green" : "amber"}>{h.reachable ? h.status : "unreachable"}</Badge></td>
+                  <td className="px-3 py-2 tabular-nums">{h.vms}</td>
+                  <td className="px-3 py-2 tabular-nums">{h.free_ips}</td>
+                  <td className="px-3 py-2 tabular-nums">{h.committed_ram_mb.toLocaleString()} / {h.physical_ram_mb !== null ? h.physical_ram_mb.toLocaleString() : "?"} MB</td>
+                  <td className="px-3 py-2 tabular-nums">{h.pool_fraction !== null ? `${Math.round(h.pool_fraction * 100)}%` : "?"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       <p className="text-xs text-slate-500 dark:text-slate-400">Thin provisioning means the pool can fill up even when every VM is within its plan. Alerts fire at 80% pool use and 90% committed RAM.</p>
     </div>
   );

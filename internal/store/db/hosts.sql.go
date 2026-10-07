@@ -14,7 +14,7 @@ import (
 const hostCommittedRAM = `-- name: HostCommittedRAM :many
 SELECT v.host, COALESCE(sum(p.ram_mb), 0)::bigint AS ram_mb
 FROM vms v JOIN plans p ON p.id = v.plan_id
-WHERE v.state NOT IN ('deleted', 'error') GROUP BY v.host
+WHERE v.state IN ('pending', 'provisioning', 'running', 'stopped') GROUP BY v.host
 `
 
 type HostCommittedRAMRow struct {
@@ -70,6 +70,22 @@ func (q *Queries) HostFreeIPs(ctx context.Context) ([]HostFreeIPsRow, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const hostHasTemplate = `-- name: HostHasTemplate :one
+SELECT EXISTS (SELECT 1 FROM host_templates WHERE host = $1 AND template_id = $2)
+`
+
+type HostHasTemplateParams struct {
+	Host       string `json:"host"`
+	TemplateID int64  `json:"template_id"`
+}
+
+func (q *Queries) HostHasTemplate(ctx context.Context, arg HostHasTemplateParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hostHasTemplate, arg.Host, arg.TemplateID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const hostOfVMID = `-- name: HostOfVMID :one
@@ -225,6 +241,37 @@ type SetHostTemplateParams struct {
 func (q *Queries) SetHostTemplate(ctx context.Context, arg SetHostTemplateParams) error {
 	_, err := q.db.Exec(ctx, setHostTemplate, arg.Host, arg.TemplateID, arg.ProxmoxTemplateID)
 	return err
+}
+
+const spreadGroupHosts = `-- name: SpreadGroupHosts :many
+SELECT DISTINCT host FROM vms
+WHERE user_id = $1 AND spread_group = $2 AND state NOT IN ('deleted', 'deleting', 'error')
+`
+
+type SpreadGroupHostsParams struct {
+	UserID      int64       `json:"user_id"`
+	SpreadGroup pgtype.Text `json:"spread_group"`
+}
+
+// Hosts already holding a live VM of this account's spread group.
+func (q *Queries) SpreadGroupHosts(ctx context.Context, arg SpreadGroupHostsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, spreadGroupHosts, arg.UserID, arg.SpreadGroup)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		items = append(items, host)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const syncHost = `-- name: SyncHost :exec

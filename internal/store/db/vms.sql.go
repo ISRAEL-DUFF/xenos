@@ -41,11 +41,16 @@ func (q *Queries) ClaimBootScript(ctx context.Context, id int64) (int64, error) 
 const claimFreeIP = `-- name: ClaimFreeIP :one
 SELECT id, host(address)::text AS address, host(gateway)::text AS gateway
 FROM ip_addresses
-WHERE vm_id IS NULL AND region = $1
+WHERE vm_id IS NULL AND region = $1 AND host = $2
 ORDER BY id
 FOR UPDATE SKIP LOCKED
 LIMIT 1
 `
+
+type ClaimFreeIPParams struct {
+	Region string `json:"region"`
+	Host   string `json:"host"`
+}
 
 type ClaimFreeIPRow struct {
 	ID      int64  `json:"id"`
@@ -53,8 +58,8 @@ type ClaimFreeIPRow struct {
 	Gateway string `json:"gateway"`
 }
 
-func (q *Queries) ClaimFreeIP(ctx context.Context, region string) (ClaimFreeIPRow, error) {
-	row := q.db.QueryRow(ctx, claimFreeIP, region)
+func (q *Queries) ClaimFreeIP(ctx context.Context, arg ClaimFreeIPParams) (ClaimFreeIPRow, error) {
+	row := q.db.QueryRow(ctx, claimFreeIP, arg.Region, arg.Host)
 	var i ClaimFreeIPRow
 	err := row.Scan(&i.ID, &i.Address, &i.Gateway)
 	return i, err
@@ -154,10 +159,11 @@ func (q *Queries) CreateSnapshot(ctx context.Context, arg CreateSnapshotParams) 
 
 const createVM = `-- name: CreateVM :one
 INSERT INTO vms (user_id, region, plan_id, template_id, proxmox_vmid, hostname, authorized_keys,
-                 labels, client_token, boot_script, boot_script_status)
+                 labels, client_token, boot_script, boot_script_status, host, spread_group)
 VALUES ($1, $2, $3, $4, nextval('vmid_seq')::int,
         $5, $6, COALESCE($7::jsonb, '{}'::jsonb),
-        $8, $9, COALESCE(NULLIF($10::text, ''), 'none'))
+        $8, $9, COALESCE(NULLIF($10::text, ''), 'none'),
+        COALESCE(NULLIF($11::text, ''), 'default'), $12)
 RETURNING id
 `
 
@@ -172,6 +178,8 @@ type CreateVMParams struct {
 	ClientToken      pgtype.Text `json:"client_token"`
 	BootScript       pgtype.Text `json:"boot_script"`
 	BootScriptStatus string      `json:"boot_script_status"`
+	Host             string      `json:"host"`
+	SpreadGroup      pgtype.Text `json:"spread_group"`
 }
 
 func (q *Queries) CreateVM(ctx context.Context, arg CreateVMParams) (int64, error) {
@@ -186,6 +194,8 @@ func (q *Queries) CreateVM(ctx context.Context, arg CreateVMParams) (int64, erro
 		arg.ClientToken,
 		arg.BootScript,
 		arg.BootScriptStatus,
+		arg.Host,
+		arg.SpreadGroup,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -450,7 +460,7 @@ func (q *Queries) GetSSHKeysByIDs(ctx context.Context, arg GetSSHKeysByIDsParams
 }
 
 const getUserVM = `-- name: GetUserVM :one
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
+SELECT v.id, v.region, v.host, v.spread_group, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
        p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
@@ -469,6 +479,8 @@ type GetUserVMParams struct {
 type GetUserVMRow struct {
 	ID               int64       `json:"id"`
 	Region           string      `json:"region"`
+	Host             string      `json:"host"`
+	SpreadGroup      pgtype.Text `json:"spread_group"`
 	Hostname         string      `json:"hostname"`
 	State            string      `json:"state"`
 	Ipv6             pgtype.Text `json:"ipv6"`
@@ -496,6 +508,8 @@ func (q *Queries) GetUserVM(ctx context.Context, arg GetUserVMParams) (GetUserVM
 	err := row.Scan(
 		&i.ID,
 		&i.Region,
+		&i.Host,
+		&i.SpreadGroup,
 		&i.Hostname,
 		&i.State,
 		&i.Ipv6,
@@ -639,7 +653,7 @@ func (q *Queries) GetVMSnapshot(ctx context.Context, arg GetVMSnapshotParams) (G
 }
 
 const listUserVMs = `-- name: ListUserVMs :many
-SELECT v.id, v.region, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
+SELECT v.id, v.region, v.host, v.spread_group, v.hostname, v.state, v.ipv6, v.created_at, v.busy, v.resize_plan_id, v.labels, v.boot_script_status, v.boot_script_exit, v.boot_script_output,
        p.slug AS plan_slug, p.price_uusdt_hourly, p.id AS plan_id, p.vcpu, p.ram_mb, p.disk_gb,
        t.slug AS template_slug, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4
@@ -654,6 +668,8 @@ ORDER BY v.id DESC
 type ListUserVMsRow struct {
 	ID               int64       `json:"id"`
 	Region           string      `json:"region"`
+	Host             string      `json:"host"`
+	SpreadGroup      pgtype.Text `json:"spread_group"`
 	Hostname         string      `json:"hostname"`
 	State            string      `json:"state"`
 	Ipv6             pgtype.Text `json:"ipv6"`
@@ -687,6 +703,8 @@ func (q *Queries) ListUserVMs(ctx context.Context, userID int64) ([]ListUserVMsR
 		if err := rows.Scan(
 			&i.ID,
 			&i.Region,
+			&i.Host,
+			&i.SpreadGroup,
 			&i.Hostname,
 			&i.State,
 			&i.Ipv6,
