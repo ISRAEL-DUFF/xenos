@@ -309,12 +309,16 @@ func (p *Provisioner) doRebuild(ctx context.Context, w db.GetRebuildWorkRow) err
 	if err := p.Store.Q.DeleteVMSnapshots(ctx, w.ID); err != nil {
 		return err
 	}
+	nics, err := p.privateNICs(ctx, w.ID)
+	if err != nil {
+		return err
+	}
 	if err := p.createGuest(ctx, guestSpec{
-		Host: w.Host, VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.TemplateVmid), CIUser: w.CiUser, Keys: w.RebuildKeys.String,
+		Private: nics, Host: w.Host, VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.TemplateVmid), CIUser: w.CiUser, Keys: w.RebuildKeys.String,
 		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: w.Ipv6.String, Extra: p.floatingAddrs(ctx, w.ID), Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
 		return err
 	}
-	err := p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+	err = p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
 		n, err := q.FinishRebuild(ctx, w.ID)
 		if err != nil {
 			return err

@@ -335,3 +335,55 @@ func TestWithFirewallKeepsTheNIC(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivateNICCalls(t *testing.T) {
+	c, got := testClient(t, func(r recorded) string {
+		switch {
+		case r.method == "GET" && strings.HasSuffix(r.path, "/config"):
+			return `{"net0":"virtio=BC:24:11:AA:BB:CC,bridge=vmbr0,firewall=1","net1":"virtio=BC:24:11:11:22:33,bridge=vmbr1,tag=1001,firewall=1"}`
+		case r.method == "GET" && strings.HasSuffix(r.path, "/network"):
+			return `[{"iface":"vmbr0","type":"bridge"},{"iface":"eno1","type":"eth"},{"iface":"vmbr1","type":"bridge"}]`
+		case r.method == "GET" && strings.HasSuffix(r.path, "/firewall/ipset"):
+			return `[]`
+		case r.method == "GET" && strings.Contains(r.path, "/firewall/ipset/"):
+			return `[]`
+		}
+		return `null`
+	})
+	ctx := context.Background()
+	if err := c.SetNIC(ctx, 105, NICParams{Slot: 1, Bridge: "vmbr1", VLAN: 1002, IPConfig: "ip=10.64.0.5/24"}); err != nil {
+		t.Fatal(err)
+	}
+	var put url.Values
+	for _, r := range *got {
+		if r.method == "PUT" && strings.HasSuffix(r.path, "/qemu/105/config") {
+			put = r.form
+		}
+	}
+	// The MAC the guest already has is kept; the VLAN, bridge and filter are set; there is no gateway.
+	if put.Get("net1") != "virtio=BC:24:11:11:22:33,bridge=vmbr1,tag=1002,firewall=1" || put.Get("ipconfig1") != "ip=10.64.0.5/24" {
+		t.Fatalf("set nic = %v", put)
+	}
+	*got = nil
+	if err := c.RemoveNIC(ctx, 105, 1); err != nil {
+		t.Fatal(err)
+	}
+	if (*got)[0].form.Get("delete") != "net1,ipconfig1" {
+		t.Fatalf("remove = %v", (*got)[0].form)
+	}
+	*got = nil
+	if err := c.IsolateNIC(ctx, 105, 2, []string{"10.64.0.9"}); err != nil {
+		t.Fatal(err)
+	}
+	var created, added bool
+	for _, r := range *got {
+		created = created || (r.method == "POST" && strings.HasSuffix(r.path, "/firewall/ipset") && r.form.Get("name") == "ipfilter-net2")
+		added = added || (r.method == "POST" && strings.HasSuffix(r.path, "/ipfilter-net2") && r.form.Get("cidr") == "10.64.0.9")
+	}
+	if !created || !added {
+		t.Fatalf("ipfilter-net2 not built: %+v", *got)
+	}
+	if br, err := c.Bridges(ctx); err != nil || len(br) != 2 || br[1] != "vmbr1" {
+		t.Fatalf("bridges = %v %v", br, err)
+	}
+}

@@ -56,6 +56,8 @@ type placeRequest struct {
 	PlanRAMMB    int64
 	SpreadGroup  string
 	SpreadPrefer bool
+	// OnlyHost restricts placement to one host (a private network the VM must join lives there).
+	OnlyHost string
 }
 
 // placeVM picks the host for a new VM. Eligible hosts are in this region, active, reachable, hold the template, have
@@ -63,7 +65,7 @@ type placeRequest struct {
 // lowest committed-RAM fraction wins, ties broken by name. VMs of one spread group go on different hosts.
 func (s *Server) placeVM(ctx context.Context, req placeRequest) (string, *apiError) {
 	if s.Hosts == nil {
-		return hosts.Default, nil
+		return hosts.Default, nil // single-host installs without a hosts set (tests)
 	}
 	q := s.Store.Q
 	status := map[string]string{}
@@ -112,6 +114,9 @@ func (s *Server) placeVM(ctx context.Context, req placeRequest) (string, *apiErr
 	}
 	now := time.Now()
 	for _, h := range s.Hosts.All() {
+		if req.OnlyHost != "" && h.Name != req.OnlyHost {
+			continue
+		}
 		if h.Region != s.Cfg.Region || status[h.Name] != "active" || free[h.Name] < 1 {
 			continue
 		}

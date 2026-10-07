@@ -29,34 +29,36 @@ const Default = "default"
 
 // Host is one Proxmox host and how guests are built on it.
 type Host struct {
-	Name, Region string
-	API          proxmox.API
-	Node         string
-	Storage      string
-	Disk         string
-	Bridge       string
-	DisableKVM   bool
-	IPv6Prefix   netip.Prefix
-	IPv6Gateway  string
-	Nameservers  string
+	Name, Region  string
+	API           proxmox.API
+	Node          string
+	Storage       string
+	Disk          string
+	Bridge        string
+	PrivateBridge string
+	DisableKVM    bool
+	IPv6Prefix    netip.Prefix
+	IPv6Gateway   string
+	Nameservers   string
 }
 
 // fileEntry is one host in the YAML file.
 type fileEntry struct {
-	Name        string `yaml:"name"`
-	Region      string `yaml:"region"`
-	URL         string `yaml:"url"`
-	Node        string `yaml:"node"`
-	TokenID     string `yaml:"token_id"`
-	TokenSecret string `yaml:"token_secret"`
-	InsecureTLS bool   `yaml:"insecure_tls"`
-	Storage     string `yaml:"storage"`
-	Disk        string `yaml:"disk"`
-	Bridge      string `yaml:"bridge"`
-	DisableKVM  bool   `yaml:"disable_kvm"`
-	IPv6Prefix  string `yaml:"ipv6_prefix"`
-	IPv6Gateway string `yaml:"ipv6_gateway"`
-	Nameservers string `yaml:"nameservers"`
+	Name          string `yaml:"name"`
+	Region        string `yaml:"region"`
+	URL           string `yaml:"url"`
+	Node          string `yaml:"node"`
+	TokenID       string `yaml:"token_id"`
+	TokenSecret   string `yaml:"token_secret"`
+	InsecureTLS   bool   `yaml:"insecure_tls"`
+	Storage       string `yaml:"storage"`
+	Disk          string `yaml:"disk"`
+	Bridge        string `yaml:"bridge"`
+	PrivateBridge string `yaml:"private_bridge"`
+	DisableKVM    bool   `yaml:"disable_kvm"`
+	IPv6Prefix    string `yaml:"ipv6_prefix"`
+	IPv6Gateway   string `yaml:"ipv6_gateway"`
+	Nameservers   string `yaml:"nameservers"`
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}$`)
@@ -100,7 +102,7 @@ func Load(cfg config.Config, log *slog.Logger) (*Set, error) {
 			return nil, fmt.Errorf("XENOS_IPV6_PREFIX: %w", err)
 		}
 	}
-	legacy := &Host{Name: Default, Region: cfg.Region, Node: cfg.PVENode, Storage: cfg.PVEStorage, Disk: cfg.PVEDisk, Bridge: cfg.PVEBridge,
+	legacy := &Host{Name: Default, Region: cfg.Region, Node: cfg.PVENode, Storage: cfg.PVEStorage, Disk: cfg.PVEDisk, Bridge: cfg.PVEBridge, PrivateBridge: cfg.PVEPrivateBridge,
 		DisableKVM: cfg.PVEDisableKVM, IPv6Prefix: v6, IPv6Gateway: cfg.IPv6Gateway, Nameservers: cfg.Nameservers}
 	if cfg.HostsFile == "" {
 		if cfg.PVEURL == "" {
@@ -140,7 +142,7 @@ func Load(cfg config.Config, log *slog.Logger) (*Set, error) {
 			return nil, fmt.Errorf("host %q: url, node, token_id and token_secret are required", e.Name)
 		}
 		h := &Host{Name: e.Name, Region: orDefault(e.Region, cfg.Region), Node: e.Node, Storage: orDefault(e.Storage, cfg.PVEStorage),
-			Disk: orDefault(e.Disk, cfg.PVEDisk), Bridge: orDefault(e.Bridge, cfg.PVEBridge), DisableKVM: e.DisableKVM,
+			Disk: orDefault(e.Disk, cfg.PVEDisk), Bridge: orDefault(e.Bridge, cfg.PVEBridge), PrivateBridge: orDefault(e.PrivateBridge, cfg.PVEPrivateBridge), DisableKVM: e.DisableKVM,
 			IPv6Gateway: e.IPv6Gateway, Nameservers: orDefault(e.Nameservers, cfg.Nameservers)}
 		if e.IPv6Prefix != "" {
 			if h.IPv6Prefix, err = netip.ParsePrefix(e.IPv6Prefix); err != nil {

@@ -60,7 +60,7 @@ func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing
 	prov := &vm.Provisioner{Store: st, PVE: hs, Log: log, Cfg: shared, HostCfg: func(name string) vm.Config {
 		c := shared
 		if h, ok := hs.Get(name); ok {
-			c.Storage, c.Disk, c.DisableKVM, c.IPv6Prefix, c.IPv6Gateway, c.Nameservers = h.Storage, h.Disk, h.DisableKVM, h.IPv6Prefix, h.IPv6Gateway, h.Nameservers
+			c.Storage, c.Disk, c.DisableKVM, c.IPv6Prefix, c.IPv6Gateway, c.Nameservers, c.PrivateBridge = h.Storage, h.Disk, h.DisableKVM, h.IPv6Prefix, h.IPv6Gateway, h.Nameservers, h.PrivateBridge
 		}
 		return c
 	}}

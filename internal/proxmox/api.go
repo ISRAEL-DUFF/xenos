@@ -41,6 +41,13 @@ type API interface {
 	// and from the addresses in allowed (plain IPv4/IPv6 addresses). It is idempotent: calling it again with a
 	// different list replaces the set, which is how floating addresses are added and removed.
 	Isolate(ctx context.Context, vmid int, allowed []string) error
+	// Private networks: SetNIC adds or replaces a second NIC on a VLAN of a private bridge (slot 1 or 2, with
+	// its cloud-init address), RemoveNIC takes it away, IsolateNIC fixes the addresses that NIC may send from.
+	// Changes apply when the guest next starts; Bridges lists the host's bridges (for preflight).
+	SetNIC(ctx context.Context, vmid int, p NICParams) error
+	RemoveNIC(ctx context.Context, vmid int, slot int) error
+	IsolateNIC(ctx context.Context, vmid int, slot int, allowed []string) error
+	Bridges(ctx context.Context) ([]string, error)
 	// HostFirewall reports whether the firewall is enabled at datacenter and node level; without both, the
 	// per-guest filters do nothing.
 	HostFirewall(ctx context.Context) (HostFirewallState, error)
@@ -49,6 +56,14 @@ type API interface {
 	Guests(ctx context.Context) ([]Guest, error)
 	StoragePool(ctx context.Context, storage string) (Usage, error)
 	NodeInfo(ctx context.Context) (NodeInfo, error)
+}
+
+// NICParams describes a private-network NIC.
+type NICParams struct {
+	Slot     int    // 1 or 2: net1/ipconfig1 or net2/ipconfig2
+	Bridge   string // the private bridge, e.g. vmbr1
+	VLAN     int
+	IPConfig string // e.g. "ip=10.64.0.5/24" (no gateway: private networks are not routed)
 }
 
 // HostFirewallState is whether the Proxmox firewall is switched on above the guests.

@@ -166,6 +166,16 @@ type Plan struct {
 	Active               bool   `json:"active"`
 }
 
+type PrivateNetwork struct {
+	ID        int64        `json:"id"`
+	UserID    int64        `json:"user_id"`
+	Name      string       `json:"name"`
+	Cidr      netip.Prefix `json:"cidr"`
+	VlanID    int32        `json:"vlan_id"`
+	Host      pgtype.Text  `json:"host"`
+	CreatedAt time.Time    `json:"created_at"`
+}
+
 type Session struct {
 	TokenHash []byte    `json:"token_hash"`
 	UserID    int64     `json:"user_id"`
@@ -272,6 +282,15 @@ type Vm struct {
 	RebuildBootScript pgtype.Text        `json:"rebuild_boot_script"`
 	Host              string             `json:"host"`
 	SpreadGroup       pgtype.Text        `json:"spread_group"`
+}
+
+type VmPrivateIp struct {
+	ID        int64      `json:"id"`
+	VmID      int64      `json:"vm_id"`
+	NetworkID int64      `json:"network_id"`
+	Slot      int16      `json:"slot"`
+	Address   netip.Addr `json:"address"`
+	State     string     `json:"state"`
 }
 
 type WebhookEvent struct {

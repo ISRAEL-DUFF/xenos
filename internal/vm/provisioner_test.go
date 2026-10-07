@@ -294,3 +294,29 @@ func mustPrefix(t *testing.T, s string) netip.Prefix {
 	}
 	return p
 }
+
+func TestProvisionBuildsPrivateNICsAndDeleteFreesTheAddress(t *testing.T) {
+	e := newEnv(t)
+	id := e.seedVM("203.0.113.10")
+	ctx := context.Background()
+	var uid, nid int64
+	must(t, e.st.Pool.QueryRow(ctx, `SELECT user_id FROM vms WHERE id=$1`, id).Scan(&uid))
+	must(t, e.st.Pool.QueryRow(ctx, `INSERT INTO private_networks (user_id, name, cidr, vlan_id, host) VALUES ($1, 'db', '10.64.0.0/24', 1234, 'default') RETURNING id`, uid).Scan(&nid))
+	_, err := e.st.Pool.Exec(ctx, `INSERT INTO vm_private_ips (vm_id, network_id, slot, address) VALUES ($1, $2, 1, '10.64.0.2')`, id, nid)
+	must(t, err)
+	must(t, e.call(e.prov, JobProvision, id, "", 1))
+	for _, g := range e.pve.VMs {
+		n := g.NICs[1]
+		if n.VLAN != 1234 || n.Bridge != "vmbr1" || n.IPConfig != "ip=10.64.0.2/24" || len(g.NICAllowed[1]) != 1 || g.NICAllowed[1][0] != "10.64.0.2" {
+			t.Fatalf("private nic = %+v allowed %v", n, g.NICAllowed)
+		}
+	}
+	must(t, e.call(e.prov, JobDelete, id, "", 1))
+	var left int
+	must(t, e.st.Pool.QueryRow(ctx, `SELECT count(*) FROM vm_private_ips`).Scan(&left))
+	var host *string
+	must(t, e.st.Pool.QueryRow(ctx, `SELECT host FROM private_networks WHERE id=$1`, nid).Scan(&host))
+	if left != 0 || host != nil {
+		t.Fatalf("after delete: %d memberships, network host %v (want 0 and unpinned)", left, host)
+	}
+}

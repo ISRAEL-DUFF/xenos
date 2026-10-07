@@ -139,6 +139,13 @@ func (s *Server) Router() http.Handler {
 			r.Delete("/vms/{id}/snapshots/{sid}", s.deleteSnapshot)
 			r.With(s.requireActive).Post("/vms/{id}/snapshots/{sid}/restore", s.restoreSnapshot)
 
+			r.Get("/networks", s.listNetworks)
+			r.With(s.requireActive).Post("/networks", s.createNetwork)
+			r.Get("/networks/{id}", s.getNetwork)
+			r.Delete("/networks/{id}", s.deleteNetwork)
+			r.With(s.requireActive).Post("/vms/{id}/networks/{nid}", s.attachNetwork)
+			r.With(s.requireActive).Delete("/vms/{id}/networks/{nid}", s.detachNetwork)
+
 			r.Get("/floating-ips", s.listFloatingIPs)
 			r.With(s.requireActive).Post("/floating-ips", s.allocateFloatingIP)
 			r.Get("/floating-ips/{id}", s.getFloatingIP)

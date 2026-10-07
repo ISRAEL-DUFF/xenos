@@ -91,7 +91,8 @@ export interface VM {
   labels?: Record<string, string>;
   boot_script?: { status: string; exit_code?: number; output?: string };
   /** Set while the worker resizes, snapshots or restores the VM. */
-  busy?: "resizing" | "snapshotting" | "restoring" | "rebuilding";
+  busy?: "resizing" | "snapshotting" | "restoring" | "rebuilding" | "networking";
+  private_ips?: { network_id: number; name: string; address: string; state: string }[];
 }
 
 export interface SSHKey {
@@ -279,4 +280,13 @@ export interface FloatingIP {
   applied: boolean;
   allocated_at: string;
   price_uusdt_hourly: number;
+}
+
+export interface PrivateNetwork {
+  id: number;
+  name: string;
+  cidr: string;
+  vlan_id: number;
+  host: string | null;
+  members: { vm_id: number; hostname: string; address: string; state: string }[];
 }

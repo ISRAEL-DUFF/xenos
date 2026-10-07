@@ -162,6 +162,30 @@ func (s *Set) Isolate(ctx context.Context, vmid int, allowed []string) error {
 	return a.Isolate(ctx, vmid, allowed)
 }
 
+func (s *Set) SetNIC(ctx context.Context, vmid int, p proxmox.NICParams) error {
+	a, err := s.For(ctx, vmid)
+	if err != nil {
+		return err
+	}
+	return a.SetNIC(ctx, vmid, p)
+}
+
+func (s *Set) RemoveNIC(ctx context.Context, vmid int, slot int) error {
+	a, err := s.For(ctx, vmid)
+	if err != nil {
+		return err
+	}
+	return a.RemoveNIC(ctx, vmid, slot)
+}
+
+func (s *Set) IsolateNIC(ctx context.Context, vmid int, slot int, allowed []string) error {
+	a, err := s.For(ctx, vmid)
+	if err != nil {
+		return err
+	}
+	return a.IsolateNIC(ctx, vmid, slot, allowed)
+}
+
 // ---- host-wide calls: the primary host only ----
 
 func (s *Set) HostFirewall(ctx context.Context) (proxmox.HostFirewallState, error) {
@@ -176,3 +200,4 @@ func (s *Set) StoragePool(ctx context.Context, storage string) (proxmox.Usage, e
 func (s *Set) NodeInfo(ctx context.Context) (proxmox.NodeInfo, error) {
 	return s.Primary().API.NodeInfo(ctx)
 }
+func (s *Set) Bridges(ctx context.Context) ([]string, error) { return s.Primary().API.Bridges(ctx) }

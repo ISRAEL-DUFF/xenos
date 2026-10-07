@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -308,6 +309,20 @@ func hostChecks(ctx context.Context, d Deps, g, host string, api proxmox.API, st
 		r = append(r, res(g, "firewall", OK, "on at datacenter and node level: guests are MAC and IP filtered"))
 	}
 
+	pb := d.Cfg.PVEPrivateBridge
+	if h, ok := hostNamed(d, host); ok && h.PrivateBridge != "" {
+		pb = h.PrivateBridge
+	}
+	if pb != "" {
+		if brs, err := api.Bridges(ctx); err != nil {
+			r = append(r, res(g, "private bridge", Warn, "cannot list the host's bridges: %v", err))
+		} else if !slices.Contains(brs, pb) {
+			r = append(r, res(g, "private bridge", Warn, "bridge %q does not exist: private networks cannot be used on this host until it is created (a VLAN-aware bridge with no uplink; see deploy/proxmox/README.md)", pb))
+		} else {
+			r = append(r, res(g, "private bridge", OK, "bridge %q present", pb))
+		}
+	}
+
 	if d.Store != nil {
 		rows, err := d.Store.Pool.Query(ctx, `SELECT t.slug, COALESCE(ht.proxmox_template_id, 0) FROM templates t
 			LEFT JOIN host_templates ht ON ht.template_id = t.id AND ht.host = $1 WHERE t.active ORDER BY t.id`, host)
@@ -384,4 +399,11 @@ func Summary(rs []Result) (ok, warn, fail int) {
 		}
 	}
 	return
+}
+
+func hostNamed(d Deps, name string) (*hosts.Host, bool) {
+	if d.Hosts == nil {
+		return nil, false
+	}
+	return d.Hosts.Get(name)
 }

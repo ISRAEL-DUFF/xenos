@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +50,11 @@ func (c *Client) Isolate(ctx context.Context, vmid int, allowed []string) error 
 		return err
 	}
 
+	return c.syncIPSet(ctx, base, ipsetName, allowed)
+}
+
+// syncIPSet makes the named firewall IP set hold exactly the allowed addresses (creating it if needed).
+func (c *Client) syncIPSet(ctx context.Context, base, set string, allowed []string) error {
 	var sets []struct {
 		Name string `json:"name"`
 	}
@@ -57,17 +63,17 @@ func (c *Client) Isolate(ctx context.Context, vmid int, allowed []string) error 
 	}
 	exists := false
 	for _, s := range sets {
-		exists = exists || s.Name == ipsetName
+		exists = exists || s.Name == set
 	}
 	if !exists {
-		if err := c.do(ctx, http.MethodPost, base+"/firewall/ipset", url.Values{"name": {ipsetName}}, nil); err != nil {
+		if err := c.do(ctx, http.MethodPost, base+"/firewall/ipset", url.Values{"name": {set}}, nil); err != nil {
 			return err
 		}
 	}
 	var have []struct {
 		CIDR string `json:"cidr"`
 	}
-	if err := c.do(ctx, http.MethodGet, base+"/firewall/ipset/"+ipsetName, nil, &have); err != nil {
+	if err := c.do(ctx, http.MethodGet, base+"/firewall/ipset/"+set, nil, &have); err != nil {
 		return err
 	}
 	want := map[string]bool{}
@@ -79,7 +85,7 @@ func (c *Client) Isolate(ctx context.Context, vmid int, allowed []string) error 
 		a := plainAddr(h.CIDR)
 		present[a] = true
 		if !want[a] {
-			if err := c.do(ctx, http.MethodDelete, base+"/firewall/ipset/"+ipsetName+"/"+url.PathEscape(h.CIDR), nil, nil); err != nil {
+			if err := c.do(ctx, http.MethodDelete, base+"/firewall/ipset/"+set+"/"+url.PathEscape(h.CIDR), nil, nil); err != nil {
 				return err
 			}
 		}
@@ -88,7 +94,7 @@ func (c *Client) Isolate(ctx context.Context, vmid int, allowed []string) error 
 		if present[plainAddr(a)] {
 			continue
 		}
-		if err := c.do(ctx, http.MethodPost, base+"/firewall/ipset/"+ipsetName, url.Values{"cidr": {plainAddr(a)}}, nil); err != nil {
+		if err := c.do(ctx, http.MethodPost, base+"/firewall/ipset/"+set, url.Values{"cidr": {plainAddr(a)}}, nil); err != nil {
 			return err
 		}
 	}
@@ -112,4 +118,61 @@ func (c *Client) HostFirewall(ctx context.Context) (HostFirewallState, error) {
 	}
 	s.Node, err = enabled("/nodes/" + c.node + "/firewall/options")
 	return s, err
+}
+
+// nicOpt reads one NIC option ("virtio=MAC,bridge=vmbr1,tag=5" -> "bridge" -> "vmbr1").
+func nicMAC(net string) string {
+	first, _, _ := strings.Cut(net, ",")
+	if _, mac, ok := strings.Cut(first, "="); ok {
+		return mac
+	}
+	return ""
+}
+
+func (c *Client) SetNIC(ctx context.Context, vmid int, p NICParams) error {
+	base := fmt.Sprintf("/nodes/%s/qemu/%d", c.node, vmid)
+	var cfg map[string]any
+	if err := c.do(ctx, http.MethodGet, base+"/config", nil, &cfg); err != nil {
+		return err
+	}
+	def := "virtio"
+	if cur, _ := cfg["net"+strconv.Itoa(p.Slot)].(string); cur != "" {
+		if mac := nicMAC(cur); mac != "" {
+			def = "virtio=" + mac // keep the address the guest already knows
+		}
+	}
+	net := fmt.Sprintf("%s,bridge=%s,tag=%d,firewall=1", def, p.Bridge, p.VLAN)
+	f := url.Values{fmt.Sprintf("net%d", p.Slot): {net}, fmt.Sprintf("ipconfig%d", p.Slot): {p.IPConfig}}
+	return c.do(ctx, http.MethodPut, base+"/config", f, nil)
+}
+
+func (c *Client) RemoveNIC(ctx context.Context, vmid int, slot int) error {
+	base := fmt.Sprintf("/nodes/%s/qemu/%d", c.node, vmid)
+	return c.do(ctx, http.MethodPut, base+"/config", url.Values{"delete": {fmt.Sprintf("net%d,ipconfig%d", slot, slot)}}, nil)
+}
+
+func (c *Client) IsolateNIC(ctx context.Context, vmid int, slot int, allowed []string) error {
+	base := fmt.Sprintf("/nodes/%s/qemu/%d", c.node, vmid)
+	opts := url.Values{"enable": {"1"}, "macfilter": {"1"}, "ipfilter": {"1"}, "policy_in": {"ACCEPT"}, "policy_out": {"ACCEPT"}, "dhcp": {"0"}, "ndp": {"1"}}
+	if err := c.do(ctx, http.MethodPut, base+"/firewall/options", opts, nil); err != nil {
+		return err
+	}
+	return c.syncIPSet(ctx, base, fmt.Sprintf("ipfilter-net%d", slot), allowed)
+}
+
+func (c *Client) Bridges(ctx context.Context) ([]string, error) {
+	var nets []struct {
+		Iface string `json:"iface"`
+		Type  string `json:"type"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/network", c.node), nil, &nets); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, n := range nets {
+		if n.Type == "bridge" || n.Type == "OVSBridge" {
+			out = append(out, n.Iface)
+		}
+	}
+	return out, nil
 }

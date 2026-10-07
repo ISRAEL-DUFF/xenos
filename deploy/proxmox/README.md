@@ -59,6 +59,32 @@ qm stop 9999 && qm destroy 9999 --purge
 
 The control plane reaches the host only through the Proxmox API (port 8006) with an API token, so allow 8006 **only** from the control-plane VM's IP and your own IP, and port 22 only from your IP (Proxmox firewall or the provider's firewall). Create the token with the narrowest role that can clone, configure, resize, power and destroy VMs on `vmdata` and the bridge, plus read access to node and storage status (used by the monitor). Do not use `root@pam`. The role needs, besides clone/config/power/destroy: `VM.Snapshot` and `VM.Snapshot.Rollback` (customer snapshots), `VM.Config.CPU`, `VM.Config.Memory` and `VM.Config.Disk` (resize), `VM.Console` (browser console) and `VM.GuestAgent.Unrestricted` (the boot script runs through the guest agent; on Proxmox 8 this is `VM.Monitor`). The console needs the guest to keep a **VGA display** (`qm set <template> --vga std`): a template that sets `--vga serial0` shows a blank console. Snapshots need snapshot-capable storage (LVM-thin is); they use pool space, so keep an eye on the pool alert.
 
+**Private networks.** Customers can create private networks (`/24`s from 10.64.0.0/10, one VLAN id each) and give their VMs a second NIC on one. On every host create a bridge for them, VLAN-aware and **without an uplink** (nothing outside should ever see the traffic):
+
+```
+auto vmbr1
+iface vmbr1 inet manual
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes
+    bridge-vids 2-4094
+```
+
+Set `XENOS_PVE_PRIVATE_BRIDGE` (default `vmbr1`; per host `private_bridge` in the hosts file) and the VLAN range Xenos may use with `XENOS_PRIVATE_VLAN_MIN`/`MAX` (default 1000-3999; keep any VLANs you use yourself outside it). `xenosctl preflight` warns when the bridge is missing. The guest firewall (macfilter and an `ipfilter-net1`/`net2` set holding only the VM's private address) is applied to the second NIC as it is to the first. Private addresses are applied by cloud-init: a join stops the VM, changes `net1`/`ipconfig1` and starts it, and the guest must re-read its network config at that start (the templates' cloud-init does, since the instance configuration changed); check this once on a real host. A network is **pinned to one host**: later VMs of the network are placed there. To let one network span hosts you must connect the hosts' `vmbr1` bridges yourself, then set `XENOS_PRIVATE_NETWORK_TUNNEL=true`. A VXLAN recipe, run on each host (replace the peer addresses; use the hosts' private or WireGuard addresses, never public ones unencrypted):
+
+```
+# /etc/network/interfaces.d/vxlan1 on host A (peer = host B), mirrored on B
+auto vxlan1
+iface vxlan1 inet manual
+    pre-up ip link add vxlan1 type vxlan id 4242 dstport 4789 local <A-underlay-ip> remote <B-underlay-ip> nolearning || true
+    up ip link set vxlan1 up mtu 1450
+    post-up ip link set vxlan1 master vmbr1
+    post-down ip link del vxlan1 || true
+```
+
+VXLAN and WireGuard cost MTU: private NICs should use an MTU of 1400 or less (1450 on VXLAN over a clean 1500 link, less over WireGuard); set it in the guest or have the template's cloud-init do so. Xenos cannot configure this tunnel through the Proxmox API, does not check that it works, and with more than two hosts you need a full mesh or a hub.
+
 **More than one host.** Hosts are standalone Proxmox nodes (no cluster, no shared storage), each with its own routed subnet. Describe them in a YAML file on the control plane (mode 0600, it holds the API secrets) and point `XENOS_HOSTS_FILE` at it:
 
 ```yaml

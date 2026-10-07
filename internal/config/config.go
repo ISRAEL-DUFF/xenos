@@ -57,6 +57,13 @@ type Config struct {
 	// HostsFile is a YAML file describing several Proxmox hosts (with their secrets). Empty: the single host
 	// described by XENOS_PVE_* is the only one, named "default".
 	HostsFile string
+	// Private networks: the bridge on each host that carries them, the VLAN id range Xenos may use, how many
+	// networks an account may have, and whether the operator has built a tunnel between hosts (without one a
+	// network is pinned to the host of its first VM).
+	PVEPrivateBridge               string
+	PrivateVLANMin, PrivateVLANMax int
+	PrivateNetworkLimit            int
+	PrivateNetworkTunnel           bool
 	// RAMCommitLimit is how much of a host's RAM placement may promise to VMs (1.0 = 100%).
 	RAMCommitLimit float64
 	// FloatingIPPriceUUSDT is the hourly price of one floating IP in micro-USDT (attached or not); FloatingIPLimit is how many one account may hold.
@@ -127,6 +134,17 @@ func load(check bool) (Config, error) {
 	if c.DepositLimitKobo, err = strconv.ParseInt(get("XENOS_DEPOSIT_LIMIT_KOBO", "5000000"), 10, 64); err != nil {
 		return c, fmt.Errorf("XENOS_DEPOSIT_LIMIT_KOBO: %w", err)
 	}
+	c.PVEPrivateBridge = get("XENOS_PVE_PRIVATE_BRIDGE", "vmbr1")
+	if c.PrivateVLANMin, err = strconv.Atoi(get("XENOS_PRIVATE_VLAN_MIN", "1000")); err != nil || c.PrivateVLANMin < 2 || c.PrivateVLANMin > 4094 {
+		return c, fmt.Errorf("XENOS_PRIVATE_VLAN_MIN must be 2-4094")
+	}
+	if c.PrivateVLANMax, err = strconv.Atoi(get("XENOS_PRIVATE_VLAN_MAX", "3999")); err != nil || c.PrivateVLANMax < c.PrivateVLANMin || c.PrivateVLANMax > 4094 {
+		return c, fmt.Errorf("XENOS_PRIVATE_VLAN_MAX must be between the minimum and 4094")
+	}
+	if c.PrivateNetworkLimit, err = strconv.Atoi(get("XENOS_PRIVATE_NETWORK_LIMIT", "5")); err != nil || c.PrivateNetworkLimit < 0 {
+		return c, fmt.Errorf("XENOS_PRIVATE_NETWORK_LIMIT must be a non-negative integer")
+	}
+	c.PrivateNetworkTunnel = get("XENOS_PRIVATE_NETWORK_TUNNEL", "false") == "true"
 	if c.RAMCommitLimit, err = strconv.ParseFloat(get("XENOS_RAM_COMMIT_LIMIT", "1.0"), 64); err != nil || c.RAMCommitLimit <= 0 || c.RAMCommitLimit > 4 {
 		return c, fmt.Errorf("XENOS_RAM_COMMIT_LIMIT must be a number above 0 and at most 4 (1.0 = 100%%)")
 	}

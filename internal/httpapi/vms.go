@@ -47,6 +47,8 @@ type vmJSON struct {
 	// Host is the Proxmox host the VM lives on; SpreadGroup is the anti-affinity group it was created with.
 	Host        string `json:"host"`
 	SpreadGroup string `json:"spread_group,omitempty"`
+	// PrivateIPs are the VM's addresses on its private networks (detail views only).
+	PrivateIPs []privateIPJSON `json:"private_ips,omitempty"`
 	// Detail view only: what this VM has cost so far this UTC month.
 	MonthCostUUSDT *int64 `json:"month_cost_uusdt,omitempty"`
 }
@@ -105,6 +107,8 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		// SpreadGroup puts VMs of one group on different hosts; Spread "prefer" lets them share when no other host fits.
 		SpreadGroup string `json:"spread_group"`
 		Spread      string `json:"spread"`
+		// Networks are private networks (ids) to join at creation, at most two.
+		Networks []int64 `json:"networks"`
 	}
 	if !decode(w, r, &in) {
 		return
@@ -123,6 +127,11 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg != "" {
 		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
+	netIDs := uniqueIDs(in.Networks)
+	if len(netIDs) > maxVMNetworks {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("a VM can be on at most %d private networks", maxVMNetworks))
 		return
 	}
 	// Idempotency-Key makes creation at-most-once per user: a repeat returns the VM the first call made.
@@ -228,7 +237,25 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("balance must cover %d hours of usage for all your VMs (%d micro-USDT needed, %d available)", minRunwayHours, need, bal.USDTMicro)}
 			return errAbort
 		}
-		host, perr := s.placeVM(ctx, placeRequest{UserID: user.ID, TemplateID: tpl.ID, PlanRAMMB: int64(plan.RamMb),
+		// A network that already has VMs lives on their host: the new VM must go there.
+		onlyHost := ""
+		for _, nid := range netIDs {
+			n, err := q.GetUserNetwork(ctx, db.GetUserNetworkParams{ID: nid, UserID: user.ID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				apiErr = &apiError{http.StatusBadRequest, "unknown network"}
+				return errAbort
+			} else if err != nil {
+				return err
+			}
+			if n.Host.Valid && !s.Cfg.PrivateNetworkTunnel {
+				if onlyHost != "" && onlyHost != n.Host.String {
+					apiErr = &apiError{http.StatusConflict, "these networks live on different hosts: a VM cannot join both without a tunnel between hosts"}
+					return errAbort
+				}
+				onlyHost = n.Host.String
+			}
+		}
+		host, perr := s.placeVM(ctx, placeRequest{OnlyHost: onlyHost, UserID: user.ID, TemplateID: tpl.ID, PlanRAMMB: int64(plan.RamMb),
 			SpreadGroup: group, SpreadPrefer: in.Spread == "prefer"})
 		if perr != nil {
 			apiErr = perr
@@ -248,6 +275,12 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		id, err := q.CreateVM(ctx, cp)
 		if err != nil {
 			return err
+		}
+		for _, nid := range netIDs {
+			if e := s.joinNetwork(ctx, q, user.ID, id, host, nid, "attached"); e != nil {
+				apiErr = e
+				return errAbort
+			}
 		}
 		ip, err := q.ClaimFreeIP(ctx, db.ClaimFreeIPParams{Region: s.Cfg.Region, Host: host})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -328,6 +361,7 @@ func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out.MonthCostUUSDT = &cost
+	out.PrivateIPs = s.privateIPsOf(r.Context(), id)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -341,7 +375,9 @@ func (s *Server) respondVM(w http.ResponseWriter, r *http.Request, id, userID in
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, status, newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput).placed(v.Host, v.SpreadGroup))
+	out := newVMJSON(v.ID, v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, v.CiUser, v.PriceUusdtHourly, v.CreatedAt, v.Busy).withExtras(v.Labels, v.BootScriptStatus, v.BootScriptExit, v.BootScriptOutput).placed(v.Host, v.SpreadGroup)
+	out.PrivateIPs = s.privateIPsOf(r.Context(), v.ID)
+	writeJSON(w, status, out)
 }
 
 // powerAction validates the request against the VM's current state and queues

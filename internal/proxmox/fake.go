@@ -26,6 +26,8 @@ type Fake struct {
 	Execs []ExecCall
 	// Consoles lists the console connections opened so far.
 	Consoles []*FakeConsole
+	// Bridge names the fake host has (Bridges); default vmbr0 and vmbr1.
+	BridgeNames []string
 	// HostFirewallOff makes HostFirewall report the firewall as disabled.
 	HostFirewallOff bool
 	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
@@ -46,6 +48,9 @@ type FakeVM struct {
 	// Isolated is true once the guest firewall (MAC and IP filtering) is on; Allowed is the ipfilter set.
 	Isolated bool
 	Allowed  []string
+	// NICs holds the private NICs by slot; NICAllowed their ipfilter sets.
+	NICs       map[int]NICParams
+	NICAllowed map[int][]string
 }
 
 func NewFake() *Fake {
@@ -431,4 +436,62 @@ func (f *Fake) HostFirewall(context.Context) (HostFirewallState, error) {
 	defer f.mu.Unlock()
 	on := !f.HostFirewallOff
 	return HostFirewallState{Cluster: on, Node: on}, nil
+}
+
+func (f *Fake) SetNIC(_ context.Context, vmid int, p NICParams) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("setnic", vmid); err != nil {
+		return err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ErrFakeNotFound
+	}
+	if vm.NICs == nil {
+		vm.NICs = map[int]NICParams{}
+	}
+	vm.NICs[p.Slot] = p
+	return nil
+}
+
+func (f *Fake) RemoveNIC(_ context.Context, vmid int, slot int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("removenic", vmid); err != nil {
+		return err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ErrFakeNotFound
+	}
+	delete(vm.NICs, slot)
+	delete(vm.NICAllowed, slot)
+	return nil
+}
+
+func (f *Fake) IsolateNIC(_ context.Context, vmid int, slot int, allowed []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.op("isolatenic", vmid); err != nil {
+		return err
+	}
+	vm, ok := f.VMs[vmid]
+	if !ok {
+		return ErrFakeNotFound
+	}
+	if vm.NICAllowed == nil {
+		vm.NICAllowed = map[int][]string{}
+	}
+	vm.NICAllowed[slot] = append([]string(nil), allowed...)
+	return nil
+}
+
+func (f *Fake) Bridges(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.BridgeNames != nil {
+		return f.BridgeNames, nil
+	}
+	return []string{"vmbr0", "vmbr1"}, nil
 }

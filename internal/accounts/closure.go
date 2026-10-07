@@ -66,6 +66,11 @@ func CloseBlockers(ctx context.Context, st *store.Store, is billing.ISpend, u db
 	} else if n > 0 {
 		out = append(out, Blocker{"floating", "Release your floating IPs first: they are billed by the hour until you do."})
 	}
+	if n, err := st.Q.CountUserNetworks(ctx, u.ID); err != nil {
+		return nil, err
+	} else if n > 0 {
+		out = append(out, Blocker{"networks", "Delete your private networks first."})
+	}
 	if owed, err := st.Q.UserUnpaidTotal(ctx, u.ID); err != nil {
 		return nil, err
 	} else if owed > 0 {
@@ -102,6 +107,11 @@ func Close(ctx context.Context, st *store.Store, q *jobs.Queue, is billing.ISpen
 		} else if n > 0 {
 			return errStillHasFloating
 		}
+		if n, err := qr.CountUserNetworks(ctx, u.ID); err != nil {
+			return err
+		} else if n > 0 {
+			return errStillHasNetworks
+		}
 		if !opt.DeleteVMs {
 			if live, err := qr.UserHasLiveVMs(ctx, u.ID); err != nil {
 				return err
@@ -133,6 +143,9 @@ func Close(ctx context.Context, st *store.Store, q *jobs.Queue, is billing.ISpen
 		}
 		return nil
 	})
+	if errors.Is(err, errStillHasNetworks) {
+		return []Blocker{{"networks", "Delete your private networks first."}}, nil
+	}
 	if errors.Is(err, errStillHasFloating) {
 		return []Blocker{{"floating", "Release your floating IPs first: they are billed by the hour until you do."}}, nil
 	}
@@ -141,6 +154,8 @@ func Close(ctx context.Context, st *store.Store, q *jobs.Queue, is billing.ISpen
 	}
 	return nil, err
 }
+
+var errStillHasNetworks = errors.New("the account still has private networks")
 
 var errStillHasFloating = errors.New("the account still has floating IPs")
 

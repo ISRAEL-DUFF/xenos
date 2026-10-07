@@ -36,6 +36,7 @@ const (
 	JobRestore        = "vm.restore"         // roll the disk back to a snapshot
 	JobRebuild        = "vm.rebuild"         // reinstall from a template, keeping the VM's IP and plan
 	JobBootScript     = "vm.bootscript"      // run the customer's boot script once, through the guest agent
+	JobNetwork        = "vm.network"         // attach or detach a private network NIC (stop, change, start)
 	JobFloating       = "vm.floating"        // make a floating IP's firewall set and guest address match where it points
 )
 
@@ -53,6 +54,8 @@ type Payload struct {
 	SnapshotID int64 `json:"snapshot_id,omitempty"`
 	// FloatingID is the floating_ips row a floating job reconciles (VMID is unused then).
 	FloatingID int64 `json:"floating_id,omitempty"`
+	// NetworkID and Action ("attach" or "detach") describe a private network change.
+	NetworkID int64 `json:"network_id,omitempty"`
 }
 
 type Config struct {
@@ -65,6 +68,14 @@ type Config struct {
 	IPv6Prefix    netip.Prefix // zero value disables IPv6
 	IPv6Gateway   string
 	Nameservers   string
+	PrivateBridge string // the bridge private-network NICs attach to
+}
+
+func (c Config) privateBridge() string {
+	if c.PrivateBridge == "" {
+		return "vmbr1"
+	}
+	return c.PrivateBridge
 }
 
 type Provisioner struct {
@@ -136,6 +147,7 @@ func (p *Provisioner) Handlers() map[string]jobs.Handler {
 		JobRebuild:        p.handle(p.rebuild),
 		JobBootScript:     p.handle(p.bootScript),
 		JobFloating:       p.floating,
+		JobNetwork:        p.handle(p.network),
 	}
 }
 
@@ -211,14 +223,18 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 		}
 	}
 
+	nics, err := p.privateNICs(ctx, w.ID)
+	if err != nil {
+		return err
+	}
 	if err := p.createGuest(ctx, guestSpec{
-		Host: w.Host, VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.ProxmoxTemplateID), CIUser: w.CiUser, Keys: w.AuthorizedKeys,
+		Private: nics, Host: w.Host, VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.ProxmoxTemplateID), CIUser: w.CiUser, Keys: w.AuthorizedKeys,
 		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: ipv6, Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
 		return err
 	}
 	// Billing starts now, at the top of the current hour (hours are charged in advance).
 	// A VM that never reaches running is never charged, so a failed build needs no refund.
-	err := p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+	err = p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
 		if _, err := q.MarkVMRunning(ctx, db.MarkVMRunningParams{ID: w.ID, BillingFrom: tsOf(p.now().Truncate(time.Hour))}); err != nil {
 			return err
 		}
@@ -235,7 +251,19 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 }
 
 // guestSpec is everything needed to clone, configure and start a guest from a template.
+// PrivateNIC is one private-network interface a guest is built with.
+type PrivateNIC struct {
+	Slot, VLAN int
+	Address    string // the VM's address, e.g. 10.64.0.5
+	PrefixLen  int
+}
+
+func (n PrivateNIC) params(bridge string) proxmox.NICParams {
+	return proxmox.NICParams{Slot: n.Slot, Bridge: bridge, VLAN: n.VLAN, IPConfig: fmt.Sprintf("ip=%s/%d", n.Address, n.PrefixLen)}
+}
+
 type guestSpec struct {
+	Private                 []PrivateNIC
 	Host                    string
 	VMID, TemplateVMID      int
 	Name, CIUser, Keys      string
@@ -283,6 +311,14 @@ func (p *Provisioner) createGuest(ctx context.Context, g guestSpec) error {
 	// Before the guest ever runs: it may only use its own MAC and the addresses it was given.
 	if err := p.PVE.Isolate(ctx, g.VMID, g.allowedAddrs()); err != nil {
 		return fmt.Errorf("firewall: %w", err)
+	}
+	for _, n := range g.Private {
+		if err := p.PVE.SetNIC(ctx, g.VMID, n.params(hc.privateBridge())); err != nil {
+			return fmt.Errorf("private network nic: %w", err)
+		}
+		if err := p.PVE.IsolateNIC(ctx, g.VMID, n.Slot, []string{n.Address}); err != nil {
+			return fmt.Errorf("private network firewall: %w", err)
+		}
 	}
 	if upid, err = p.PVE.Power(ctx, g.VMID, "start"); err != nil {
 		return fmt.Errorf("start: %w", err)
@@ -435,6 +471,19 @@ func (p *Provisioner) delete(ctx context.Context, _ *jobs.Job, in Payload) error
 	}
 	if err := p.Store.Q.ReleaseIPForVM(ctx, pgtype.Int8{Int64: w.ID, Valid: true}); err != nil {
 		return err
+	}
+	// Its private addresses are free again, and a network it was the last member of can move hosts.
+	nets, err := p.Store.Q.NetworkIDsOfVM(ctx, w.ID)
+	if err != nil {
+		return err
+	}
+	if err := p.Store.Q.DeleteVMPrivateIPs(ctx, w.ID); err != nil {
+		return err
+	}
+	for _, id := range nets {
+		if err := p.Store.Q.UnpinEmptyNetwork(ctx, id); err != nil {
+			return err
+		}
 	}
 	// Its floating IPs stay with the account but no longer point here.
 	if err := p.Store.Q.DetachFloatingFromVM(ctx, pgtype.Int8{Int64: w.ID, Valid: true}); err != nil {
