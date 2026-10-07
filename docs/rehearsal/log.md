@@ -83,3 +83,14 @@ The user showed the environment settings: Network access is already **Full** (an
 **Consequence:** Claude cannot run commands on the VPS from this environment. The rehearsal continues another way (the user's choice), and this log keeps the same format.
 
 **Clean-up on the VPS:** the extra sshd ports (80, 443, 2222, 4443, 8080, 8443) were added only for these probes. Remove them: delete the added `Port` lines from `/etc/ssh/sshd_config` (keep `Port 22`), run `sshd -t && systemctl restart ssh`, and change the root password that was shared in chat.
+
+---
+
+### Step 0f: New session, re-checked; rehearsal continues by relay   PASS
+2026-10-07 UTC
+
+**What was done:** in a fresh session, checked once more before asking anything of the user: the `SSH_*` variables are present, `ssh` is not installed (new container), and a raw TCP probe to `<vps-ip>:22` is still blocked. Nothing else was tried (see 0e).
+
+**Result:** the sandbox still cannot reach the VPS. From here on the rehearsal runs **by relay**: the user runs each step's commands on the VPS and pastes the output; Claude reads it, decides the Check verdict, and writes the log, the issues table and the transcript.
+
+**Notes for the team:** in relay mode, paste the full output of each command block (secrets and the real IP may be left in; they are redacted before anything is written here).
