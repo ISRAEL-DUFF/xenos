@@ -78,3 +78,13 @@ SELECT id FROM vms WHERE user_id = $1 AND state IN ('running', 'stopped');
 
 -- name: MarkAUP :exec
 UPDATE users SET aup_accepted_at = $2 WHERE id = $1;
+
+-- name: ListRunningVMsToCheck :many
+-- Running VMs that nothing is working on: not busy, and no power, suspend, delete or resize job queued, running or
+-- finished in the last five minutes (a customer's own stop must not be undone).
+SELECT v.id, v.host, v.proxmox_vmid, v.hostname FROM vms v
+WHERE v.state = 'running' AND v.busy IS NULL AND v.proxmox_vmid IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM jobs j
+                  WHERE j.kind IN ('vm.power', 'vm.suspend', 'vm.delete', 'vm.resize', 'vm.rebuild', 'vm.restore', 'vm.resume')
+                    AND j.payload->>'vm_id' = v.id::text
+                    AND (j.status IN ('queued', 'running') OR j.created_at > now() - interval '5 minutes'));

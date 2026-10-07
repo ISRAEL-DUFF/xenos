@@ -87,7 +87,7 @@ func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing
 	if !notifier.Configured() {
 		log.Warn("no alert channel configured (XENOS_TELEGRAM_* or XENOS_ALERT_EMAIL): alerts will only appear in the log")
 	}
-	mon := &monitor.Monitor{Store: st, PVE: hs, Hosts: hs, Notify: notifier, Log: log, Cfg: monitor.DefaultConfig(cfg.PVEStorage), Metrics: m}
+	mon := &monitor.Monitor{Store: st, PVE: hs, Hosts: hs, Jobs: q, Notify: notifier, Log: log, Cfg: monitor.DefaultConfig(cfg.PVEStorage), Metrics: m}
 	go mon.Run(ctx, meterInterval)
 	go func() {
 		t := time.NewTicker(meterInterval)

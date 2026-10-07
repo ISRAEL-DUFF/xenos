@@ -265,6 +265,49 @@ func (q *Queries) ListRunningVMsForCPU(ctx context.Context) ([]ListRunningVMsFor
 	return items, nil
 }
 
+const listRunningVMsToCheck = `-- name: ListRunningVMsToCheck :many
+SELECT v.id, v.host, v.proxmox_vmid, v.hostname FROM vms v
+WHERE v.state = 'running' AND v.busy IS NULL AND v.proxmox_vmid IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM jobs j
+                  WHERE j.kind IN ('vm.power', 'vm.suspend', 'vm.delete', 'vm.resize', 'vm.rebuild', 'vm.restore', 'vm.resume')
+                    AND j.payload->>'vm_id' = v.id::text
+                    AND (j.status IN ('queued', 'running') OR j.created_at > now() - interval '5 minutes'))
+`
+
+type ListRunningVMsToCheckRow struct {
+	ID          int64       `json:"id"`
+	Host        string      `json:"host"`
+	ProxmoxVmid pgtype.Int4 `json:"proxmox_vmid"`
+	Hostname    string      `json:"hostname"`
+}
+
+// Running VMs that nothing is working on: not busy, and no power, suspend, delete or resize job queued, running or
+// finished in the last five minutes (a customer's own stop must not be undone).
+func (q *Queries) ListRunningVMsToCheck(ctx context.Context) ([]ListRunningVMsToCheckRow, error) {
+	rows, err := q.db.Query(ctx, listRunningVMsToCheck)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRunningVMsToCheckRow{}
+	for rows.Next() {
+		var i ListRunningVMsToCheckRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Host,
+			&i.ProxmoxVmid,
+			&i.Hostname,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnalertedFailedJobs = `-- name: ListUnalertedFailedJobs :many
 SELECT id, kind, COALESCE(last_error, '')::text AS last_error FROM jobs
 WHERE status = 'failed' AND alerted_at IS NULL ORDER BY id LIMIT 20

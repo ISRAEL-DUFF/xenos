@@ -51,7 +51,9 @@ type Monitor struct {
 	Store *store.Store
 	PVE   proxmox.API
 	// Hosts, when set, is watched host by host; without it PVE is the one host.
-	Hosts  *hosts.Set
+	Hosts *hosts.Set
+	// Jobs queues the restarts restartDown asks for; nil disables them.
+	Jobs   *jobqueue.Queue
 	Notify *alert.Notifier
 	Log    *slog.Logger
 	Now    func() time.Time
@@ -90,7 +92,7 @@ func (m *Monitor) Tick(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, check := range []func(context.Context) error{
-		m.failedJobs, m.hostCapacity, m.freeIPs, m.billing, m.webhooks, m.cpuWatch, m.purgeClosed, m.floatingCheck,
+		m.failedJobs, m.hostCapacity, m.freeIPs, m.billing, m.webhooks, m.cpuWatch, m.purgeClosed, m.floatingCheck, m.restartDown,
 	} {
 		if err := check(ctx); err != nil {
 			errs = append(errs, err)
@@ -336,6 +338,50 @@ func (m *Monitor) floatingCheck(ctx context.Context) error {
 		if err := jobqueue.EnqueueTx(ctx, m.Store.Pool, vm.JobFloating, vm.Payload{FloatingID: id}); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// restartDown starts guests that Xenos believes are running but that the host reports stopped: after a host reboot or
+// power cut Proxmox does not bring guests back by itself, and a crashed guest would otherwise sit down while the
+// customer is still billed. A VM with recent power activity is left alone, so a customer's own stop is never undone,
+// and a host that does not answer is skipped (its VMs' state is unknown).
+func (m *Monitor) restartDown(ctx context.Context) error {
+	if m.Jobs == nil {
+		return nil
+	}
+	candidates, err := m.Store.Q.ListRunningVMsToCheck(ctx)
+	if err != nil || len(candidates) == 0 {
+		return err
+	}
+	down := map[string]map[int]bool{} // host -> vmid of guests that exist and are not running
+	for _, t := range m.targets(ctx) {
+		guests, err := t.api.Guests(ctx)
+		if err != nil {
+			continue
+		}
+		set := map[int]bool{}
+		for _, g := range guests {
+			if !g.Running {
+				set[g.VMID] = true
+			}
+		}
+		down[t.name] = set
+	}
+	var started []string
+	for _, v := range candidates {
+		if !down[v.Host][int(v.ProxmoxVmid.Int32)] {
+			continue
+		}
+		if err := m.Jobs.Enqueue(ctx, vm.JobPower, vm.Payload{VMID: v.ID, Action: vm.ActionStart}); err != nil {
+			return err
+		}
+		started = append(started, fmt.Sprintf("%d (%s)", v.ID, v.Hostname))
+	}
+	if len(started) > 0 {
+		m.Log.Warn("restarting guests that were found stopped", "vms", started)
+		m.Notify.Notify(ctx, "vms-restarted", time.Hour,
+			fmt.Sprintf("%d VM(s) were running in Xenos but stopped on the host and are being started again (a host reboot, power cut or crash): %s", len(started), strings.Join(started, ", ")))
 	}
 	return nil
 }

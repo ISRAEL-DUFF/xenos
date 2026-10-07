@@ -14,6 +14,7 @@ import (
 
 	"github.com/israel-duff/xenos/internal/alert"
 	"github.com/israel-duff/xenos/internal/hosts"
+	jobqueue "github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
@@ -58,7 +59,7 @@ func newEnv(t *testing.T) *env {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	clock := func() time.Time { return e.now }
 	n := &alert.Notifier{Store: e.st, Log: log, Now: clock, Mailer: e.box, ToEmail: "ops@x.co"}
-	e.mon = &Monitor{Store: e.st, PVE: e.pve, Notify: n, Log: log, Now: clock, Cfg: DefaultConfig("vmdata")}
+	e.mon = &Monitor{Store: e.st, PVE: e.pve, Notify: n, Log: log, Now: clock, Cfg: DefaultConfig("vmdata"), Jobs: jobqueue.New(e.st.Pool)}
 	e.mon.Cfg.MinFreeIPs = 0 // most tests have an empty IP pool
 	return e
 }
@@ -310,5 +311,45 @@ func TestEachHostIsWatchedAndAlertedByName(t *testing.T) {
 	e.tick()
 	if e.box.count("host pve2") != before {
 		t.Fatal("a disabled host must not alert")
+	}
+}
+
+func TestGuestsFoundStoppedAfterAHostRebootAreStartedAgain(t *testing.T) {
+	e := newEnv(t)
+	uid := e.user()
+	down := e.runningVM(uid, 301)
+	stopped := e.runningVM(uid, 302)
+	e.pve.VMs[301].Running = false // the host rebooted and did not bring it back
+	e.pve.VMs[302].Running = false // the customer stopped this one a moment ago
+	e.exec(`INSERT INTO jobs (kind, payload, status) VALUES ('vm.power', jsonb_build_object('vm_id', $1::bigint, 'action', 'stop'), 'done')`, stopped)
+	e.tick()
+	var n, forDown, forStopped int
+	_ = e.st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM jobs WHERE kind='vm.power' AND status='queued'`).Scan(&n)
+	_ = e.st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM jobs WHERE kind='vm.power' AND status='queued' AND payload->>'vm_id' = $1`, fmt.Sprint(down)).Scan(&forDown)
+	_ = e.st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM jobs WHERE kind='vm.power' AND status='queued' AND payload->>'vm_id' = $1`, fmt.Sprint(stopped)).Scan(&forStopped)
+	if forDown != 1 || forStopped != 0 || n != 1 {
+		t.Fatalf("queued start jobs: down=%d customer-stopped=%d total=%d", forDown, forStopped, n)
+	}
+	if e.box.count("being started again") != 1 {
+		t.Fatalf("an alert should say so: %v", e.box.sent)
+	}
+	// A second tick while the start is queued does not queue another.
+	e.tick()
+	_ = e.st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM jobs WHERE kind='vm.power' AND status='queued'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("a second start was queued: %d", n)
+	}
+}
+
+func TestAnUnreachableHostIsNotMistakenForStoppedGuests(t *testing.T) {
+	e := newEnv(t)
+	uid := e.user()
+	e.runningVM(uid, 303)
+	e.pve.Fail["guests"] = fmt.Errorf("connection refused")
+	e.tick()
+	var n int
+	_ = e.st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM jobs WHERE kind='vm.power'`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("nothing may be started when the host did not answer: %d", n)
 	}
 }
