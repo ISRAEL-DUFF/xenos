@@ -15,6 +15,7 @@ import (
 	"github.com/israel-duff/xenos/internal/httpapi"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
+	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/worker"
 	"github.com/israel-duff/xenos/web"
@@ -57,23 +58,31 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	m := metrics.New()
+	ispend = metrics.WrapISpend(ispend, m)
 	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mailer, log, web.Dist())
 	pve := worker.NewProxmox(cfg, log)
 	if cfg.PVEURL != "" || cfg.RunWorker { // capacity view and console need a host (the fake, in development)
 		srv.PVE = pve
 	}
+	srv.Metrics = m
 	hs := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Router(), ReadHeaderTimeout: 10 * time.Second}
 
 	if cfg.RunWorker {
 		// Development convenience: the fake iSpend only lives inside one process.
 		log.Warn("XENOS_RUN_WORKER=true: running the worker inside the API process")
 		go func() {
-			if err := worker.RunWith(ctx, cfg, st, ispend, mailer, log, pve); err != nil {
+			if err := worker.RunWith(ctx, cfg, st, ispend, mailer, log, pve, m); err != nil {
 				log.Error("worker stopped", "err", err)
 			}
 		}()
 	}
 
+	go func() {
+		if err := metrics.Serve(ctx, cfg.MetricsAddr, m, log); err != nil && ctx.Err() == nil {
+			log.Error("metrics listener", "err", err)
+		}
+	}()
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 10*time.Second)

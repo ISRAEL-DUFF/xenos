@@ -22,9 +22,13 @@ type Job struct {
 	Attempts int
 }
 
-type Queue struct{ pool *pgxpool.Pool }
+type Queue struct {
+	pool *pgxpool.Pool
+	// Observe, if set, is told how every job ended: result is "ok", "error" or "interrupted".
+	Observe func(kind, result string, d time.Duration)
+}
 
-func New(pool *pgxpool.Pool) *Queue { return &Queue{pool} }
+func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 
 // Execer is satisfied by *pgxpool.Pool and pgx.Tx.
 type Execer interface {
@@ -132,16 +136,20 @@ func (q *Queue) loop(ctx context.Context, handlers map[string]Handler, onErr fun
 				_ = q.Fail(done, &Job{ID: j.ID, Attempts: MaxAttempts}, errors.New("no handler for "+j.Kind))
 				continue
 			}
+			start := time.Now()
 			if err := h(ctx, j); err != nil {
 				if ctx.Err() != nil {
 					// Interrupted by shutdown, not a real failure: retry without penalty.
+					q.observe(j.Kind, "interrupted", start)
 					_ = q.Requeue(done, j)
 					return
 				}
+				q.observe(j.Kind, "error", start)
 				onErr(err)
 				_ = q.Fail(done, j, err)
 				continue
 			}
+			q.observe(j.Kind, "ok", start)
 			_ = q.Done(done, j.ID)
 		}
 		select {
@@ -149,5 +157,11 @@ func (q *Queue) loop(ctx context.Context, handlers map[string]Handler, onErr fun
 			return
 		case <-t.C:
 		}
+	}
+}
+
+func (q *Queue) observe(kind, result string, start time.Time) {
+	if q.Observe != nil {
+		q.Observe(kind, result, time.Since(start))
 	}
 }

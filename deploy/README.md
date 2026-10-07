@@ -35,6 +35,7 @@ XENOS_HTTP_ADDR=127.0.0.1:8080
 XENOS_PUBLIC_URL=https://api.example.com
 XENOS_COOKIE_SECURE=true
 XENOS_TRUST_PROXY=true     # Caddy is on loopback; list other proxy addresses in XENOS_TRUSTED_PROXIES
+XENOS_METRICS_ADDR=127.0.0.1:9090          # loopback only; the worker uses XENOS_WORKER_METRICS_ADDR (9091)
 XENOS_ENV=production       # refuses to start without real iSpend, SMTP and secure cookies
 XENOS_SMTP_HOST=smtp.<provider>
 XENOS_SMTP_PORT=587

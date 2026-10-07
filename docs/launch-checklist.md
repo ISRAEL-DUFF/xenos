@@ -39,6 +39,8 @@ Run `xenosctl preflight` on the server first (add `--send-test you@example.com` 
 - [ ] **auto** Plans and templates: validation, immutable sizes, price changes preview then confirm, disabled plans hidden but existing VMs still bill, audit for CLI and web: `internal/catalogue/catalogue_test.go`, `TestAdminCatalogue`
 - [ ] **host** Add a template with `xenosctl template add` against the real host: it is refused for a VMID that does not exist there
 - [ ] **auto** Statements: totals equal the charges in the month (UTC boundaries, capped and refunded hours), other accounts never appear, CSV is spreadsheet-safe, label grouping, readable with an API token: `internal/httpapi/statements_test.go`
+- [ ] **auto** Metrics: route patterns not raw paths, job/ISpend/meter/capacity series, database gauges, alert rules reference real metrics, nothing on the public port: `internal/metrics/metrics_test.go`, `internal/httpapi/metrics_test.go`
+- [ ] **manual** Prometheus scrapes both processes and `promtool check rules deploy/prometheus/alerts.yml` passes (see `deploy/prometheus/README.md`; note Prometheus's own default port 9090 collides with the API's)
 - [ ] **host** Take two snapshots, change a file, restore the first: the file change is gone and the VM comes back. Check the API token role has the snapshot privileges
 - [ ] **host** The browser console shows the login prompt of a running VM and accepts typing (the host's VNC password handshake and `vncwebsocket` authentication with the API token are only proven against the real host)
 - [ ] **host** The `root` login works over SSH with the injected key (Ubuntu cloud images may refuse direct root login; confirm and adjust `templates.ci_user`)

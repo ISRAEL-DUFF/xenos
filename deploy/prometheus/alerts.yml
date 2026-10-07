@@ -1,0 +1,119 @@
+# Alert rules for Xenos. Operator chat alerts (Telegram or email) already cover failed jobs, pool and RAM
+# thresholds and stuck billing from inside the worker; these rules add what only a time series can say, and keep
+# working when the worker itself is the thing that is down.
+groups:
+  - name: xenos
+    rules:
+      - alert: XenosWorkerDown
+        expr: up{job="xenos-worker"} == 0 or absent(up{job="xenos-worker"})
+        for: 3m
+        labels: {severity: page}
+        annotations:
+          summary: "The Xenos worker is not answering metrics scrapes"
+          description: "No jobs run, nothing is metered and nothing is monitored while it is down. Check xenos-worker.service."
+
+      - alert: XenosWorkerHeartbeatStale
+        expr: xenos_worker_heartbeat_age_seconds > 180 or xenos_worker_heartbeat_age_seconds < 0
+        for: 3m
+        labels: {severity: page}
+        annotations:
+          summary: "The worker has not written its heartbeat for over 3 minutes"
+
+      - alert: XenosApiDown
+        expr: up{job="xenos-api"} == 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "The Xenos API is not answering metrics scrapes"
+
+      - alert: XenosApiServerErrors
+        expr: sum(rate(xenos_http_requests_total{class="5xx"}[5m])) / sum(rate(xenos_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: "More than 5% of API requests are failing with a server error"
+
+      - alert: XenosMeterStalled
+        expr: time() - xenos_meter_last_success_timestamp_seconds > 600
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "No metering pass has finished cleanly for over 10 minutes"
+          description: "Hourly charges are not being collected. They are caught up later, never skipped, but a long stall delays revenue and suspensions."
+
+      - alert: XenosWalletServiceDown
+        expr: xenos_meter_ispend_down == 1
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "The wallet service (iswallet) is unreachable from the meter"
+
+      - alert: XenosWalletServiceErrors
+        expr: sum(rate(xenos_ispend_calls_total{result="error"}[10m])) / sum(rate(xenos_ispend_calls_total[10m])) > 0.2
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: "More than 20% of wallet service calls are failing"
+
+      - alert: XenosChargesStuck
+        expr: xenos_oldest_pending_charge_age_seconds > 7200
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "A charge has been pending for over 2 hours"
+
+      - alert: XenosConversionsStuck
+        expr: xenos_conversions_open{status="pending"} > 0
+        for: 30m
+        labels: {severity: warn}
+        annotations:
+          summary: "A naira conversion has been pending for over 30 minutes (liquidity or the wallet service)"
+
+      - alert: XenosJobsFailed
+        expr: sum(xenos_jobs_pending{status="failed"}) > 0
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "Jobs have failed after all retries (Admin → Jobs has the details)"
+
+      - alert: XenosJobErrorsRising
+        expr: sum(increase(xenos_jobs_total{result="error"}[15m])) > 10
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "Many job attempts are erroring: Proxmox or the network may be unhealthy"
+
+      - alert: XenosPoolNearlyFull
+        expr: xenos_host_pool_used_fraction > 0.85
+        for: 15m
+        labels: {severity: warn}
+        annotations:
+          summary: "The VM disk pool on {{ $labels.host }} is over 85% full"
+          description: "Thin provisioning lets VMs fail when it fills. Stop selling or add disk."
+
+      - alert: XenosRamOvercommitted
+        expr: xenos_host_ram_committed_fraction > 1
+        for: 15m
+        labels: {severity: warn}
+        annotations:
+          summary: "More RAM is promised to VMs on {{ $labels.host }} than the host has"
+
+      - alert: XenosFreeIPsLow
+        expr: xenos_ipv4_free < 5
+        for: 15m
+        labels: {severity: warn}
+        annotations:
+          summary: "Fewer than 5 free IPv4 addresses are left"
+
+      - alert: XenosWebhookProbing
+        expr: increase(xenos_webhooks_total{outcome="bad_signature"}[1h]) > 20
+        labels: {severity: warn}
+        annotations:
+          summary: "Many webhook requests with a bad signature in the last hour (a wrong secret, or someone probing)"
+
+      - alert: XenosRateLimitingHeavy
+        expr: sum(rate(xenos_rate_limited_total[10m])) > 1
+        for: 10m
+        labels: {severity: info}
+        annotations:
+          summary: "Requests are being rate limited steadily: a credential-stuffing attempt is possible"

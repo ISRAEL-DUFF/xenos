@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/alert"
+	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
@@ -49,6 +50,8 @@ type Monitor struct {
 	Log    *slog.Logger
 	Now    func() time.Time
 	Cfg    Config
+	// Metrics, if set, receives the host capacity readings; may be nil.
+	Metrics *metrics.Metrics
 }
 
 func (m *Monitor) now() time.Time {
@@ -115,7 +118,8 @@ func (m *Monitor) hostCapacity(ctx context.Context) error {
 		m.Notify.Notify(ctx, "proxmox-unreachable", 30*time.Minute, "Proxmox API is not answering: "+truncate(err.Error(), 200))
 		return nil
 	}
-	if f := pool.Fraction(); f >= m.Cfg.PoolWarn {
+	poolFrac := pool.Fraction()
+	if f := poolFrac; f >= m.Cfg.PoolWarn {
 		m.Notify.Notify(ctx, "pool-full", 6*time.Hour,
 			fmt.Sprintf("Disk pool %q is %.0f%% full (%d of %d GiB). Thin provisioning means VMs can fail when it fills; stop selling or add disk.",
 				m.Cfg.Storage, f*100, pool.Used>>30, pool.Total>>30))
@@ -132,7 +136,9 @@ func (m *Monitor) hostCapacity(ctx context.Context) error {
 		return err
 	}
 	if total > 0 {
-		if f := float64(committedMB<<20) / float64(total); f >= m.Cfg.RAMWarn {
+		ramFrac := float64(committedMB<<20) / float64(total)
+		m.Metrics.HostCapacity("default", poolFrac, ramFrac)
+		if f := ramFrac; f >= m.Cfg.RAMWarn {
 			m.Notify.Notify(ctx, "ram-committed", 6*time.Hour,
 				fmt.Sprintf("Host RAM is %.0f%% committed (%d MiB promised to VMs of %d MiB physical).", f*100, committedMB, total>>20))
 		}

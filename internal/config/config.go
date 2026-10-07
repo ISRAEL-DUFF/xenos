@@ -11,13 +11,15 @@ import (
 )
 
 type Config struct {
-	Env          string // "production" turns on startup checks that refuse unsafe defaults
-	HTTPAddr     string
-	DatabaseURL  string
-	Region       string
-	PublicURL    string // base URL used in emailed links
-	CookieSecure bool   // set Secure on session cookies (disable only for local http)
-	TrustProxy   bool   // trust X-Forwarded-For from the reverse proxy (Caddy)
+	Env      string // "production" turns on startup checks that refuse unsafe defaults
+	HTTPAddr string
+	// MetricsAddr and WorkerMetricsAddr are loopback listeners for Prometheus ("off" disables one).
+	MetricsAddr, WorkerMetricsAddr string
+	DatabaseURL                    string
+	Region                         string
+	PublicURL                      string // base URL used in emailed links
+	CookieSecure                   bool   // set Secure on session cookies (disable only for local http)
+	TrustProxy                     bool   // trust X-Forwarded-For from the reverse proxy (Caddy)
 	// TrustedProxies are extra proxy addresses (besides loopback) whose X-Forwarded-For is believed.
 	TrustedProxies                                   []netip.Prefix
 	SMTPHost, SMTPPort, SMTPUser, SMTPPass, MailFrom string // transactional email; any SMTP provider
@@ -62,18 +64,20 @@ func Load() (Config, error) { return load(true) }
 
 func load(check bool) (Config, error) {
 	c := Config{
-		Env:          get("XENOS_ENV", "development"),
-		HTTPAddr:     get("XENOS_HTTP_ADDR", "127.0.0.1:8080"),
-		SMTPHost:     os.Getenv("XENOS_SMTP_HOST"),
-		SMTPPort:     get("XENOS_SMTP_PORT", "587"),
-		SMTPUser:     os.Getenv("XENOS_SMTP_USER"),
-		SMTPPass:     os.Getenv("XENOS_SMTP_PASS"),
-		MailFrom:     os.Getenv("XENOS_MAIL_FROM"),
-		DatabaseURL:  os.Getenv("XENOS_DATABASE_URL"),
-		Region:       get("XENOS_REGION", "eu-de-1"),
-		PublicURL:    get("XENOS_PUBLIC_URL", "http://localhost:8080"),
-		CookieSecure: get("XENOS_COOKIE_SECURE", "true") != "false",
-		TrustProxy:   get("XENOS_TRUST_PROXY", "false") == "true",
+		Env:               get("XENOS_ENV", "development"),
+		HTTPAddr:          get("XENOS_HTTP_ADDR", "127.0.0.1:8080"),
+		MetricsAddr:       get("XENOS_METRICS_ADDR", "127.0.0.1:9090"),
+		WorkerMetricsAddr: get("XENOS_WORKER_METRICS_ADDR", "127.0.0.1:9091"),
+		SMTPHost:          os.Getenv("XENOS_SMTP_HOST"),
+		SMTPPort:          get("XENOS_SMTP_PORT", "587"),
+		SMTPUser:          os.Getenv("XENOS_SMTP_USER"),
+		SMTPPass:          os.Getenv("XENOS_SMTP_PASS"),
+		MailFrom:          os.Getenv("XENOS_MAIL_FROM"),
+		DatabaseURL:       os.Getenv("XENOS_DATABASE_URL"),
+		Region:            get("XENOS_REGION", "eu-de-1"),
+		PublicURL:         get("XENOS_PUBLIC_URL", "http://localhost:8080"),
+		CookieSecure:      get("XENOS_COOKIE_SECURE", "true") != "false",
+		TrustProxy:        get("XENOS_TRUST_PROXY", "false") == "true",
 
 		PVEURL:         os.Getenv("XENOS_PVE_URL"),
 		PVENode:        get("XENOS_PVE_NODE", "pve"),

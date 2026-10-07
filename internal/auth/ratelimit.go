@@ -13,6 +13,8 @@ type Limiter struct {
 	window time.Duration
 	hits   map[string]*bucket
 	now    func() time.Time
+	// OnDeny, if set, is called each time an attempt is refused (for metrics).
+	OnDeny func()
 }
 
 type bucket struct {
@@ -42,6 +44,9 @@ func (l *Limiter) Allow(key string) bool {
 		l.hits[key] = b
 	}
 	b.count++
+	if b.count > l.max && l.OnDeny != nil {
+		l.OnDeny()
+	}
 	return b.count <= l.max
 }
 

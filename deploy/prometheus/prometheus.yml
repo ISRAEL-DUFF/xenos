@@ -1,0 +1,21 @@
+# Prometheus on the control-plane VM, scraping the two Xenos processes on loopback.
+# Install: copy this file and alerts.yml to /etc/prometheus/, then `promtool check config prometheus.yml`.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: xenos-api
+    static_configs:
+      - targets: ["127.0.0.1:9090"]   # XENOS_METRICS_ADDR
+  - job_name: xenos-worker
+    static_configs:
+      - targets: ["127.0.0.1:9091"]   # XENOS_WORKER_METRICS_ADDR
+
+# Route alerts with Alertmanager if you run it, for example:
+# alerting:
+#   alertmanager_config:
+#     - static_configs: [{targets: ["127.0.0.1:9093"]}]

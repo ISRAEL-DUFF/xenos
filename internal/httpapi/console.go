@@ -175,6 +175,8 @@ func (s *Server) consoleSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.consoles.closed(user.ID)
+	s.Metrics.ConsoleOpened()
+	defer s.Metrics.ConsoleClosed()
 
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	upstream, err := s.PVE.DialConsole(dctx, cs.vmid, cs.ticket)

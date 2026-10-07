@@ -17,6 +17,7 @@ import (
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/metering"
+	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/monitor"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
@@ -31,12 +32,27 @@ const (
 
 // Run blocks until ctx is cancelled.
 func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger) error {
-	return RunWith(ctx, cfg, st, is, mailer, log, NewProxmox(cfg, log))
+	return RunWith(ctx, cfg, st, is, mailer, log, NewProxmox(cfg, log), nil)
 }
 
 // RunWith is Run with the Proxmox client supplied, so a process that also serves the API (development, with
 // the in-memory fake) can share one host between the worker and the console.
-func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger, pve proxmox.API) error {
+//
+// m, if given, is the metrics registry of a process that also serves the API: the worker records into it and does
+// not open a second listener. With nil, the worker makes its own and serves it on XENOS_WORKER_METRICS_ADDR.
+func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger, pve proxmox.API, m *metrics.Metrics) error {
+	if m == nil {
+		m = metrics.New()
+		is = metrics.WrapISpend(is, m)
+		m.RegisterDB(st)
+		go func() {
+			if err := metrics.Serve(ctx, cfg.WorkerMetricsAddr, m, log); err != nil && ctx.Err() == nil {
+				log.Error("worker metrics listener", "err", err)
+			}
+		}()
+	} else {
+		m.RegisterDB(st)
+	}
 	var v6 netip.Prefix
 	if cfg.IPv6Prefix != "" {
 		var err error
@@ -53,11 +69,12 @@ func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing
 
 	cache := billing.NewBalanceCache(is, 60*time.Second)
 	q := jobs.New(st.Pool)
+	q.Observe = m.JobDone
 	notifier := &alert.Notifier{Store: st, Log: log, TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID,
 		Mailer: mailer, ToEmail: cfg.AlertEmail}
 	wal := &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log, Alerter: notifier}
 	meter := &metering.Meter{Store: st, ISpend: is, Cache: cache, Jobs: q, Mailer: mailer, Log: log,
-		Grace: cfg.Grace(), MinRunwayHours: minRunway, SpreadMinutes: cfg.MeterSpreadMinutes, Alerts: notifier}
+		Grace: cfg.Grace(), MinRunwayHours: minRunway, SpreadMinutes: cfg.MeterSpreadMinutes, Alerts: notifier, Metrics: m}
 
 	handlers := prov.Handlers()
 	for k, h := range wal.Handlers() {
@@ -72,7 +89,7 @@ func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing
 	if !notifier.Configured() {
 		log.Warn("no alert channel configured (XENOS_TELEGRAM_* or XENOS_ALERT_EMAIL): alerts will only appear in the log")
 	}
-	mon := &monitor.Monitor{Store: st, PVE: pve, Notify: notifier, Log: log, Cfg: monitor.DefaultConfig(cfg.PVEStorage)}
+	mon := &monitor.Monitor{Store: st, PVE: pve, Notify: notifier, Log: log, Cfg: monitor.DefaultConfig(cfg.PVEStorage), Metrics: m}
 	go mon.Run(ctx, meterInterval)
 	go func() {
 		t := time.NewTicker(meterInterval)

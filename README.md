@@ -108,6 +108,8 @@ All five phases are code-complete and tested against fakes. What is **not** veri
 
 *Rebuild* reinstalls a VM from a template (same or another) into the same VMID, IP, plan and hostname, optionally with new SSH keys (the way back in after losing a key); it erases the disk and snapshots, needs the VM name typed, and a permanently failed rebuild marks the VM errored and stops its billing, since the old guest is already gone.
 
+**Metrics:** Prometheus metrics on loopback-only listeners (API `127.0.0.1:9090`, worker `127.0.0.1:9091`; never the public port), with scrape config and alert rules in `deploy/prometheus/`. Route labels are patterns, not paths, so cardinality stays bounded; a test checks every metric an alert rule names exists.
+
 **Statements:** `GET /v1/statements` and `/v1/statements/{yyyy-mm}` (UTC months; JSON, or `?format=csv` with one row per charged hour; `?group_by=label:<key>` totals VMs by a label, for cost per node). Every total is a sum of the rows in `usage_charges`, conversions and adjustments. The dashboard has Wallet → Statements with a print layout (the browser's Save as PDF is the PDF; there are no numbered invoices). API tokens may read statements.
 
 **Catalogue:** plans and templates are managed with `xenosctl plan|template ...` or Admin → Catalogue, not SQL. A plan's size cannot be edited (add a new slug); its hourly price can, and applies to existing VMs from the next charged hour, after a preview of how many VMs it touches and an explicit confirmation; disabling a plan or template only stops new VMs. Changes are audited (CLI changes carry `xenosctl:<user>` as the source).

@@ -21,6 +21,7 @@ import (
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
+	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
 	"github.com/israel-duff/xenos/internal/vm"
@@ -49,6 +50,8 @@ type Meter struct {
 	Alerts interface {
 		Notify(ctx context.Context, key string, cooldown time.Duration, text string)
 	}
+	// Metrics, if set, records each pass; may be nil.
+	Metrics *metrics.Metrics
 	// LockKey is the Postgres advisory lock that keeps a single meter running.
 	LockKey int64
 	// SpreadMinutes spreads each VM's hourly charge over the first part of the hour instead of
@@ -111,6 +114,7 @@ func (m *Meter) Tick(ctx context.Context) error {
 	}
 	defer func() { _, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, key) }()
 
+	started := time.Now()
 	t := &tick{m: m, now: m.now(), balances: map[string]billing.Balances{}}
 	var errs []error
 	for _, step := range []func(context.Context) error{t.retryOpen, t.chargeNew, t.finishBilling, t.enforce, t.warnLow} {
@@ -121,7 +125,9 @@ func (m *Meter) Tick(ctx context.Context) error {
 	if t.down {
 		m.Log.Warn("iSpend unreachable: charges left pending and will be retried")
 	}
-	return errors.Join(errs...)
+	err = errors.Join(errs...)
+	m.Metrics.MeterTick(time.Since(started), err == nil, t.down)
+	return err
 }
 
 type tick struct {

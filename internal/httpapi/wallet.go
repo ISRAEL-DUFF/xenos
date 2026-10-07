@@ -236,6 +236,7 @@ func (s *Server) ispendWebhook(w http.ResponseWriter, r *http.Request) {
 	ev, err := billing.ParseWebhook(s.Cfg.ISpendWebhookSecret, r.Header, body, time.Now())
 	if errors.Is(err, billing.ErrBadSignature) {
 		// Alert-worthy: repeated failures mean a wrong secret or someone probing.
+		s.Metrics.Webhook("bad_signature")
 		s.Log.Warn("webhook signature failure", "ip", s.clientIP(r))
 		// Cap what a flood can write: the monitor only needs a count above its threshold.
 		if s.webhookFailLimit.Allow(s.clientIP(r)) {
@@ -246,15 +247,19 @@ func (s *Server) ispendWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid signature")
 		return
 	} else if err != nil {
+		s.Metrics.Webhook("bad_event")
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := s.Wallet.HandleWebhook(r.Context(), ev); errors.Is(err, wallet.ErrBadEvent) {
+		s.Metrics.Webhook("bad_event")
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	} else if err != nil {
+		s.Metrics.Webhook("error")
 		s.fail(w, r, err) // 5xx makes iswallet redeliver (10 attempts, backed off), which is safe
 		return
 	}
+	s.Metrics.Webhook("accepted")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

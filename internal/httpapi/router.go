@@ -19,6 +19,7 @@ import (
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
+	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/wallet"
@@ -34,7 +35,8 @@ type Server struct {
 	Mailer  mail.Mailer
 	Wallet  *wallet.Service
 	Cache   *billing.BalanceCache
-	PVE     proxmox.API // optional; the admin capacity view reports the host as unreachable without it
+	Metrics *metrics.Metrics // optional; nil records nothing
+	PVE     proxmox.API      // optional; the admin capacity view reports the host as unreachable without it
 
 	consoles     consoleStore
 	consoleLimit *auth.Limiter
@@ -47,25 +49,31 @@ type Server struct {
 // NewServer builds a Server with its rate limiters (signup 3/hour per IP per the plan).
 func NewServer(cfg config.Config, st *store.Store, q *jobs.Queue, is billing.ISpend, m mail.Mailer, log *slog.Logger, webRoot fs.FS) *Server {
 	cache := billing.NewBalanceCache(is, 60*time.Second)
-	return &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot, Cache: cache,
+	s := &Server{Cfg: cfg, Store: st, Jobs: q, ISpend: is, Mailer: m, Log: log, WebRoot: webRoot, Cache: cache,
 		Wallet: &wallet.Service{Store: st, ISpend: is, Cache: cache, Log: log, Alerter: &alert.Notifier{Store: st, Log: log,
-			TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID, Mailer: m, ToEmail: cfg.AlertEmail}},
-		signupLimit:      auth.NewLimiter(3, time.Hour),
-		loginIPLimit:     auth.NewLimiter(30, 15*time.Minute),
-		loginAcctLimit:   auth.NewLimiter(8, 15*time.Minute),
-		resendLimit:      auth.NewLimiter(3, time.Hour),
-		webhookFailLimit: auth.NewLimiter(30, time.Minute),
-		consoleLimit:     auth.NewLimiter(10, time.Minute),
-		rebuildLimit:     auth.NewLimiter(5, time.Hour),
-		tokenLimit:       auth.NewLimiter(600, time.Minute),
-		resetLimit:       auth.NewLimiter(5, time.Hour),
-		resetTokenLimit:  auth.NewLimiter(20, 15*time.Minute),
+			TelegramToken: cfg.TelegramBotToken, TelegramChat: cfg.TelegramChatID, Mailer: m, ToEmail: cfg.AlertEmail}}}
+	// Each limiter counts its refusals under its own name; s.Metrics may be set after construction.
+	lim := func(name string, max int, window time.Duration) *auth.Limiter {
+		l := auth.NewLimiter(max, window)
+		l.OnDeny = func() { s.Metrics.RateLimited(name) }
+		return l
 	}
+	s.signupLimit = lim("signup", 3, time.Hour)
+	s.loginIPLimit = lim("login_ip", 30, 15*time.Minute)
+	s.loginAcctLimit = lim("login_account", 8, 15*time.Minute)
+	s.resendLimit = lim("resend_verification", 3, time.Hour)
+	s.webhookFailLimit = lim("webhook_failures", 30, time.Minute)
+	s.consoleLimit = lim("console", 10, time.Minute)
+	s.rebuildLimit = lim("rebuild", 5, time.Hour)
+	s.tokenLimit = lim("api_token", 600, time.Minute)
+	s.resetLimit = lim("forgot_password", 5, time.Hour)
+	s.resetTokenLimit = lim("reset_password", 20, 15*time.Minute)
+	return s
 }
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.Recoverer)
+	r.Use(middleware.RequestID, middleware.Recoverer, s.Metrics.HTTP)
 	r.Use(s.logRequests, s.securityHeaders)
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
