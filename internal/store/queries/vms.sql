@@ -78,14 +78,15 @@ LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
 WHERE v.id = $1 AND v.user_id = $2 AND v.deleted_at IS NULL;
 
 -- name: GetVMForWork :one
-SELECT v.id, v.user_id, v.hostname, v.state, v.proxmox_vmid, v.authorized_keys, v.ipv6, v.ipv4_id, v.boot_script_status,
+SELECT v.id, v.user_id, v.host, v.hostname, v.state, v.proxmox_vmid, v.authorized_keys, v.ipv6, v.ipv4_id, v.boot_script_status,
        p.vcpu, p.ram_mb, p.disk_gb,
-       t.proxmox_template_id, t.ci_user,
+       COALESCE(ht.proxmox_template_id, t.proxmox_template_id)::int AS proxmox_template_id, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4,
        COALESCE(host(ip.gateway), '')::text AS gateway
 FROM vms v
 JOIN plans p ON p.id = v.plan_id
 JOIN templates t ON t.id = v.template_id
+LEFT JOIN host_templates ht ON ht.template_id = t.id AND ht.host = v.host
 LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
 WHERE v.id = $1;
 
@@ -108,7 +109,7 @@ UPDATE vms SET plan_id = resize_plan_id, resize_plan_id = NULL, busy = NULL
 WHERE id = $1 AND busy = 'resizing' AND resize_plan_id IS NOT NULL;
 
 -- name: GetResizeWork :one
-SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.resize_plan_id,
+SELECT v.id, v.host, v.state, v.busy, v.proxmox_vmid, v.resize_plan_id,
        np.vcpu AS new_vcpu, np.ram_mb AS new_ram_mb, np.disk_gb AS new_disk_gb
 FROM vms v LEFT JOIN plans np ON np.id = v.resize_plan_id
 WHERE v.id = $1;
@@ -141,13 +142,14 @@ UPDATE vms SET busy = 'rebuilding', rebuild_template_id = $3, rebuild_keys = $4,
 WHERE id = $1 AND user_id = $2 AND busy IS NULL AND state IN ('running', 'stopped') AND deleted_at IS NULL;
 
 -- name: GetRebuildWork :one
-SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys, v.rebuild_boot_script,
+SELECT v.id, v.host, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys, v.rebuild_boot_script,
        p.vcpu, p.ram_mb, p.disk_gb,
-       COALESCE(t.proxmox_template_id, 0)::int AS template_vmid, COALESCE(t.ci_user, 'root')::text AS ci_user,
+       COALESCE(ht.proxmox_template_id, t.proxmox_template_id, 0)::int AS template_vmid, COALESCE(t.ci_user, 'root')::text AS ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4, COALESCE(host(ip.gateway), '')::text AS gateway
 FROM vms v
 JOIN plans p ON p.id = v.plan_id
 LEFT JOIN templates t ON t.id = v.rebuild_template_id
+LEFT JOIN host_templates ht ON ht.template_id = t.id AND ht.host = v.host
 LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
 WHERE v.id = $1;
 

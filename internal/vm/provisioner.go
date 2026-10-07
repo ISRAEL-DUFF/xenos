@@ -71,8 +71,11 @@ type Provisioner struct {
 	Store *store.Store
 	PVE   proxmox.API
 	Cfg   Config
-	Log   *slog.Logger
-	Now   func() time.Time // defaults to time.Now; tests inject a clock
+	// HostCfg, if set, returns the build settings of a named host (storage, disk, IPv6, nameservers, KVM);
+	// without it every host uses Cfg.
+	HostCfg func(host string) Config
+	Log     *slog.Logger
+	Now     func() time.Time // defaults to time.Now; tests inject a clock
 
 	mu    sync.Mutex
 	locks map[int64]*vmLock
@@ -105,6 +108,17 @@ func (p *Provisioner) lock(id int64) func() {
 		}
 		p.mu.Unlock()
 	}
+}
+
+// cfgFor is the configuration for building and resizing guests on a host.
+func (p *Provisioner) cfgFor(host string) Config {
+	if p.HostCfg == nil {
+		return p.Cfg
+	}
+	c := p.HostCfg(host)
+	// Timing and addressing that are not per-host come from the shared Config.
+	c.AgentTimeout, c.PollInterval, c.IPv4PrefixLen = p.Cfg.AgentTimeout, p.Cfg.PollInterval, p.Cfg.IPv4PrefixLen
+	return c
 }
 
 func (p *Provisioner) Handlers() map[string]jobs.Handler {
@@ -190,15 +204,15 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 	}
 
 	ipv6 := ""
-	if p.Cfg.IPv6Prefix.IsValid() {
-		ipv6 = IPv6For(p.Cfg.IPv6Prefix, w.ID).String()
+	if hc := p.cfgFor(w.Host); hc.IPv6Prefix.IsValid() {
+		ipv6 = IPv6For(hc.IPv6Prefix, w.ID).String()
 		if err := p.Store.Q.SetVMIPv6(ctx, db.SetVMIPv6Params{ID: w.ID, Ipv6: textOf(ipv6)}); err != nil {
 			return err
 		}
 	}
 
 	if err := p.createGuest(ctx, guestSpec{
-		VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.ProxmoxTemplateID), CIUser: w.CiUser, Keys: w.AuthorizedKeys,
+		Host: w.Host, VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.ProxmoxTemplateID), CIUser: w.CiUser, Keys: w.AuthorizedKeys,
 		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: ipv6, Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
 		return err
 	}
@@ -222,6 +236,7 @@ func (p *Provisioner) build(ctx context.Context, w db.GetVMForWorkRow) error {
 
 // guestSpec is everything needed to clone, configure and start a guest from a template.
 type guestSpec struct {
+	Host                    string
 	VMID, TemplateVMID      int
 	Name, CIUser, Keys      string
 	IPv4, Gateway, IPv6     string
@@ -244,8 +259,9 @@ func (g guestSpec) allowedAddrs() []string {
 // createGuest clones the template into spec.VMID, configures it, grows the disk, starts it and waits for the
 // guest agent. The VMID must be free. Provisioning and rebuilds share it.
 func (p *Provisioner) createGuest(ctx context.Context, g guestSpec) error {
+	hc := p.cfgFor(g.Host)
 	upid, err := p.PVE.Clone(ctx, proxmox.CloneParams{
-		TemplateID: g.TemplateVMID, NewID: g.VMID, Name: g.Name, Storage: p.Cfg.Storage})
+		TemplateID: g.TemplateVMID, NewID: g.VMID, Name: g.Name, Storage: hc.Storage})
 	if err != nil {
 		return fmt.Errorf("clone: %w", err)
 	}
@@ -255,13 +271,13 @@ func (p *Provisioner) createGuest(ctx context.Context, g guestSpec) error {
 	if err := p.PVE.Configure(ctx, g.VMID, proxmox.ConfigParams{
 		Cores: g.Cores, MemoryMB: g.MemoryMB, CIUser: g.CIUser,
 		SSHKeys:    g.Keys,
-		IPConfig0:  ipConfig(g.IPv4, p.Cfg.IPv4PrefixLen, g.Gateway, g.IPv6, p.Cfg.IPv6Gateway),
-		Nameserver: p.Cfg.Nameservers,
-		DisableKVM: p.Cfg.DisableKVM,
+		IPConfig0:  ipConfig(g.IPv4, hc.IPv4PrefixLen, g.Gateway, g.IPv6, hc.IPv6Gateway),
+		Nameserver: hc.Nameservers,
+		DisableKVM: hc.DisableKVM,
 	}); err != nil {
 		return fmt.Errorf("configure: %w", err)
 	}
-	if err := p.PVE.ResizeDisk(ctx, g.VMID, p.Cfg.Disk, g.DiskGB); err != nil {
+	if err := p.PVE.ResizeDisk(ctx, g.VMID, hc.Disk, g.DiskGB); err != nil {
 		return fmt.Errorf("resize: %w", err)
 	}
 	// Before the guest ever runs: it may only use its own MAC and the addresses it was given.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/israel-duff/xenos/internal/accounts"
 	"github.com/israel-duff/xenos/internal/alert"
+	"github.com/israel-duff/xenos/internal/hosts"
 	jobqueue "github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/proxmox"
@@ -47,8 +48,10 @@ func DefaultConfig(storage string) Config {
 }
 
 type Monitor struct {
-	Store  *store.Store
-	PVE    proxmox.API
+	Store *store.Store
+	PVE   proxmox.API
+	// Hosts, when set, is watched host by host; without it PVE is the one host.
+	Hosts  *hosts.Set
 	Notify *alert.Notifier
 	Log    *slog.Logger
 	Now    func() time.Time
@@ -113,49 +116,113 @@ func (m *Monitor) failedJobs(ctx context.Context) error {
 	return m.Store.Q.MarkJobsAlerted(ctx, db.MarkJobsAlertedParams{Column1: ids, AlertedAt: pgtype.Timestamptz{Time: m.now(), Valid: true}})
 }
 
-// hostCapacity checks the disk pool and committed RAM on the Proxmox host. If
-// the API cannot be reached at all that is itself the alert.
-func (m *Monitor) hostCapacity(ctx context.Context) error {
-	pool, err := m.PVE.StoragePool(ctx, m.Cfg.Storage)
-	if err != nil {
-		m.Notify.Notify(ctx, "proxmox-unreachable", 30*time.Minute, "Proxmox API is not answering: "+truncate(err.Error(), 200))
-		return nil
-	}
-	poolFrac := pool.Fraction()
-	if f := poolFrac; f >= m.Cfg.PoolWarn {
-		m.Notify.Notify(ctx, "pool-full", 6*time.Hour,
-			fmt.Sprintf("Disk pool %q is %.0f%% full (%d of %d GiB). Thin provisioning means VMs can fail when it fills; stop selling or add disk.",
-				m.Cfg.Storage, f*100, pool.Used>>30, pool.Total>>30))
-	}
+// target is one host to watch.
+type target struct {
+	name    string
+	api     proxmox.API
+	storage string
+}
 
-	node, err := m.PVE.NodeInfo(ctx)
-	total := node.MemTotal
-	if err != nil {
-		m.Notify.Notify(ctx, "proxmox-unreachable", 30*time.Minute, "Proxmox API is not answering: "+truncate(err.Error(), 200))
-		return nil
+// targets lists the hosts to watch: every enabled host of the set, or the single PVE client.
+func (m *Monitor) targets(ctx context.Context) []target {
+	if m.Hosts == nil {
+		return []target{{"default", m.PVE, m.Cfg.Storage}}
 	}
-	committedMB, err := m.Store.Q.CommittedRAMMB(ctx)
+	status := map[string]string{}
+	if rows, err := m.Store.Q.ListHosts(ctx); err == nil {
+		for _, r := range rows {
+			status[r.Name] = r.Status
+		}
+	}
+	var out []target
+	for _, h := range m.Hosts.All() {
+		if status[h.Name] == "disabled" {
+			continue
+		}
+		out = append(out, target{h.Name, h.API, h.Storage})
+	}
+	return out
+}
+
+// key names an alert per host; with one host it keeps the plain key.
+func (m *Monitor) key(base, host string) string {
+	if m.Hosts == nil || len(m.Hosts.Names()) == 1 {
+		return base
+	}
+	return base + "-" + host
+}
+
+func (m *Monitor) where(host string) string {
+	if m.Hosts == nil || len(m.Hosts.Names()) == 1 {
+		return ""
+	}
+	return " (host " + host + ")"
+}
+
+// hostCapacity checks the disk pool and committed RAM of every host. If a host's API cannot be reached at all
+// that is itself the alert.
+func (m *Monitor) hostCapacity(ctx context.Context) error {
+	committed := map[string]int64{}
+	rows, err := m.Store.Q.HostCommittedRAM(ctx)
 	if err != nil {
 		return err
 	}
-	if total > 0 {
-		ramFrac := float64(committedMB<<20) / float64(total)
-		m.Metrics.HostCapacity("default", poolFrac, ramFrac)
-		if f := ramFrac; f >= m.Cfg.RAMWarn {
-			m.Notify.Notify(ctx, "ram-committed", 6*time.Hour,
-				fmt.Sprintf("Host RAM is %.0f%% committed (%d MiB promised to VMs of %d MiB physical).", f*100, committedMB, total>>20))
+	for _, r := range rows {
+		committed[r.Host] = r.RamMb
+	}
+	for _, t := range m.targets(ctx) {
+		pool, err := t.api.StoragePool(ctx, t.storage)
+		if err != nil {
+			m.Notify.Notify(ctx, m.key("proxmox-unreachable", t.name), 30*time.Minute, "Proxmox API is not answering"+m.where(t.name)+": "+truncate(err.Error(), 200))
+			continue
+		}
+		poolFrac := pool.Fraction()
+		if f := poolFrac; f >= m.Cfg.PoolWarn {
+			m.Notify.Notify(ctx, m.key("pool-full", t.name), 6*time.Hour,
+				fmt.Sprintf("Disk pool %q%s is %.0f%% full (%d of %d GiB). Thin provisioning means VMs can fail when it fills; stop selling or add disk.",
+					t.storage, m.where(t.name), f*100, pool.Used>>30, pool.Total>>30))
+		}
+		node, err := t.api.NodeInfo(ctx)
+		if err != nil {
+			m.Notify.Notify(ctx, m.key("proxmox-unreachable", t.name), 30*time.Minute, "Proxmox API is not answering"+m.where(t.name)+": "+truncate(err.Error(), 200))
+			continue
+		}
+		if node.MemTotal > 0 {
+			mb := committed[t.name]
+			ramFrac := float64(mb<<20) / float64(node.MemTotal)
+			m.Metrics.HostCapacity(t.name, poolFrac, ramFrac)
+			if f := ramFrac; f >= m.Cfg.RAMWarn {
+				m.Notify.Notify(ctx, m.key("ram-committed", t.name), 6*time.Hour,
+					fmt.Sprintf("Host RAM%s is %.0f%% committed (%d MiB promised to VMs of %d MiB physical).", m.where(t.name), f*100, mb, node.MemTotal>>20))
+			}
 		}
 	}
 	return nil
 }
 
 func (m *Monitor) freeIPs(ctx context.Context) error {
-	n, err := m.Store.Q.CountFreeIPs(ctx)
+	if m.Hosts == nil || len(m.Hosts.Names()) == 1 {
+		n, err := m.Store.Q.CountFreeIPs(ctx)
+		if err != nil {
+			return err
+		}
+		if n < m.Cfg.MinFreeIPs {
+			m.Notify.Notify(ctx, "ips-low", 6*time.Hour, fmt.Sprintf("Only %d free IPv4 address(es) left; new VMs will be refused at 0.", n))
+		}
+		return nil
+	}
+	rows, err := m.Store.Q.HostFreeIPs(ctx)
 	if err != nil {
 		return err
 	}
-	if n < m.Cfg.MinFreeIPs {
-		m.Notify.Notify(ctx, "ips-low", 6*time.Hour, fmt.Sprintf("Only %d free IPv4 address(es) left; new VMs will be refused at 0.", n))
+	free := map[string]int{}
+	for _, r := range rows {
+		free[r.Host] = int(r.Free)
+	}
+	for _, t := range m.targets(ctx) {
+		if int64(free[t.name]) < m.Cfg.MinFreeIPs {
+			m.Notify.Notify(ctx, "ips-low-"+t.name, 6*time.Hour, fmt.Sprintf("Only %d free IPv4 address(es) left on host %s; new VMs there will be refused at 0.", free[t.name], t.name))
+		}
 	}
 	return nil
 }
@@ -200,14 +267,16 @@ func (m *Monitor) webhooks(ctx context.Context) error {
 // The clock starts when a sample reaches CPUHigh and resets only when CPU falls
 // under CPULow, so a miner throttling briefly does not escape.
 func (m *Monitor) cpuWatch(ctx context.Context) error {
-	guests, err := m.PVE.Guests(ctx)
-	if err != nil {
-		return nil // reported by hostCapacity
-	}
-	cpu := make(map[int]float64, len(guests))
-	for _, g := range guests {
-		if g.Running {
-			cpu[g.VMID] = g.CPU
+	cpu := map[int]float64{} // VMIDs are unique across hosts
+	for _, t := range m.targets(ctx) {
+		guests, err := t.api.Guests(ctx)
+		if err != nil {
+			continue // reported by hostCapacity
+		}
+		for _, g := range guests {
+			if g.Running {
+				cpu[g.VMID] = g.CPU
+			}
 		}
 	}
 	vms, err := m.Store.Q.ListRunningVMsForCPU(ctx)

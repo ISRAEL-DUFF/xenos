@@ -54,6 +54,9 @@ type Config struct {
 	TelegramChatID       string
 	AlertEmail           string // operator alerts by email in addition to / instead of Telegram
 	DepositLimitKobo     int64  // shown to customers: the most a basic (TIER_1) account may receive per transfer and per day; 0 hides it
+	// HostsFile is a YAML file describing several Proxmox hosts (with their secrets). Empty: the single host
+	// described by XENOS_PVE_* is the only one, named "default".
+	HostsFile string
 	// FloatingIPPriceUUSDT is the hourly price of one floating IP in micro-USDT (attached or not); FloatingIPLimit is how many one account may hold.
 	FloatingIPPriceUUSDT int64
 	FloatingIPLimit      int
@@ -72,6 +75,7 @@ func load(check bool) (Config, error) {
 		Env:               get("XENOS_ENV", "development"),
 		HTTPAddr:          get("XENOS_HTTP_ADDR", "127.0.0.1:8080"),
 		MetricsAddr:       get("XENOS_METRICS_ADDR", "127.0.0.1:9090"),
+		HostsFile:         os.Getenv("XENOS_HOSTS_FILE"),
 		WorkerMetricsAddr: get("XENOS_WORKER_METRICS_ADDR", "127.0.0.1:9091"),
 		SMTPHost:          os.Getenv("XENOS_SMTP_HOST"),
 		SMTPPort:          get("XENOS_SMTP_PORT", "587"),

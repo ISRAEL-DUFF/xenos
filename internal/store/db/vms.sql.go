@@ -327,19 +327,21 @@ func (q *Queries) GetBootScriptWork(ctx context.Context, id int64) (GetBootScrip
 }
 
 const getRebuildWork = `-- name: GetRebuildWork :one
-SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys, v.rebuild_boot_script,
+SELECT v.id, v.host, v.state, v.busy, v.proxmox_vmid, v.hostname, v.ipv6, v.rebuild_template_id, v.rebuild_keys, v.rebuild_boot_script,
        p.vcpu, p.ram_mb, p.disk_gb,
-       COALESCE(t.proxmox_template_id, 0)::int AS template_vmid, COALESCE(t.ci_user, 'root')::text AS ci_user,
+       COALESCE(ht.proxmox_template_id, t.proxmox_template_id, 0)::int AS template_vmid, COALESCE(t.ci_user, 'root')::text AS ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4, COALESCE(host(ip.gateway), '')::text AS gateway
 FROM vms v
 JOIN plans p ON p.id = v.plan_id
 LEFT JOIN templates t ON t.id = v.rebuild_template_id
+LEFT JOIN host_templates ht ON ht.template_id = t.id AND ht.host = v.host
 LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
 WHERE v.id = $1
 `
 
 type GetRebuildWorkRow struct {
 	ID                int64       `json:"id"`
+	Host              string      `json:"host"`
 	State             string      `json:"state"`
 	Busy              pgtype.Text `json:"busy"`
 	ProxmoxVmid       pgtype.Int4 `json:"proxmox_vmid"`
@@ -362,6 +364,7 @@ func (q *Queries) GetRebuildWork(ctx context.Context, id int64) (GetRebuildWorkR
 	var i GetRebuildWorkRow
 	err := row.Scan(
 		&i.ID,
+		&i.Host,
 		&i.State,
 		&i.Busy,
 		&i.ProxmoxVmid,
@@ -382,7 +385,7 @@ func (q *Queries) GetRebuildWork(ctx context.Context, id int64) (GetRebuildWorkR
 }
 
 const getResizeWork = `-- name: GetResizeWork :one
-SELECT v.id, v.state, v.busy, v.proxmox_vmid, v.resize_plan_id,
+SELECT v.id, v.host, v.state, v.busy, v.proxmox_vmid, v.resize_plan_id,
        np.vcpu AS new_vcpu, np.ram_mb AS new_ram_mb, np.disk_gb AS new_disk_gb
 FROM vms v LEFT JOIN plans np ON np.id = v.resize_plan_id
 WHERE v.id = $1
@@ -390,6 +393,7 @@ WHERE v.id = $1
 
 type GetResizeWorkRow struct {
 	ID           int64       `json:"id"`
+	Host         string      `json:"host"`
 	State        string      `json:"state"`
 	Busy         pgtype.Text `json:"busy"`
 	ProxmoxVmid  pgtype.Int4 `json:"proxmox_vmid"`
@@ -404,6 +408,7 @@ func (q *Queries) GetResizeWork(ctx context.Context, id int64) (GetResizeWorkRow
 	var i GetResizeWorkRow
 	err := row.Scan(
 		&i.ID,
+		&i.Host,
 		&i.State,
 		&i.Busy,
 		&i.ProxmoxVmid,
@@ -545,14 +550,15 @@ func (q *Queries) GetVMByClientToken(ctx context.Context, arg GetVMByClientToken
 }
 
 const getVMForWork = `-- name: GetVMForWork :one
-SELECT v.id, v.user_id, v.hostname, v.state, v.proxmox_vmid, v.authorized_keys, v.ipv6, v.ipv4_id, v.boot_script_status,
+SELECT v.id, v.user_id, v.host, v.hostname, v.state, v.proxmox_vmid, v.authorized_keys, v.ipv6, v.ipv4_id, v.boot_script_status,
        p.vcpu, p.ram_mb, p.disk_gb,
-       t.proxmox_template_id, t.ci_user,
+       COALESCE(ht.proxmox_template_id, t.proxmox_template_id)::int AS proxmox_template_id, t.ci_user,
        COALESCE(host(ip.address), '')::text AS ipv4,
        COALESCE(host(ip.gateway), '')::text AS gateway
 FROM vms v
 JOIN plans p ON p.id = v.plan_id
 JOIN templates t ON t.id = v.template_id
+LEFT JOIN host_templates ht ON ht.template_id = t.id AND ht.host = v.host
 LEFT JOIN ip_addresses ip ON ip.id = v.ipv4_id
 WHERE v.id = $1
 `
@@ -560,6 +566,7 @@ WHERE v.id = $1
 type GetVMForWorkRow struct {
 	ID                int64       `json:"id"`
 	UserID            int64       `json:"user_id"`
+	Host              string      `json:"host"`
 	Hostname          string      `json:"hostname"`
 	State             string      `json:"state"`
 	ProxmoxVmid       pgtype.Int4 `json:"proxmox_vmid"`
@@ -582,6 +589,7 @@ func (q *Queries) GetVMForWork(ctx context.Context, id int64) (GetVMForWorkRow, 
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
+		&i.Host,
 		&i.Hostname,
 		&i.State,
 		&i.ProxmoxVmid,

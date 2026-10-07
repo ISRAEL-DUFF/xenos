@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Server) catalogue() *catalogue.Service {
-	return &catalogue.Service{Store: s.Store, PVE: s.PVE}
+	return &catalogue.Service{Store: s.Store, PVE: s.PVE, Hosts: s.Hosts}
 }
 
 func adminActor(r *http.Request) catalogue.Actor {

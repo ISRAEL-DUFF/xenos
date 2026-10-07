@@ -16,10 +16,12 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/israel-duff/xenos/internal/hosts"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
@@ -45,6 +47,33 @@ type Service struct {
 	Store *store.Store
 	// PVE, when set, is used to check that a template's VMID exists on the host before it is added.
 	PVE proxmox.API
+	// Hosts, when set, names the hosts a template can live on and is used to check the VMID on that host.
+	Hosts *hosts.Set
+}
+
+// checkTemplate looks for a template's VMID on a host; with nothing to ask it passes.
+func (s *Service) checkTemplate(ctx context.Context, host string, vmid int) error {
+	var api proxmox.API
+	switch {
+	case s.Hosts != nil:
+		h, ok := s.Hosts.Get(host)
+		if !ok {
+			return invalid("no host called %q (known: %s)", host, strings.Join(s.Hosts.Names(), ", "))
+		}
+		api = h.API
+	case s.PVE != nil:
+		api = s.PVE
+	default:
+		return nil
+	}
+	st, err := api.Status(ctx, vmid)
+	if err != nil {
+		return fmt.Errorf("could not check host %s for VMID %d (use the skip option to add it anyway): %w", host, vmid, err)
+	}
+	if !st.Exists {
+		return invalid("VMID %d does not exist on host %s", vmid, host)
+	}
+	return nil
 }
 
 const (
@@ -183,6 +212,7 @@ type TemplateInput struct {
 	VMID      int
 	CIUser    string // default "root"
 	SkipCheck bool   // do not look for the VMID on the host
+	Host      string // the host the VMID is on; default "default"
 }
 
 // AddTemplate registers a template. When a Proxmox client is configured, the VMID must exist on the host.
@@ -205,14 +235,25 @@ func (s *Service) AddTemplate(ctx context.Context, in TemplateInput, by Actor) (
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return db.Template{}, err
 	}
-	if s.PVE != nil && !in.SkipCheck {
-		st, err := s.PVE.Status(ctx, in.VMID)
-		if err != nil {
-			return db.Template{}, fmt.Errorf("could not check the host for VMID %d (use the skip option to add it anyway): %w", in.VMID, err)
+	if in.Host == "" {
+		switch {
+		case s.Hosts == nil:
+			in.Host = "default"
+		case len(s.Hosts.Names()) == 1:
+			in.Host = s.Hosts.Names()[0]
+		default:
+			return db.Template{}, invalid("there is more than one host: say which one holds this VMID (%s)", strings.Join(s.Hosts.Names(), ", "))
 		}
-		if !st.Exists {
-			return db.Template{}, invalid("VMID %d does not exist on the Proxmox host", in.VMID)
+	}
+	if !in.SkipCheck {
+		if err := s.checkTemplate(ctx, in.Host, in.VMID); err != nil {
+			return db.Template{}, err
 		}
+	}
+	if used, err := s.Store.Q.HostTemplateVMIDInUse(ctx, db.HostTemplateVMIDInUseParams{Host: in.Host, ProxmoxTemplateID: int32(in.VMID)}); err != nil {
+		return db.Template{}, err
+	} else if used {
+		return db.Template{}, invalid("VMID %d is already used by another template", in.VMID)
 	}
 	t, err := s.Store.Q.InsertTemplate(ctx, db.InsertTemplateParams{Slug: in.Slug, Name: in.Name, ProxmoxTemplateID: int32(in.VMID), CiUser: in.CIUser})
 	if err != nil {
@@ -221,8 +262,39 @@ func (s *Service) AddTemplate(ctx context.Context, in TemplateInput, by Actor) (
 		}
 		return db.Template{}, err
 	}
-	s.audit(ctx, by, "template.add", in.Slug, map[string]any{"name": in.Name, "vmid": in.VMID, "ci_user": in.CIUser})
+	if err := s.Store.Q.SetHostTemplate(ctx, db.SetHostTemplateParams{Host: in.Host, TemplateID: t.ID, ProxmoxTemplateID: int32(in.VMID)}); err != nil {
+		return t, err
+	}
+	s.audit(ctx, by, "template.add", in.Slug, map[string]any{"name": in.Name, "vmid": in.VMID, "ci_user": in.CIUser, "host": in.Host})
 	return t, nil
+}
+
+// SetTemplateHost says which VMID holds an existing template on a host (each host has its own copy).
+func (s *Service) SetTemplateHost(ctx context.Context, slug, host string, vmid int, skipCheck bool, by Actor) error {
+	t, err := s.Store.Q.GetTemplateAny(ctx, slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if vmid < 100 || vmid > 999999999 {
+		return invalid("the Proxmox VMID must be between 100 and 999999999")
+	}
+	if used, err := s.Store.Q.HostTemplateVMIDInUse(ctx, db.HostTemplateVMIDInUseParams{Host: host, ProxmoxTemplateID: int32(vmid), TemplateID: t.ID}); err != nil {
+		return err
+	} else if used {
+		return invalid("VMID %d is already used by another template on host %s", vmid, host)
+	}
+	if !skipCheck {
+		if err := s.checkTemplate(ctx, host, vmid); err != nil {
+			return err
+		}
+	}
+	if err := s.Store.Q.SetHostTemplate(ctx, db.SetHostTemplateParams{Host: host, TemplateID: t.ID, ProxmoxTemplateID: int32(vmid)}); err != nil {
+		return invalid("host %q is not known to the control plane yet: start the API or worker with it configured first", host)
+	}
+	s.audit(ctx, by, "template.host", slug, map[string]any{"host": host, "vmid": vmid})
+	return nil
 }
 
 // SetTemplateActive enables or disables a template for new VMs and rebuilds.

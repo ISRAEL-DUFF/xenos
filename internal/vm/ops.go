@@ -84,12 +84,12 @@ func (p *Provisioner) doResize(ctx context.Context, w db.GetResizeWorkRow) error
 	if err := p.PVE.SetResources(ctx, vmid, int(w.NewVcpu.Int32), int(w.NewRamMb.Int32)); err != nil {
 		return fmt.Errorf("set resources: %w", err)
 	}
-	size, err := p.PVE.DiskSizeGB(ctx, vmid, p.Cfg.Disk)
+	size, err := p.PVE.DiskSizeGB(ctx, vmid, p.cfgFor(w.Host).Disk)
 	if err != nil {
 		return fmt.Errorf("read disk size: %w", err)
 	}
 	if size < int(w.NewDiskGb.Int32) { // a disk only grows, and only once
-		if err := p.PVE.ResizeDisk(ctx, vmid, p.Cfg.Disk, int(w.NewDiskGb.Int32)); err != nil {
+		if err := p.PVE.ResizeDisk(ctx, vmid, p.cfgFor(w.Host).Disk, int(w.NewDiskGb.Int32)); err != nil {
 			return fmt.Errorf("resize disk: %w", err)
 		}
 	}
@@ -309,7 +309,7 @@ func (p *Provisioner) doRebuild(ctx context.Context, w db.GetRebuildWorkRow) err
 		return err
 	}
 	if err := p.createGuest(ctx, guestSpec{
-		VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.TemplateVmid), CIUser: w.CiUser, Keys: w.RebuildKeys.String,
+		Host: w.Host, VMID: vmid, Name: w.Hostname, TemplateVMID: int(w.TemplateVmid), CIUser: w.CiUser, Keys: w.RebuildKeys.String,
 		IPv4: w.Ipv4, Gateway: w.Gateway, IPv6: w.Ipv6.String, Extra: p.floatingAddrs(ctx, w.ID), Cores: int(w.Vcpu), MemoryMB: int(w.RamMb), DiskGB: int(w.DiskGb)}); err != nil {
 		return err
 	}

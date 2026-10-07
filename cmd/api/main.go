@@ -61,9 +61,12 @@ func run(log *slog.Logger) error {
 	m := metrics.New()
 	ispend = metrics.WrapISpend(ispend, m)
 	srv := httpapi.NewServer(cfg, st, jobs.New(st.Pool), ispend, mailer, log, web.Dist())
-	pve := worker.NewProxmox(cfg, log)
-	if cfg.PVEURL != "" || cfg.RunWorker { // capacity view and console need a host (the fake, in development)
-		srv.PVE = pve
+	hostSet, err := worker.NewHosts(ctx, cfg, st, log)
+	if err != nil {
+		return err
+	}
+	if cfg.PVEURL != "" || cfg.HostsFile != "" || cfg.RunWorker { // capacity view and console need a host (the fake, in development)
+		srv.PVE, srv.Hosts = hostSet, hostSet
 	}
 	srv.Metrics = m
 	hs := &http.Server{Addr: cfg.HTTPAddr, Handler: srv.Router(), ReadHeaderTimeout: 10 * time.Second}
@@ -72,7 +75,7 @@ func run(log *slog.Logger) error {
 		// Development convenience: the fake iSpend only lives inside one process.
 		log.Warn("XENOS_RUN_WORKER=true: running the worker inside the API process")
 		go func() {
-			if err := worker.RunWith(ctx, cfg, st, ispend, mailer, log, pve, m); err != nil {
+			if err := worker.RunWith(ctx, cfg, st, ispend, mailer, log, hostSet, m); err != nil {
 				log.Error("worker stopped", "err", err)
 			}
 		}()

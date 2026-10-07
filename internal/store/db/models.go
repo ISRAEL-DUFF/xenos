@@ -114,12 +114,25 @@ type Heartbeat struct {
 	At   time.Time `json:"at"`
 }
 
+type Host struct {
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type HostTemplate struct {
+	Host              string `json:"host"`
+	TemplateID        int64  `json:"template_id"`
+	ProxmoxTemplateID int32  `json:"proxmox_template_id"`
+}
+
 type IpAddress struct {
 	ID      int64       `json:"id"`
 	Address netip.Addr  `json:"address"`
 	Gateway netip.Addr  `json:"gateway"`
 	Region  string      `json:"region"`
 	VmID    pgtype.Int8 `json:"vm_id"`
+	Host    string      `json:"host"`
 }
 
 type Job struct {
@@ -256,6 +269,8 @@ type Vm struct {
 	BootScriptExit    pgtype.Int4        `json:"boot_script_exit"`
 	BootScriptOutput  pgtype.Text        `json:"boot_script_output"`
 	RebuildBootScript pgtype.Text        `json:"rebuild_boot_script"`
+	Host              string             `json:"host"`
+	SpreadGroup       pgtype.Text        `json:"spread_group"`
 }
 
 type WebhookEvent struct {

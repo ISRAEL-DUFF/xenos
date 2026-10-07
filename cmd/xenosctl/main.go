@@ -35,12 +35,12 @@ import (
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
 	"github.com/israel-duff/xenos/internal/firewall"
+	"github.com/israel-duff/xenos/internal/hosts"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/preflight"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/store/db"
-	"github.com/israel-duff/xenos/internal/worker"
 )
 
 func main() {
@@ -343,7 +343,11 @@ func preflightCmd(ctx context.Context, args []string) error {
 	if is, err := billing.FromConfig(cfg, log); err == nil {
 		d.ISpend = is
 	}
-	d.PVE = worker.NewProxmox(cfg, log)
+	if hs, err := hosts.Load(cfg, log); err == nil {
+		d.PVE, d.Hosts = hs, hs
+	} else {
+		fmt.Printf("FAIL  hosts                  %v\n", err)
+	}
 	d.Mailer, _ = mail.New(cfg, log)
 	if sendTo != "" {
 		if d.Mailer == nil {

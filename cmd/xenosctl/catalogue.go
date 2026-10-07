@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os/user"
 	"strconv"
 	"strings"
 
 	"github.com/israel-duff/xenos/internal/catalogue"
 	"github.com/israel-duff/xenos/internal/config"
-	"github.com/israel-duff/xenos/internal/proxmox"
+	"github.com/israel-duff/xenos/internal/hosts"
 	"github.com/israel-duff/xenos/internal/store"
 )
 
@@ -19,8 +21,12 @@ func catalogueCmd(ctx context.Context, cfg config.Config, st *store.Store, args 
 		return false, nil
 	}
 	svc := &catalogue.Service{Store: st}
-	if cfg.PVEURL != "" { // check template VMIDs against the real host when one is configured
-		svc.PVE = proxmox.New(cfg.PVEURL, cfg.PVENode, cfg.PVETokenID, cfg.PVETokenSecret, cfg.PVEInsecureTLS)
+	if cfg.PVEURL != "" || cfg.HostsFile != "" { // check template VMIDs against the real hosts when they are configured
+		hs, err := hosts.Load(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			return true, err
+		}
+		svc.Hosts = hs
 	}
 	by := catalogue.Actor{Source: "xenosctl:" + osUser()}
 	if args[0] == "plan" {
@@ -42,7 +48,8 @@ const catalogueUsage = `usage:
   xenosctl plan price <slug> <hourly_usdt> [monthly_cap_usdt] [--yes]
   xenosctl plan disable|enable <slug>
   xenosctl template list
-  xenosctl template add <slug> <name> <proxmox_vmid> [--ci-user <user>] [--skip-host-check]
+  xenosctl template add <slug> <name> <proxmox_vmid> [--host <host>] [--ci-user <user>] [--skip-host-check]
+  xenosctl template host <slug> <host> <proxmox_vmid> [--skip-host-check]   (the same template's VMID on another host)
   xenosctl template disable|enable <slug>`
 
 func planCmd(ctx context.Context, svc *catalogue.Service, st *store.Store, by catalogue.Actor, args []string) error {
@@ -124,6 +131,20 @@ func planCmd(ctx context.Context, svc *catalogue.Service, st *store.Store, by ca
 			fmt.Println("NOT applied: run again with --yes to apply it (tell affected customers first)")
 		}
 		return nil
+	case "host": // template host <slug> <host> <vmid>: this template's VMID on another host
+		rest, skip := takeFlag(args[1:], "--skip-host-check")
+		if len(rest) != 3 {
+			return fmt.Errorf(catalogueUsage)
+		}
+		vmid, err := strconv.Atoi(rest[2])
+		if err != nil {
+			return fmt.Errorf("proxmox_vmid must be a number")
+		}
+		if err := svc.SetTemplateHost(ctx, rest[0], rest[1], vmid, skip, by); err != nil {
+			return err
+		}
+		fmt.Println("ok")
+		return nil
 	case "disable", "enable":
 		if len(args) != 2 {
 			return fmt.Errorf(catalogueUsage)
@@ -159,6 +180,7 @@ func templateCmd(ctx context.Context, svc *catalogue.Service, st *store.Store, b
 	case "add":
 		rest, skip := takeFlag(args[1:], "--skip-host-check")
 		rest, ciUser := takeValue(rest, "--ci-user")
+		rest, host := takeValue(rest, "--host")
 		if len(rest) != 3 {
 			return fmt.Errorf(catalogueUsage)
 		}
@@ -166,7 +188,7 @@ func templateCmd(ctx context.Context, svc *catalogue.Service, st *store.Store, b
 		if err != nil {
 			return fmt.Errorf("proxmox_vmid must be a number")
 		}
-		t, err := svc.AddTemplate(ctx, catalogue.TemplateInput{Slug: rest[0], Name: rest[1], VMID: vmid, CIUser: ciUser, SkipCheck: skip}, by)
+		t, err := svc.AddTemplate(ctx, catalogue.TemplateInput{Slug: rest[0], Name: rest[1], VMID: vmid, CIUser: ciUser, SkipCheck: skip, Host: host}, by)
 		if err != nil {
 			return err
 		}

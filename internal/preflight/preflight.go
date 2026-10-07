@@ -13,6 +13,7 @@ import (
 
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
+	"github.com/israel-duff/xenos/internal/hosts"
 	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
@@ -39,6 +40,8 @@ type Deps struct {
 	Store  *store.Store
 	ISpend billing.ISpend
 	PVE    proxmox.API
+	// Hosts, when set, is checked host by host; without it PVE is the one host.
+	Hosts  *hosts.Set
 	Mailer mail.Mailer
 	Now    func() time.Time
 
@@ -259,31 +262,45 @@ func iswalletChecks(ctx context.Context, d Deps) []Result {
 // ---- Proxmox ----
 
 func proxmoxChecks(ctx context.Context, d Deps) []Result {
-	const g = "proxmox"
-	if d.PVE == nil {
+	if d.Hosts == nil {
+		return hostChecks(ctx, d, "proxmox", "default", d.PVE, d.Cfg.PVEStorage)
+	}
+	var r []Result
+	for _, h := range d.Hosts.All() {
+		g := "proxmox"
+		if len(d.Hosts.Names()) > 1 {
+			g = "proxmox " + h.Name
+		}
+		r = append(r, hostChecks(ctx, d, g, h.Name, h.API, h.Storage)...)
+	}
+	return r
+}
+
+// hostChecks looks at one Proxmox host: reachable, storage, firewall, and every active template present on it.
+func hostChecks(ctx context.Context, d Deps, g, host string, api proxmox.API, storage string) []Result {
+	if api == nil {
 		return []Result{res(g, "connection", Fail, "not configured")}
 	}
-	if _, fake := d.PVE.(*proxmox.Fake); fake && !d.AllowFakes {
+	if _, fake := api.(*proxmox.Fake); fake && !d.AllowFakes {
 		return []Result{res(g, "connection", Fail, "the in-memory fake is in use, not a Proxmox host")}
 	}
 	ctx, cancel := step(ctx)
 	defer cancel()
 	var r []Result
-	info, err := d.PVE.NodeInfo(ctx)
+	info, err := api.NodeInfo(ctx)
 	if err != nil {
 		return []Result{res(g, "connection", Fail, "%v (URL, node name and API token)", err)}
 	}
-	r = append(r, res(g, "connection", OK, "node %q: %d CPUs, %.0f GiB RAM", d.Cfg.PVENode, info.CPUs, float64(info.MemTotal)/(1<<30)))
+	r = append(r, res(g, "connection", OK, "%d CPUs, %.0f GiB RAM", info.CPUs, float64(info.MemTotal)/(1<<30)))
 
-	if u, err := d.PVE.StoragePool(ctx, d.Cfg.PVEStorage); err != nil {
-		r = append(r, res(g, "storage", Fail, "pool %q: %v", d.Cfg.PVEStorage, err))
+	if u, err := api.StoragePool(ctx, storage); err != nil {
+		r = append(r, res(g, "storage", Fail, "pool %q: %v", storage, err))
 	} else if f := u.Fraction(); f > 0.85 {
-		r = append(r, res(g, "storage", Warn, "pool %q is %.0f%% full", d.Cfg.PVEStorage, f*100))
+		r = append(r, res(g, "storage", Warn, "pool %q is %.0f%% full", storage, f*100))
 	} else {
-		r = append(r, res(g, "storage", OK, "pool %q %.0f%% used of %.0f GiB", d.Cfg.PVEStorage, f*100, float64(u.Total)/(1<<30)))
+		r = append(r, res(g, "storage", OK, "pool %q %.0f%% used of %.0f GiB", storage, f*100, float64(u.Total)/(1<<30)))
 	}
-
-	if fw, err := d.PVE.HostFirewall(ctx); err != nil {
+	if fw, err := api.HostFirewall(ctx); err != nil {
 		r = append(r, res(g, "firewall", Warn, "cannot read the firewall state (the API token needs Sys.Audit): %v", err))
 	} else if !fw.Cluster || !fw.Node {
 		r = append(r, res(g, "firewall", Fail, "the Proxmox firewall is off at datacenter=%t node=%t: anti-spoofing filters on guests do nothing until both are on", fw.Cluster, fw.Node))
@@ -292,7 +309,8 @@ func proxmoxChecks(ctx context.Context, d Deps) []Result {
 	}
 
 	if d.Store != nil {
-		rows, err := d.Store.Pool.Query(ctx, `SELECT slug, proxmox_template_id FROM templates WHERE active ORDER BY id`)
+		rows, err := d.Store.Pool.Query(ctx, `SELECT t.slug, COALESCE(ht.proxmox_template_id, 0) FROM templates t
+			LEFT JOIN host_templates ht ON ht.template_id = t.id AND ht.host = $1 WHERE t.active ORDER BY t.id`, host)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -300,7 +318,9 @@ func proxmoxChecks(ctx context.Context, d Deps) []Result {
 				if rows.Scan(&t.slug, &t.vmid) != nil {
 					continue
 				}
-				if st, err := d.PVE.Status(ctx, t.vmid); err != nil {
+				if t.vmid == 0 {
+					r = append(r, res(g, "template "+t.slug, Fail, "no VMID is set for this host: xenosctl template host %s %s <vmid>", t.slug, host))
+				} else if st, err := api.Status(ctx, t.vmid); err != nil {
 					r = append(r, res(g, "template "+t.slug, Fail, "VMID %d: %v", t.vmid, err))
 				} else if !st.Exists {
 					r = append(r, res(g, "template "+t.slug, Fail, "VMID %d does not exist on the host", t.vmid))

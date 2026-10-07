@@ -8,18 +8,17 @@ package worker
 import (
 	"context"
 	"log/slog"
-	"net/netip"
 	"time"
 
 	"github.com/israel-duff/xenos/internal/alert"
 	"github.com/israel-duff/xenos/internal/billing"
 	"github.com/israel-duff/xenos/internal/config"
+	"github.com/israel-duff/xenos/internal/hosts"
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/mail"
 	"github.com/israel-duff/xenos/internal/metering"
 	"github.com/israel-duff/xenos/internal/metrics"
 	"github.com/israel-duff/xenos/internal/monitor"
-	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/store"
 	"github.com/israel-duff/xenos/internal/vm"
 	"github.com/israel-duff/xenos/internal/wallet"
@@ -32,7 +31,11 @@ const (
 
 // Run blocks until ctx is cancelled.
 func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger) error {
-	return RunWith(ctx, cfg, st, is, mailer, log, NewProxmox(cfg, log), nil)
+	hs, err := NewHosts(ctx, cfg, st, log)
+	if err != nil {
+		return err
+	}
+	return RunWith(ctx, cfg, st, is, mailer, log, hs, nil)
 }
 
 // RunWith is Run with the Proxmox client supplied, so a process that also serves the API (development, with
@@ -40,7 +43,7 @@ func Run(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISp
 //
 // m, if given, is the metrics registry of a process that also serves the API: the worker records into it and does
 // not open a second listener. With nil, the worker makes its own and serves it on XENOS_WORKER_METRICS_ADDR.
-func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger, pve proxmox.API, m *metrics.Metrics) error {
+func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing.ISpend, mailer mail.Mailer, log *slog.Logger, hs *hosts.Set, m *metrics.Metrics) error {
 	if m == nil {
 		m = metrics.New()
 		is = metrics.WrapISpend(is, m)
@@ -53,18 +56,13 @@ func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing
 	} else {
 		m.RegisterDB(st)
 	}
-	var v6 netip.Prefix
-	if cfg.IPv6Prefix != "" {
-		var err error
-		if v6, err = netip.ParsePrefix(cfg.IPv6Prefix); err != nil {
-			return err
+	shared := vm.Config{AgentTimeout: cfg.ProvisionTimeout, PollInterval: 3 * time.Second, IPv4PrefixLen: cfg.IPv4PrefixLen}
+	prov := &vm.Provisioner{Store: st, PVE: hs, Log: log, Cfg: shared, HostCfg: func(name string) vm.Config {
+		c := shared
+		if h, ok := hs.Get(name); ok {
+			c.Storage, c.Disk, c.DisableKVM, c.IPv6Prefix, c.IPv6Gateway, c.Nameservers = h.Storage, h.Disk, h.DisableKVM, h.IPv6Prefix, h.IPv6Gateway, h.Nameservers
 		}
-	}
-	prov := &vm.Provisioner{Store: st, PVE: pve, Log: log, Cfg: vm.Config{
-		Storage: cfg.PVEStorage, Disk: cfg.PVEDisk, DisableKVM: cfg.PVEDisableKVM,
-		AgentTimeout: cfg.ProvisionTimeout, PollInterval: 3 * time.Second,
-		IPv4PrefixLen: cfg.IPv4PrefixLen, IPv6Prefix: v6, IPv6Gateway: cfg.IPv6Gateway,
-		Nameservers: cfg.Nameservers,
+		return c
 	}}
 
 	cache := billing.NewBalanceCache(is, 60*time.Second)
@@ -89,7 +87,7 @@ func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing
 	if !notifier.Configured() {
 		log.Warn("no alert channel configured (XENOS_TELEGRAM_* or XENOS_ALERT_EMAIL): alerts will only appear in the log")
 	}
-	mon := &monitor.Monitor{Store: st, PVE: pve, Notify: notifier, Log: log, Cfg: monitor.DefaultConfig(cfg.PVEStorage), Metrics: m}
+	mon := &monitor.Monitor{Store: st, PVE: hs, Hosts: hs, Notify: notifier, Log: log, Cfg: monitor.DefaultConfig(cfg.PVEStorage), Metrics: m}
 	go mon.Run(ctx, meterInterval)
 	go func() {
 		t := time.NewTicker(meterInterval)
@@ -109,11 +107,11 @@ func RunWith(ctx context.Context, cfg config.Config, st *store.Store, is billing
 	return nil
 }
 
-// NewProxmox returns the real Proxmox client, or an in-memory fake when XENOS_PVE_URL is unset.
-func NewProxmox(cfg config.Config, log *slog.Logger) proxmox.API {
-	if cfg.PVEURL == "" {
-		log.Warn("XENOS_PVE_URL unset: using in-memory fake Proxmox, no real VMs will be created")
-		return proxmox.NewFake()
+// NewHosts loads the hosts (XENOS_HOSTS_FILE, or the single XENOS_PVE_* host) and connects them to the database.
+func NewHosts(ctx context.Context, cfg config.Config, st *store.Store, log *slog.Logger) (*hosts.Set, error) {
+	hs, err := hosts.Load(cfg, log)
+	if err != nil {
+		return nil, err
 	}
-	return proxmox.New(cfg.PVEURL, cfg.PVENode, cfg.PVETokenID, cfg.PVETokenSecret, cfg.PVEInsecureTLS)
+	return hs, hs.Attach(ctx, st)
 }
