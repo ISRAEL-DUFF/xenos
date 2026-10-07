@@ -29,3 +29,16 @@ Conventions: see [README.md](README.md). Times are UTC. The VPS address is writt
 - The environment variables the user "saved" were not visible to this session. Environment variable changes apply to *new* sessions.
 - The password was pasted into the chat. Treat it as exposed: change it (`passwd`) or reinstall the VPS when the rehearsal ends.
 - `ssh` and `sshpass` are not preinstalled in the sandbox; installing them needs `apt-get update` first.
+
+---
+
+### Step 0b: Retry after the user confirmed SSH works from their own computer   FAIL (open)
+2026-10-07 ~12:30 UTC
+
+**What was done:** checked the sandbox again. The `SSH_HOST`, `SSH_USER`, `SSH_PASSWORD` variables are now present (R-2 resolved: the environment was reloaded). `ssh` and `sshpass` are installed. Then, with the password passed through `sshpass -e` (never on a command line or in a file): `ssh -o ConnectTimeout=10 root@<vps-ip> 'echo connected'`.
+
+**Result:** `ssh: connect to host <vps-ip> port 22: Connection timed out`. A raw TCP probe to port 22 is blocked and an HTTP `CONNECT` tunnel through the sandbox proxy to `<vps-ip>:22` and `:443` receives no SSH banner within 10 s.
+
+**Root cause:** same as 0a. That the user can log in from their own computer proves the VPS and its credentials are fine; it says nothing about the sandbox, whose outbound network policy still does not forward port 22. Nothing about the VPS is wrong.
+
+**Still needed:** the environment's Network access setting must allow the VPS (or SSH), or sshd must also listen on 443 and that must be reachable through the proxy.
