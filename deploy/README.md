@@ -118,3 +118,7 @@ Set up the Storage Box SSH key (port 23) and create the `xenos-db/` directory on
 ## Before launch
 
 `xenosctl preflight [--send-test <email>]` checks the deployment end to end (config, database and IP pool, iswallet, Proxmox and templates, SMTP, worker heartbeat) and exits 1 on any failure. Run it after every config change.
+
+## Build with the newest Go patch release
+
+`make release` uses the Go on the machine that runs it. Go's standard library gets security fixes in patch releases (the CI vulnerability scan found 21 in `go1.26.0`, fixed in later patches), so build releases with the newest patch of the toolchain named in `go.mod`, and run `govulncheck ./...` before shipping.
