@@ -762,6 +762,18 @@ func (q *Queries) LockUser(ctx context.Context, id int64) (int64, error) {
 	return id, err
 }
 
+const lockUserStatus = `-- name: LockUserStatus :one
+SELECT status FROM users WHERE id = $1 FOR UPDATE
+`
+
+// Takes the row lock that serialises creating VMs, closing the account and converting deposits.
+func (q *Queries) LockUserStatus(ctx context.Context, id int64) (string, error) {
+	row := q.db.QueryRow(ctx, lockUserStatus, id)
+	var status string
+	err := row.Scan(&status)
+	return status, err
+}
+
 const markVMDeleted = `-- name: MarkVMDeleted :exec
 UPDATE vms SET state = 'deleted', deleted_at = now() WHERE id = $1
 `

@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/israel-duff/xenos/internal/jobs"
+	"github.com/israel-duff/xenos/internal/store/db"
 	"io"
 	"net/http"
 	"strings"
@@ -287,5 +289,35 @@ func TestDepositForAClosingAccountIsNotConverted(t *testing.T) {
 	}
 	if got := env.mailer.count("arrived for a closing account"); got != 1 {
 		t.Fatalf("operators must be told: %d alerts", got)
+	}
+}
+
+func TestClosingRaceAndStatusGuards(t *testing.T) {
+	env := newTestEnv(t)
+	addIPs(t, env, 2)
+	_ = newVMUser(t, env, "a@x.co", 100*nanoDay)
+	ctx := context.Background()
+	var uid int64
+	_ = env.st.Pool.QueryRow(ctx, `SELECT id FROM users WHERE email='a@x.co'`).Scan(&uid)
+
+	// A suspended account cannot close itself (that would shed the suspension).
+	if _, err := env.st.Pool.Exec(ctx, `UPDATE users SET status='suspended' WHERE id=$1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.Close(ctx, env.st, jobs.New(env.st.Pool), env.ispend, db.User{ID: uid, Status: "suspended"}, accounts.CloseOptions{Settled: true}); err == nil {
+		t.Fatal("a suspended account must not close")
+	}
+
+	// A closing account cannot be flipped back to active (or banned) through the admin status query.
+	if _, err := env.st.Pool.Exec(ctx, `UPDATE users SET status='closing', purge_after=now()+interval '30 days' WHERE id=$1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := env.st.Q.SetUserStatusByID(ctx, db.SetUserStatusByIDParams{ID: uid, Status: "active"}); err != nil || n != 0 {
+		t.Fatalf("status change on a closing account = %d %v, want 0 rows", n, err)
+	}
+	// Creating a VM on a closing account is refused under the row lock.
+	u, _ := env.st.Q.GetUserByID(ctx, uid)
+	if status, err := env.st.Q.LockUserStatus(ctx, u.ID); err != nil || status != "closing" {
+		t.Fatalf("lock status = %q %v", status, err)
 	}
 }

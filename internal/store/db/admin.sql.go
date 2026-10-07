@@ -422,7 +422,7 @@ func (q *Queries) RevenueByDay(ctx context.Context, arg RevenueByDayParams) ([]R
 }
 
 const setUserStatusByID = `-- name: SetUserStatusByID :execrows
-UPDATE users SET status = $2 WHERE id = $1
+UPDATE users SET status = $2 WHERE id = $1 AND status IN ('active', 'suspended', 'banned')
 `
 
 type SetUserStatusByIDParams struct {
@@ -430,6 +430,7 @@ type SetUserStatusByIDParams struct {
 	Status string `json:"status"`
 }
 
+// Closing and closed accounts leave that state only through reopen (closing) or never (closed).
 func (q *Queries) SetUserStatusByID(ctx context.Context, arg SetUserStatusByIDParams) (int64, error) {
 	result, err := q.db.Exec(ctx, setUserStatusByID, arg.ID, arg.Status)
 	if err != nil {

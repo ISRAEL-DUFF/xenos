@@ -14,7 +14,7 @@ import (
 
 const anonymiseClosedUser = `-- name: AnonymiseClosedUser :exec
 UPDATE users SET email = 'closed-' || id || '@invalid', phone = '', password_hash = '!', status = 'closed', closed_at = now(),
-       auto_convert = FALSE, email_verified_at = NULL, va_account_name = NULL
+       auto_convert = FALSE, email_verified_at = NULL, va_account_name = NULL, va_bank = NULL, va_account_number = NULL
 WHERE id = $1 AND status = 'closing'
 `
 

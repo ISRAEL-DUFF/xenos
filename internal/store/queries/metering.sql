@@ -64,7 +64,7 @@ WHERE v.user_id = $1 AND v.state IN ('suspended', 'running', 'stopped')
 
 -- name: UserHasLiveVMs :one
 SELECT EXISTS (SELECT 1 FROM vms WHERE user_id = $1
-  AND state IN ('pending', 'provisioning', 'running', 'stopped', 'suspended', 'deleting'));
+  AND state IN ('pending', 'provisioning', 'running', 'stopped', 'suspended', 'deleting', 'error'));
 
 -- name: ListActiveBillingUsers :many
 SELECT u.id, u.email, u.ispend_customer_id, u.low_balance_notified_at,

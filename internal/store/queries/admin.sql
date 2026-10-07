@@ -7,7 +7,8 @@ ORDER BY u.id DESC
 LIMIT $2 OFFSET $3;
 
 -- name: SetUserStatusByID :execrows
-UPDATE users SET status = $2 WHERE id = $1;
+-- Closing and closed accounts leave that state only through reopen (closing) or never (closed).
+UPDATE users SET status = $2 WHERE id = $1 AND status IN ('active', 'suspended', 'banned');
 
 -- name: SetUserVMLimit :execrows
 UPDATE users SET vm_limit = $2 WHERE id = $1;

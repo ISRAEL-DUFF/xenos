@@ -5,7 +5,7 @@ What happens to a customer's data, and when. This is operational policy for you 
 ## Closing an account
 
 1. The customer asks to close (Account page, or `xenosctl user close <email>`).
-2. Closing is **refused** while any of these hold (all are reported together):
+2. A suspended or banned account cannot be closed by the customer (unsuspend it first). Closing is **refused** while any of these hold (all are reported together):
    - VMs still exist (unless the customer ticks "delete my VMs", which queues their deletion);
    - charges are unpaid;
    - the wallet holds more than dust (0.50 USDT or ₦100). We cannot pay balances out automatically: settle it with the customer by hand, then run `xenosctl user close <email> --settle`.

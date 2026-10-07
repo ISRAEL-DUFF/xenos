@@ -178,3 +178,7 @@ UPDATE vms SET boot_script_status = 'pending' WHERE id = $1 AND boot_script_stat
 -- name: FinishBootScript :exec
 -- The script text is erased once it has run: it may carry a one-time registration token.
 UPDATE vms SET boot_script_status = $2, boot_script_exit = $3, boot_script_output = $4, boot_script = NULL WHERE id = $1;
+
+-- name: LockUserStatus :one
+-- Takes the row lock that serialises creating VMs, closing the account and converting deposits.
+SELECT status FROM users WHERE id = $1 FOR UPDATE;

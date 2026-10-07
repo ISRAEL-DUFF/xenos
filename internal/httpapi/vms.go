@@ -184,8 +184,13 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 	var apiErr *apiError
 	err = s.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
 		// Lock the user row so concurrent creates cannot both pass the limit check.
-		if _, err := q.LockUser(ctx, user.ID); err != nil {
+		status, err := q.LockUserStatus(ctx, user.ID)
+		if err != nil {
 			return err
+		}
+		if status != "active" {
+			apiErr = &apiError{http.StatusForbidden, "your account is suspended or closing; contact support"}
+			return errAbort
 		}
 		active, err := q.CountActiveVMs(ctx, user.ID)
 		if err != nil {

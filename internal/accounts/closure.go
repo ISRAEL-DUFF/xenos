@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -49,7 +50,8 @@ type CloseOptions struct {
 // CloseBlockers lists what stands in the way of closing u. iSpend is only consulted for the balance.
 func CloseBlockers(ctx context.Context, st *store.Store, is billing.ISpend, u db.User, opt CloseOptions) ([]Blocker, error) {
 	var out []Blocker
-	if u.Status != "active" && u.Status != "suspended" {
+	// A suspended account cannot close itself: that would shed the suspension and erase the evidence.
+	if u.Status != "active" {
 		return nil, fmt.Errorf("the account is %s", u.Status)
 	}
 	if !opt.DeleteVMs {
@@ -84,6 +86,19 @@ func Close(ctx context.Context, st *store.Store, q *jobs.Queue, is billing.ISpen
 		return blockers, err
 	}
 	err = st.InTx(ctx, func(qr *db.Queries, tx pgx.Tx) error {
+		// Serialise with VM creation and deposits, then re-check what the earlier look may have missed.
+		if status, err := qr.LockUserStatus(ctx, u.ID); err != nil {
+			return err
+		} else if status != "active" {
+			return errors.New("the account is not active")
+		}
+		if !opt.DeleteVMs {
+			if live, err := qr.UserHasLiveVMs(ctx, u.ID); err != nil {
+				return err
+			} else if live {
+				return errStillHasVMs
+			}
+		}
 		if n, err := qr.BeginClosure(ctx, u.ID); err != nil {
 			return err
 		} else if n == 0 {
@@ -108,19 +123,30 @@ func Close(ctx context.Context, st *store.Store, q *jobs.Queue, is billing.ISpen
 		}
 		return nil
 	})
+	if errors.Is(err, errStillHasVMs) {
+		return []Blocker{{"vms", "Delete your VMs first, or tick the box that deletes them for you."}}, nil
+	}
 	return nil, err
 }
 
+var errStillHasVMs = errors.New("the account still has VMs")
+
 // Reopen undoes a closure inside its grace period.
 func Reopen(ctx context.Context, st *store.Store, userID int64) error {
-	n, err := st.Q.ReopenAccount(ctx, userID)
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return errors.New("the account is not in its closing period")
-	}
-	return nil
+	return st.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		n, err := q.ReopenAccount(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("the account is not in its closing period")
+		}
+		// Anything created by a request that was in flight during the closure must not come back to life.
+		if err := q.DeleteUserSessions(ctx, userID); err != nil {
+			return err
+		}
+		return q.RevokeUserAPITokens(ctx, userID)
+	})
 }
 
 // PurgeDue removes the personal data of accounts whose grace period has ended and returns how many it purged.
@@ -213,7 +239,7 @@ func Export(ctx context.Context, w io.Writer, st *store.Store, u db.User) error 
 	}
 	_ = cw.Write([]string{"name", "fingerprint", "public_key", "created_at"})
 	for _, k := range keys {
-		_ = cw.Write([]string{k.Name, k.Fingerprint, k.PublicKey, ts(k.CreatedAt)})
+		_ = cw.Write([]string{cell(k.Name), k.Fingerprint, cell(k.PublicKey), ts(k.CreatedAt)})
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
@@ -233,7 +259,7 @@ func Export(ctx context.Context, w io.Writer, st *store.Store, u db.User) error 
 		if v.DeletedAt.Valid {
 			deleted = ts(v.DeletedAt.Time)
 		}
-		_ = cw.Write([]string{strconv.FormatInt(v.ID, 10), v.Hostname, v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, string(v.Labels), ts(v.CreatedAt), deleted})
+		_ = cw.Write([]string{strconv.FormatInt(v.ID, 10), cell(v.Hostname), v.Region, v.PlanSlug, v.TemplateSlug, v.State, v.Ipv4, v.Ipv6, cell(string(v.Labels)), ts(v.CreatedAt), deleted})
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
@@ -285,7 +311,7 @@ func Export(ctx context.Context, w io.Writer, st *store.Store, u db.User) error 
 	}
 	_ = cw.Write([]string{"id", "amount_uusdt", "note", "status", "created_at"})
 	for _, a := range adjs {
-		_ = cw.Write([]string{strconv.FormatInt(a.ID, 10), strconv.FormatInt(a.AmountUusdt, 10), a.Note, a.Status, ts(a.CreatedAt)})
+		_ = cw.Write([]string{strconv.FormatInt(a.ID, 10), strconv.FormatInt(a.AmountUusdt, 10), cell(a.Note), a.Status, ts(a.CreatedAt)})
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {
@@ -321,3 +347,11 @@ func Export(ctx context.Context, w io.Writer, st *store.Store, u db.User) error 
 }
 
 func textOf(v string) pgtype.Text { return pgtype.Text{String: v, Valid: true} }
+
+// cell neutralises spreadsheet formulas in text a person typed (hostnames, labels, notes).
+func cell(s string) string {
+	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
+		return "'" + s
+	}
+	return s
+}

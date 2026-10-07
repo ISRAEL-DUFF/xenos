@@ -160,7 +160,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 // failure is logged and left for a later retry rather than blocking signup; the idempotency key
 // and owner ref make retries safe.
 func (s *Server) linkISpend(ctx context.Context, u *db.User) {
-	c, err := s.ISpend.CreateCustomer(ctx, "signup:"+u.Email, "user:"+strconv.FormatInt(u.ID, 10), u.Email, u.Phone)
+	c, err := s.ISpend.CreateCustomer(ctx, "signup:"+strconv.FormatInt(u.ID, 10)+":"+u.Email, "user:"+strconv.FormatInt(u.ID, 10), u.Email, u.Phone)
 	if err != nil {
 		s.Log.Error("iswallet create customer", "user_id", u.ID, "err", err)
 		return
@@ -283,6 +283,10 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	if u, err := s.Store.Q.GetUserByID(r.Context(), uid); err == nil && cannotSignIn(u.Status) {
+		writeErr(w, http.StatusBadRequest, "invalid or expired token")
+		return
+	}
 	if err := s.Store.Q.MarkEmailVerified(r.Context(), uid); err != nil {
 		s.fail(w, r, err)
 		return
@@ -364,6 +368,10 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if u, err := s.Store.Q.GetUserByID(r.Context(), uid); err == nil && cannotSignIn(u.Status) {
+		writeErr(w, http.StatusBadRequest, "invalid or expired token")
 		return
 	}
 	hash, err := auth.HashPassword(in.Password)

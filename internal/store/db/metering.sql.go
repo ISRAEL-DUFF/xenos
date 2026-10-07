@@ -471,7 +471,7 @@ func (q *Queries) SuspendVM(ctx context.Context, arg SuspendVMParams) (int64, er
 
 const userHasLiveVMs = `-- name: UserHasLiveVMs :one
 SELECT EXISTS (SELECT 1 FROM vms WHERE user_id = $1
-  AND state IN ('pending', 'provisioning', 'running', 'stopped', 'suspended', 'deleting'))
+  AND state IN ('pending', 'provisioning', 'running', 'stopped', 'suspended', 'deleting', 'error'))
 `
 
 func (q *Queries) UserHasLiveVMs(ctx context.Context, userID int64) (bool, error) {

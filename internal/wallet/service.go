@@ -133,6 +133,12 @@ func (s *Service) HandleDeposit(ctx context.Context, ev billing.Event) error {
 			return nil // redelivery
 		}
 		s.Cache.Invalidate(ev.WalletID)
+		// The account may have started closing since the first read: look again under the row lock.
+		if status, err := q.LockUserStatus(ctx, user.ID); err != nil {
+			return err
+		} else {
+			user.Status = status
+		}
 		if user.Status == "closing" || user.Status == "closed" {
 			// Money arrived for an account that is closing or closed: do not convert it. An operator decides
 			// (usually a refund to the sender), because nobody can use it.
