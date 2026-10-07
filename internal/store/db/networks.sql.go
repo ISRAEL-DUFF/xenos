@@ -98,9 +98,10 @@ func (q *Queries) CreatePrivateNetwork(ctx context.Context, arg CreatePrivateNet
 	return i, err
 }
 
-const deletePrivateNetwork = `-- name: DeletePrivateNetwork :execrows
+const deletePrivateNetwork = `-- name: DeletePrivateNetwork :one
 DELETE FROM private_networks n WHERE n.id = $1 AND n.user_id = $2
   AND NOT EXISTS (SELECT 1 FROM vm_private_ips m WHERE m.network_id = n.id)
+RETURNING n.cidr::text AS cidr, n.vlan_id
 `
 
 type DeletePrivateNetworkParams struct {
@@ -108,12 +109,16 @@ type DeletePrivateNetworkParams struct {
 	UserID int64 `json:"user_id"`
 }
 
-func (q *Queries) DeletePrivateNetwork(ctx context.Context, arg DeletePrivateNetworkParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deletePrivateNetwork, arg.ID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+type DeletePrivateNetworkRow struct {
+	Cidr   string `json:"cidr"`
+	VlanID int32  `json:"vlan_id"`
+}
+
+func (q *Queries) DeletePrivateNetwork(ctx context.Context, arg DeletePrivateNetworkParams) (DeletePrivateNetworkRow, error) {
+	row := q.db.QueryRow(ctx, deletePrivateNetwork, arg.ID, arg.UserID)
+	var i DeletePrivateNetworkRow
+	err := row.Scan(&i.Cidr, &i.VlanID)
+	return i, err
 }
 
 const deleteVMPrivateIP = `-- name: DeleteVMPrivateIP :exec
@@ -227,6 +232,35 @@ func (q *Queries) ListNetworkMembers(ctx context.Context, networkID int64) ([]Li
 			&i.Address,
 			&i.State,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listQuarantinedNetworkIDs = `-- name: ListQuarantinedNetworkIDs :many
+SELECT cidr::text AS cidr, vlan_id FROM network_quarantine WHERE until > now()
+`
+
+type ListQuarantinedNetworkIDsRow struct {
+	Cidr   string `json:"cidr"`
+	VlanID int32  `json:"vlan_id"`
+}
+
+func (q *Queries) ListQuarantinedNetworkIDs(ctx context.Context) ([]ListQuarantinedNetworkIDsRow, error) {
+	rows, err := q.db.Query(ctx, listQuarantinedNetworkIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListQuarantinedNetworkIDsRow{}
+	for rows.Next() {
+		var i ListQuarantinedNetworkIDsRow
+		if err := rows.Scan(&i.Cidr, &i.VlanID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -351,6 +385,16 @@ func (q *Queries) LockNetwork(ctx context.Context, arg LockNetworkParams) (LockN
 	return i, err
 }
 
+const lockNetworkByID = `-- name: LockNetworkByID :one
+SELECT id FROM private_networks WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockNetworkByID(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRow(ctx, lockNetworkByID, id)
+	err := row.Scan(&id)
+	return id, err
+}
+
 const networkAddressesInUse = `-- name: NetworkAddressesInUse :many
 SELECT host(address)::text AS address FROM vm_private_ips WHERE network_id = $1
 `
@@ -410,6 +454,30 @@ type PinNetworkHostParams struct {
 
 func (q *Queries) PinNetworkHost(ctx context.Context, arg PinNetworkHostParams) error {
 	_, err := q.db.Exec(ctx, pinNetworkHost, arg.ID, arg.Host)
+	return err
+}
+
+const pruneNetworkQuarantine = `-- name: PruneNetworkQuarantine :exec
+DELETE FROM network_quarantine WHERE until <= now()
+`
+
+func (q *Queries) PruneNetworkQuarantine(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, pruneNetworkQuarantine)
+	return err
+}
+
+const quarantineNetworkIDs = `-- name: QuarantineNetworkIDs :exec
+INSERT INTO network_quarantine (cidr, vlan_id, until) VALUES ($1::text::cidr, $2, $3)
+`
+
+type QuarantineNetworkIDsParams struct {
+	Column1 string    `json:"column_1"`
+	VlanID  int32     `json:"vlan_id"`
+	Until   time.Time `json:"until"`
+}
+
+func (q *Queries) QuarantineNetworkIDs(ctx context.Context, arg QuarantineNetworkIDsParams) error {
+	_, err := q.db.Exec(ctx, quarantineNetworkIDs, arg.Column1, arg.VlanID, arg.Until)
 	return err
 }
 

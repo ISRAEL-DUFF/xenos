@@ -28,6 +28,8 @@ type Fake struct {
 	Consoles []*FakeConsole
 	// Bridge names the fake host has (Bridges); default vmbr0 and vmbr1.
 	BridgeNames []string
+	// AfterRollback, if set, runs on a guest after a snapshot rollback (Proxmox restores the VM config of that moment).
+	AfterRollback func(vm *FakeVM)
 	// HostFirewallOff makes HostFirewall report the firewall as disabled.
 	HostFirewallOff bool
 	// BeforeOp, if set, runs before each operation (used to simulate a crash by panicking).
@@ -278,6 +280,9 @@ func (f *Fake) SnapshotRollback(_ context.Context, vmid int, name string) (strin
 	}
 	for _, s := range vm.Snapshots {
 		if s == name {
+			if f.AfterRollback != nil {
+				f.AfterRollback(vm)
+			}
 			return "UPID:rollback", nil
 		}
 	}

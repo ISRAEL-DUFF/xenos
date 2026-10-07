@@ -2,14 +2,20 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/israel-duff/xenos/internal/proxmox"
 )
 
 func netPath(id any) string { return fmt.Sprintf("/v1/networks/%v", id) }
 
 func newNet(t *testing.T, u *vmFixture, name string) map[string]any {
 	t.Helper()
+	if _, err := u.env.st.Pool.Exec(context.Background(), `UPDATE users SET email_verified_at = now() WHERE email_verified_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
 	code, out := u.c.do("POST", "/v1/networks", map[string]any{"name": name}, u.c.csrfHdr())
 	if code != 201 {
 		t.Fatalf("create network %s = %d %v", name, code, out)
@@ -204,5 +210,96 @@ func TestNetworksArePinnedToTheirHost(t *testing.T) {
 	f.env.srv.Cfg.PrivateNetworkTunnel = true
 	if code, out := u.c.do("POST", fmt.Sprintf("/v1/vms/%d/networks/%d", strayID, nid), nil, u.c.csrfHdr()); code != 202 {
 		t.Fatalf("join with a tunnel = %d %v", code, out)
+	}
+}
+
+func TestRestoreReconcilesPrivateNICs(t *testing.T) {
+	env, pve, prov := floatingEnv(t)
+	env.srv.Cfg.PrivateNetworkLimit, env.srv.Cfg.PrivateVLANMin, env.srv.Cfg.PrivateVLANMax = 5, 1000, 1010
+	a := newVMUser(t, env, "a@x.co", 100*nanoDay)
+	net := newNet(t, a, "db")
+	nid := int64(net["id"].(float64))
+	_, o := a.create(t, map[string]any{"hostname": "one", "networks": []int64{nid}})
+	id := int64(o["id"].(float64))
+	env.run(t, prov)
+	g := guestFor(t, pve, env, id)
+	// Snapshot while on the network, then leave it and delete it.
+	if code, out := a.c.do("POST", fmt.Sprintf("/v1/vms/%d/snapshots", id), map[string]any{"name": "s1"}, a.c.csrfHdr()); code != 202 {
+		t.Fatalf("snapshot = %d %v", code, out)
+	}
+	env.run(t, prov)
+	if code, _ := a.c.do("DELETE", fmt.Sprintf("/v1/vms/%d/networks/%d", id, nid), nil, a.c.csrfHdr()); code != 202 {
+		t.Fatalf("detach = %d", code)
+	}
+	env.run(t, prov)
+	// The rollback brings the NIC back, as Proxmox would: put it into the fake as the snapshot had it.
+	pve.AfterRollback = func(vm *proxmox.FakeVM) {
+		vm.NICs = map[int]proxmox.NICParams{1: {Slot: 1, Bridge: "vmbr1", VLAN: int(net["vlan_id"].(float64)), IPConfig: "ip=10.64.0.2/24"}}
+		vm.NICAllowed = map[int][]string{1: {"10.64.0.2"}}
+	}
+	var sid int64
+	_ = env.st.Pool.QueryRow(context.Background(), `SELECT id FROM snapshots WHERE vm_id=$1`, id).Scan(&sid)
+	if code, out := a.c.do("POST", fmt.Sprintf("/v1/vms/%d/snapshots/%d/restore", id, sid), map[string]any{"confirm": true}, a.c.csrfHdr()); code != 202 {
+		t.Fatalf("restore = %d %v", code, out)
+	}
+	env.run(t, prov)
+	if len(g.NICs) != 0 || len(g.NICAllowed[1]) != 0 {
+		t.Fatalf("a restored VM must not keep a NIC it was detached from: %v %v", g.NICs, g.NICAllowed)
+	}
+}
+
+func TestFailedAttachKeepsTheVLANReservedUntilTheNICIsGone(t *testing.T) {
+	env, pve, prov := floatingEnv(t)
+	env.srv.Cfg.PrivateNetworkLimit, env.srv.Cfg.PrivateVLANMin, env.srv.Cfg.PrivateVLANMax = 5, 1000, 1010
+	a := newVMUser(t, env, "a@x.co", 100*nanoDay)
+	net := newNet(t, a, "db")
+	nid := int64(net["id"].(float64))
+	_, o := a.create(t, map[string]any{"hostname": "one"})
+	id := int64(o["id"].(float64))
+	env.run(t, prov)
+	// The NIC is added but the filter and the cleanup both fail: the host may be left with a tagged NIC.
+	pve.Fail["isolatenic"] = errors.New("proxmox error")
+	pve.Fail["removenic"] = errors.New("proxmox error")
+	if code, _ := a.c.do("POST", fmt.Sprintf("/v1/vms/%d/networks/%d", id, nid), nil, a.c.csrfHdr()); code != 202 {
+		t.Fatalf("attach = %d", code)
+	}
+	for i := 0; i < 6; i++ {
+		env.run(t, prov)
+	}
+	if n := count(t, env, `SELECT count(*) FROM vm_private_ips WHERE vm_id=$1 AND state='stuck'`, id); n != 1 {
+		t.Fatal("the membership must stay, marked stuck, while the NIC may still be on the guest")
+	}
+	if code, _ := a.c.do("DELETE", netPath(nid), nil, a.c.csrfHdr()); code != 409 {
+		t.Fatalf("a network with a stuck member must not be deletable: %d", code)
+	}
+	// Once the host answers, a detach clears it.
+	delete(pve.Fail, "isolatenic")
+	delete(pve.Fail, "removenic")
+	if code, _ := a.c.do("DELETE", fmt.Sprintf("/v1/vms/%d/networks/%d", id, nid), nil, a.c.csrfHdr()); code != 202 {
+		t.Fatalf("detach of a stuck member = %d", code)
+	}
+	env.run(t, prov)
+	if n := count(t, env, `SELECT count(*) FROM vm_private_ips WHERE vm_id=$1`, id); n != 0 {
+		t.Fatal("the stuck membership should be gone after a clean detach")
+	}
+}
+
+func TestDeletedNetworkIDsAreNotReusedForADay(t *testing.T) {
+	env, _, _ := floatingEnv(t)
+	env.srv.Cfg.PrivateNetworkLimit, env.srv.Cfg.PrivateVLANMin, env.srv.Cfg.PrivateVLANMax = 5, 1000, 1010
+	a := newVMUser(t, env, "a@x.co", 0)
+	b := newVMUser(t, env, "b@x.co", 0)
+	n1 := newNet(t, a, "one")
+	if code, _ := a.c.do("DELETE", netPath(int64(n1["id"].(float64))), nil, a.c.csrfHdr()); code != 204 {
+		t.Fatal("delete")
+	}
+	n2 := newNet(t, b, "two")
+	if n2["cidr"] == n1["cidr"] || n2["vlan_id"] == n1["vlan_id"] {
+		t.Fatalf("a deleted network's ids were reused at once: %v then %v", n1, n2)
+	}
+	env.st.Pool.Exec(context.Background(), `UPDATE network_quarantine SET until = now() - interval '1 minute'`)
+	n3 := newNet(t, a, "three")
+	if n3["cidr"] != n1["cidr"] {
+		t.Fatalf("after the quarantine the lowest free /24 is used again: %v", n3)
 	}
 }

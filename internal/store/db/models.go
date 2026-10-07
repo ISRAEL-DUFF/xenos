@@ -148,6 +148,12 @@ type Job struct {
 	AlertedAt pgtype.Timestamptz `json:"alerted_at"`
 }
 
+type NetworkQuarantine struct {
+	Cidr   netip.Prefix `json:"cidr"`
+	VlanID int32        `json:"vlan_id"`
+	Until  time.Time    `json:"until"`
+}
+
 type PasswordReset struct {
 	TokenHash []byte    `json:"token_hash"`
 	UserID    int64     `json:"user_id"`

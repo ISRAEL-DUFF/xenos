@@ -144,6 +144,9 @@ func load(check bool) (Config, error) {
 	if c.PrivateNetworkLimit, err = strconv.Atoi(get("XENOS_PRIVATE_NETWORK_LIMIT", "5")); err != nil || c.PrivateNetworkLimit < 0 {
 		return c, fmt.Errorf("XENOS_PRIVATE_NETWORK_LIMIT must be a non-negative integer")
 	}
+	if c.PVEPrivateBridge != "" && c.PVEPrivateBridge == c.PVEBridge {
+		return c, fmt.Errorf("XENOS_PVE_PRIVATE_BRIDGE must differ from XENOS_PVE_BRIDGE: tenant VLANs must never share the public bridge")
+	}
 	c.PrivateNetworkTunnel = get("XENOS_PRIVATE_NETWORK_TUNNEL", "false") == "true"
 	if c.RAMCommitLimit, err = strconv.ParseFloat(get("XENOS_RAM_COMMIT_LIMIT", "1.0"), 64); err != nil || c.RAMCommitLimit <= 0 || c.RAMCommitLimit > 4 {
 		return c, fmt.Errorf("XENOS_RAM_COMMIT_LIMIT must be a number above 0 and at most 4 (1.0 = 100%%)")

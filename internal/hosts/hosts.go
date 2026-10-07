@@ -149,6 +149,9 @@ func Load(cfg config.Config, log *slog.Logger) (*Set, error) {
 				return nil, fmt.Errorf("host %q: ipv6_prefix: %w", e.Name, err)
 			}
 		}
+		if h.PrivateBridge != "" && h.PrivateBridge == h.Bridge {
+			return nil, fmt.Errorf("host %q: private_bridge must differ from bridge", e.Name)
+		}
 		h.API = proxmox.New(e.URL, e.Node, e.TokenID, e.TokenSecret, e.InsecureTLS)
 		out = append(out, h)
 	}

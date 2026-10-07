@@ -317,7 +317,14 @@ func hostChecks(ctx context.Context, d Deps, g, host string, api proxmox.API, st
 		if brs, err := api.Bridges(ctx); err != nil {
 			r = append(r, res(g, "private bridge", Warn, "cannot list the host's bridges: %v", err))
 		} else if !slices.Contains(brs, pb) {
-			r = append(r, res(g, "private bridge", Warn, "bridge %q does not exist: private networks cannot be used on this host until it is created (a VLAN-aware bridge with no uplink; see deploy/proxmox/README.md)", pb))
+			st := Warn
+			if d.Store != nil {
+				var n int
+				if d.Store.Pool.QueryRow(ctx, `SELECT count(*) FROM private_networks`).Scan(&n) == nil && n > 0 {
+					st = Fail // customers already have networks: their VMs cannot be built here
+				}
+			}
+			r = append(r, res(g, "private bridge", st, "bridge %q does not exist: private networks cannot be used on this host until it is created (a VLAN-aware bridge with no uplink; see deploy/proxmox/README.md)", pb))
 		} else {
 			r = append(r, res(g, "private bridge", OK, "bridge %q present", pb))
 		}

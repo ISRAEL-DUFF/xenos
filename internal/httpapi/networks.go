@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/jobs"
@@ -22,6 +23,14 @@ import (
 
 // Private networks hold /24s from 10.64.0.0/10 (10.64.0.0 to 10.127.255.255). Addresses .2 to .251 go to VMs
 // (250); .1 is left free for a future gateway. There is no routing or NAT: the network is a layer-2 segment.
+// networkQuarantine is how long a deleted network's /24 and VLAN id stay unused.
+const networkQuarantine = 24 * time.Hour
+
+func isForeignKeyViolation(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23503"
+}
+
 const (
 	privateBase    = 0x0A400000 // 10.64.0.0
 	privateBlocks  = 1 << 14    // /24s in a /10
@@ -165,6 +174,16 @@ func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request) {
 			for _, u := range used {
 				cidrs[u.Cidr], vlans[u.VlanID] = true, true
 			}
+			if err := q.PruneNetworkQuarantine(ctx); err != nil {
+				return err
+			}
+			held, err := q.ListQuarantinedNetworkIDs(ctx)
+			if err != nil {
+				return err
+			}
+			for _, h := range held {
+				cidrs[h.Cidr], vlans[h.VlanID] = true, true
+			}
 			block := -1
 			for i := 0; i < privateBlocks; i++ {
 				if !cidrs[cidrOfBlock(i)] {
@@ -212,13 +231,24 @@ func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rows, err := s.Store.Q.DeletePrivateNetwork(r.Context(), db.DeletePrivateNetworkParams{ID: n.ID, UserID: principalFrom(r.Context()).User.ID})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	if rows == 0 {
+	ctx := r.Context()
+	userID := principalFrom(ctx).User.ID
+	err := s.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		if _, err := q.LockNetwork(ctx, db.LockNetworkParams{ID: n.ID, UserID: userID}); err != nil {
+			return err
+		}
+		gone, err := q.DeletePrivateNetwork(ctx, db.DeletePrivateNetworkParams{ID: n.ID, UserID: userID})
+		if err != nil {
+			return err
+		}
+		// Keep the /24 and VLAN id out of circulation for a day.
+		return q.QuarantineNetworkIDs(ctx, db.QuarantineNetworkIDsParams{Column1: gone.Cidr, VlanID: gone.VlanID, Until: time.Now().Add(networkQuarantine)})
+	})
+	if errors.Is(err, pgx.ErrNoRows) || isForeignKeyViolation(err) {
 		writeErr(w, http.StatusConflict, "the network still has VMs: detach them first")
+		return
+	} else if err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -353,7 +383,7 @@ func (s *Server) changeNetwork(w http.ResponseWriter, r *http.Request, v db.GetU
 					cur = &rows[i]
 				}
 			}
-			if cur == nil || cur.State != "attached" {
+			if cur == nil || (cur.State != "attached" && cur.State != "stuck") {
 				apiErr = &apiError{http.StatusConflict, "the VM is not on this network"}
 				return errAbort
 			}

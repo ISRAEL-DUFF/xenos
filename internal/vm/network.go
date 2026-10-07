@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/netip"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/israel-duff/xenos/internal/jobs"
 	"github.com/israel-duff/xenos/internal/store/db"
 )
@@ -49,7 +51,7 @@ func (p *Provisioner) network(ctx context.Context, j *jobs.Job, in Payload) erro
 	}
 	attach := in.Action == NetAttach
 	if !operable(w.State) {
-		p.abandonNetwork(ctx, w.ID, in.NetworkID, attach)
+		_ = p.abandonNetwork(ctx, w.ID, in.NetworkID, attach)
 		p.release(ctx, w.ID)
 		return nil
 	}
@@ -60,9 +62,9 @@ func (p *Provisioner) network(ctx context.Context, j *jobs.Job, in Payload) erro
 	}
 	if finalFailure(ctx, j) {
 		p.Log.Error("private network change failed permanently; releasing the VM", "vm_id", w.ID, "err", err)
-		p.abandonNetwork(ctx, w.ID, in.NetworkID, attach)
+		clean := p.abandonNetwork(ctx, w.ID, in.NetworkID, attach)
 		p.release(ctx, w.ID)
-		if w.State == "running" { // best effort: do not leave the customer's VM powered off
+		if clean && w.State == "running" { // best effort: do not leave the customer's VM powered off
 			vmid := int(w.ProxmoxVmid.Int32)
 			if st, e := p.PVE.Status(context.WithoutCancel(ctx), vmid); e == nil && st.Exists && !st.Running {
 				_ = p.run(context.WithoutCancel(ctx), vmid, "start")
@@ -72,23 +74,77 @@ func (p *Provisioner) network(ctx context.Context, j *jobs.Job, in Payload) erro
 	return err
 }
 
-// abandonNetwork undoes the recorded intent when the change cannot be made.
-func (p *Provisioner) abandonNetwork(ctx context.Context, vmID, networkID int64, attach bool) {
+// abandonNetwork undoes the recorded intent when the change cannot be made. It reports whether the host is known
+// to be clean. The record is only forgotten (freeing the address and VLAN for others) once the NIC is confirmed gone:
+// otherwise the row stays, in state "stuck", so nothing else can be given that VLAN while a guest may still carry it.
+func (p *Provisioner) abandonNetwork(ctx context.Context, vmID, networkID int64, attach bool) bool {
 	ctx = context.WithoutCancel(ctx)
 	q := p.Store.Q
-	if attach {
-		if rows, err := q.ListVMPrivateIPs(ctx, vmID); err == nil {
-			for _, r := range rows {
-				if r.NetworkID == networkID && r.State == "attaching" {
-					_ = p.PVE.RemoveNIC(ctx, p.vmidOf(ctx, vmID), int(r.Slot)) // may not have been added yet
-				}
-			}
-		}
-		_ = q.DeleteVMPrivateIP(ctx, db.DeleteVMPrivateIPParams{VmID: vmID, NetworkID: networkID})
-		_ = q.UnpinEmptyNetwork(ctx, networkID)
-		return
+	if !attach {
+		_ = q.SetVMPrivateIPState(ctx, db.SetVMPrivateIPStateParams{VmID: vmID, NetworkID: networkID, State: "attached"})
+		return true
 	}
-	_ = q.SetVMPrivateIPState(ctx, db.SetVMPrivateIPStateParams{VmID: vmID, NetworkID: networkID, State: "attached"})
+	rows, err := q.ListVMPrivateIPs(ctx, vmID)
+	if err != nil {
+		return false
+	}
+	vmid := p.vmidOf(ctx, vmID)
+	for _, r := range rows {
+		if r.NetworkID != networkID || r.State != "attaching" {
+			continue
+		}
+		clean := vmid != 0 && p.PVE.IsolateNIC(ctx, vmid, int(r.Slot), nil) == nil && p.PVE.RemoveNIC(ctx, vmid, int(r.Slot)) == nil
+		if !clean {
+			p.Log.Error("could not take a half-added private NIC off the guest; keeping its VLAN reserved", "vm_id", vmID, "network_id", networkID)
+			_ = q.SetVMPrivateIPState(ctx, db.SetVMPrivateIPStateParams{VmID: vmID, NetworkID: networkID, State: "stuck"})
+			return false
+		}
+	}
+	_ = q.DeleteVMPrivateIP(ctx, db.DeleteVMPrivateIPParams{VmID: vmID, NetworkID: networkID})
+	_ = p.unpinNetwork(ctx, networkID)
+	return true
+}
+
+// unpinNetwork clears a network's host once it has no members, under the network's row lock so a join that is
+// committing at the same moment is not overwritten.
+func (p *Provisioner) unpinNetwork(ctx context.Context, networkID int64) error {
+	return p.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		if _, err := q.LockNetworkByID(ctx, networkID); err != nil {
+			return err
+		}
+		return q.UnpinEmptyNetwork(ctx, networkID)
+	})
+}
+
+// reconcileNICs makes the guest's private NICs and their filters match the database: every attached membership is
+// (re)built, every other slot is emptied and removed.
+func (p *Provisioner) reconcileNICs(ctx context.Context, vmID int64, host string, vmid int) error {
+	nics, err := p.privateNICs(ctx, vmID)
+	if err != nil {
+		return err
+	}
+	want := map[int]PrivateNIC{}
+	for _, n := range nics {
+		want[n.Slot] = n
+	}
+	for slot := 1; slot <= 2; slot++ {
+		if n, ok := want[slot]; ok {
+			if err := p.PVE.SetNIC(ctx, vmid, n.params(p.cfgFor(host).privateBridge())); err != nil {
+				return err
+			}
+			if err := p.PVE.IsolateNIC(ctx, vmid, slot, []string{n.Address}); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := p.PVE.IsolateNIC(ctx, vmid, slot, nil); err != nil {
+			return err
+		}
+		if err := p.PVE.RemoveNIC(ctx, vmid, slot); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *Provisioner) vmidOf(ctx context.Context, vmID int64) int {
@@ -162,7 +218,7 @@ func (p *Provisioner) doNetwork(ctx context.Context, vmID int64, host string, vm
 	if err := p.Store.Q.DeleteVMPrivateIP(ctx, db.DeleteVMPrivateIPParams{VmID: vmID, NetworkID: networkID}); err != nil {
 		return err
 	}
-	return p.Store.Q.UnpinEmptyNetwork(ctx, networkID)
+	return p.unpinNetwork(ctx, networkID)
 }
 
 type privateRow struct {

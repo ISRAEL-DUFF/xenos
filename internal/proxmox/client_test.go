@@ -368,8 +368,24 @@ func TestPrivateNICCalls(t *testing.T) {
 	if err := c.RemoveNIC(ctx, 105, 1); err != nil {
 		t.Fatal(err)
 	}
-	if (*got)[0].form.Get("delete") != "net1,ipconfig1" {
-		t.Fatalf("remove = %v", (*got)[0].form)
+	// Only what the VM has is deleted (here net1 exists, ipconfig1 does not); a slot it lacks is left alone.
+	var del string
+	for _, r := range *got {
+		if r.method == "PUT" {
+			del = r.form.Get("delete")
+		}
+	}
+	if del != "net1" {
+		t.Fatalf("remove deleted %q", del)
+	}
+	*got = nil
+	if err := c.RemoveNIC(ctx, 105, 2); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range *got {
+		if r.method == "PUT" {
+			t.Fatalf("nothing to delete, but %v was sent", r.form)
+		}
 	}
 	*got = nil
 	if err := c.IsolateNIC(ctx, 105, 2, []string{"10.64.0.9"}); err != nil {

@@ -148,7 +148,20 @@ func (c *Client) SetNIC(ctx context.Context, vmid int, p NICParams) error {
 
 func (c *Client) RemoveNIC(ctx context.Context, vmid int, slot int) error {
 	base := fmt.Sprintf("/nodes/%s/qemu/%d", c.node, vmid)
-	return c.do(ctx, http.MethodPut, base+"/config", url.Values{"delete": {fmt.Sprintf("net%d,ipconfig%d", slot, slot)}}, nil)
+	var cfg map[string]any
+	if err := c.do(ctx, http.MethodGet, base+"/config", nil, &cfg); err != nil {
+		return err
+	}
+	var del []string // Proxmox refuses to delete an option the VM does not have
+	for _, k := range []string{fmt.Sprintf("net%d", slot), fmt.Sprintf("ipconfig%d", slot)} {
+		if _, ok := cfg[k]; ok {
+			del = append(del, k)
+		}
+	}
+	if len(del) == 0 {
+		return nil
+	}
+	return c.do(ctx, http.MethodPut, base+"/config", url.Values{"delete": {strings.Join(del, ",")}}, nil)
 }
 
 func (c *Client) IsolateNIC(ctx context.Context, vmid int, slot int, allowed []string) error {

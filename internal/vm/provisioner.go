@@ -481,7 +481,7 @@ func (p *Provisioner) delete(ctx context.Context, _ *jobs.Job, in Payload) error
 		return err
 	}
 	for _, id := range nets {
-		if err := p.Store.Q.UnpinEmptyNetwork(ctx, id); err != nil {
+		if err := p.unpinNetwork(ctx, id); err != nil {
 			return err
 		}
 	}

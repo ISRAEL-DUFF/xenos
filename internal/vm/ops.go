@@ -237,6 +237,12 @@ func (p *Provisioner) restore(ctx context.Context, j *jobs.Job, in Payload) erro
 		if err := p.PVE.WaitTask(ctx, upid); err != nil {
 			return fmt.Errorf("rollback task: %w", err)
 		}
+		// The rollback brought back the NICs as they were when the snapshot was taken: VLAN tags and addresses that may
+		// since have been detached, deleted or given to someone else. Set them to what the database says before the
+		// guest can run.
+		if err := p.reconcileNICs(ctx, w.ID, w.Host, vmid); err != nil {
+			return fmt.Errorf("private networks after restore: %w", err)
+		}
 		if w.State == "running" {
 			if err := p.run(ctx, vmid, "start"); err != nil {
 				return err

@@ -17,9 +17,10 @@ SELECT id, name, cidr::text AS cidr, vlan_id, host, created_at FROM private_netw
 -- name: LockNetwork :one
 SELECT id, cidr::text AS cidr, vlan_id, host FROM private_networks WHERE id = $1 AND user_id = $2 FOR UPDATE;
 
--- name: DeletePrivateNetwork :execrows
+-- name: DeletePrivateNetwork :one
 DELETE FROM private_networks n WHERE n.id = sqlc.arg(id) AND n.user_id = sqlc.arg(user_id)
-  AND NOT EXISTS (SELECT 1 FROM vm_private_ips m WHERE m.network_id = n.id);
+  AND NOT EXISTS (SELECT 1 FROM vm_private_ips m WHERE m.network_id = n.id)
+RETURNING n.cidr::text AS cidr, n.vlan_id;
 
 -- name: PinNetworkHost :exec
 UPDATE private_networks SET host = $2 WHERE id = $1;
@@ -56,3 +57,15 @@ DELETE FROM vm_private_ips WHERE vm_id = $1;
 
 -- name: NetworkIDsOfVM :many
 SELECT network_id FROM vm_private_ips WHERE vm_id = $1;
+
+-- name: LockNetworkByID :one
+SELECT id FROM private_networks WHERE id = $1 FOR UPDATE;
+
+-- name: QuarantineNetworkIDs :exec
+INSERT INTO network_quarantine (cidr, vlan_id, until) VALUES ($1::text::cidr, $2, $3);
+
+-- name: ListQuarantinedNetworkIDs :many
+SELECT cidr::text AS cidr, vlan_id FROM network_quarantine WHERE until > now();
+
+-- name: PruneNetworkQuarantine :exec
+DELETE FROM network_quarantine WHERE until <= now();

@@ -140,7 +140,7 @@ func (s *Server) Router() http.Handler {
 			r.With(s.requireActive).Post("/vms/{id}/snapshots/{sid}/restore", s.restoreSnapshot)
 
 			r.Get("/networks", s.listNetworks)
-			r.With(s.requireActive).Post("/networks", s.createNetwork)
+			r.With(s.requireActive, s.requireVerified).Post("/networks", s.createNetwork)
 			r.Get("/networks/{id}", s.getNetwork)
 			r.Delete("/networks/{id}", s.deleteNetwork)
 			r.With(s.requireActive).Post("/vms/{id}/networks/{nid}", s.attachNetwork)
