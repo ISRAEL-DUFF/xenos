@@ -672,3 +672,41 @@ func TestFloatingIPChargesAreFreeWhenThePriceIsZero(t *testing.T) {
 		t.Fatalf("charges = %d with a zero price", n)
 	}
 }
+
+func TestReleasedFloatingIPReturnsToThePoolEvenAtZeroPrice(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	uid, _ := e.user("a@x.co", 1_000_000)
+	ctx := context.Background()
+	must(e.t, e.st.Q.AddFloatingIP(ctx, db.AddFloatingIPParams{Column1: netip.MustParseAddr("198.51.100.10"), Region: "r"}))
+	f, err := e.st.Q.ClaimFloatingIP(ctx, db.ClaimFloatingIPParams{UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingFrom: pgtype.Timestamptz{Time: at(10, 0), Valid: true}, WantRegion: "r"})
+	must(t, err)
+	e.tickAt(at(11, 30))
+	if _, err := e.st.Q.ReleaseFloatingIP(ctx, db.ReleaseFloatingIPParams{ID: f.ID, UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingUntil: pgtype.Timestamptz{Time: at(11, 40), Valid: true}}); err != nil {
+		t.Fatal(err)
+	}
+	e.tickAt(at(12, 5))
+	if _, err := e.st.Q.ClaimFloatingIP(ctx, db.ClaimFloatingIPParams{UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingFrom: pgtype.Timestamptz{Time: at(12, 0), Valid: true}, WantRegion: "r"}); err != nil {
+		t.Fatalf("a released address must be claimable again: %v", err)
+	}
+}
+
+func TestGraceExpiryReleasesFloatingIPs(t *testing.T) {
+	e := newEnv(t, at(10, 20))
+	e.meter.FloatingIPPriceUUSDT = 2000
+	uid, _ := e.user("a@x.co", 0)
+	ctx := context.Background()
+	must(e.t, e.st.Q.AddFloatingIP(ctx, db.AddFloatingIPParams{Column1: netip.MustParseAddr("198.51.100.10"), Region: "r"}))
+	f, err := e.st.Q.ClaimFloatingIP(ctx, db.ClaimFloatingIPParams{UserID: pgtype.Int8{Int64: uid, Valid: true}, BillingFrom: pgtype.Timestamptz{Time: at(10, 0), Valid: true}, WantRegion: "r"})
+	must(t, err)
+	e.tickAt(at(10, 30)) // the hour cannot be paid: grace starts
+	if e.n(`SELECT count(*) FROM users WHERE id=$1 AND grace_started_at IS NOT NULL`, uid) != 1 {
+		t.Fatal("grace should have started")
+	}
+	e.tickAt(at(10, 30).Add(73 * time.Hour))
+	if e.n(`SELECT count(*) FROM floating_ips WHERE id=$1 AND user_id IS NULL`, f.ID) != 1 {
+		t.Fatal("the address should have been released when grace expired")
+	}
+	if e.n(`SELECT count(*) FROM usage_charges WHERE floating_ip_id=$1 AND status='unpaid'`, f.ID) < 1 {
+		t.Fatal("the debt must stay on the books")
+	}
+}

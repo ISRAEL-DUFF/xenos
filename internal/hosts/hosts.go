@@ -187,7 +187,7 @@ func (s *Set) Remember(vmid int, host string) {
 
 // For returns the API of the host holding vmid.
 func (s *Set) For(ctx context.Context, vmid int) (proxmox.API, error) {
-	if len(s.order) == 1 {
+	if len(s.order) == 1 && s.Resolve == nil {
 		return s.byName[s.order[0]].API, nil
 	}
 	s.mu.Lock()
@@ -231,6 +231,25 @@ func (s *Set) Attach(ctx context.Context, st *store.Store) error {
 		if err := st.Q.SyncHost(ctx, n); err != nil {
 			return err
 		}
+	}
+	// Refuse to start when a VM or floating IP lives on a host this file does not describe: operations would go
+	// to the wrong machine, or silently find nothing.
+	rows, err := st.Pool.Query(ctx, `SELECT DISTINCT host FROM vms WHERE state <> 'deleted' UNION SELECT DISTINCT host FROM floating_ips WHERE user_id IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return err
+		}
+		if _, ok := s.byName[h]; !ok {
+			return fmt.Errorf("VMs or floating IPs live on host %q, which is not in the hosts file: add it back (or move them) before starting", h)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
 	}
 	s.Resolve = func(ctx context.Context, vmid int) (string, error) {
 		return st.Q.HostOfVMID(ctx, pgtype.Int4{Int32: int32(vmid), Valid: true})

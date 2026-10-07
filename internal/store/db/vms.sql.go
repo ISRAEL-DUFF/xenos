@@ -800,6 +800,22 @@ func (q *Queries) LockUserStatus(ctx context.Context, id int64) (string, error) 
 	return status, err
 }
 
+const lockUserVMState = `-- name: LockUserVMState :one
+SELECT state FROM vms WHERE id = $1 AND user_id = $2 FOR UPDATE
+`
+
+type LockUserVMStateParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+func (q *Queries) LockUserVMState(ctx context.Context, arg LockUserVMStateParams) (string, error) {
+	row := q.db.QueryRow(ctx, lockUserVMState, arg.ID, arg.UserID)
+	var state string
+	err := row.Scan(&state)
+	return state, err
+}
+
 const markVMDeleted = `-- name: MarkVMDeleted :exec
 UPDATE vms SET state = 'deleted', deleted_at = now() WHERE id = $1
 `

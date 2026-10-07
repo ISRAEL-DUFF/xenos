@@ -2,12 +2,15 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/israel-duff/xenos/internal/proxmox"
 	"github.com/israel-duff/xenos/internal/testutil"
@@ -229,4 +232,49 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (e *testEnv) countJobs(t *testing.T, kind string) int {
 	return count(t, e, `SELECT count(*) FROM jobs WHERE kind=$1 AND status='queued'`, kind)
+}
+
+func TestFailedCleanupKeepsTheAddressOutOfThePool(t *testing.T) {
+	env, pve, prov := floatingEnv(t)
+	a := newVMUser(t, env, "a@x.co", 100*nanoDay)
+	_, o1 := a.create(t, map[string]any{"hostname": "one"})
+	vm1 := int64(o1["id"].(float64))
+	env.run(t, prov)
+	g1 := guestFor(t, pve, env, vm1)
+	_, f := a.c.do("POST", "/v1/floating-ips", map[string]any{"vm_id": vm1}, a.c.csrfHdr())
+	id := int64(f["id"].(float64))
+	env.run(t, prov)
+
+	// Release while the host's firewall call fails: the address must not become allocatable.
+	pve.Fail["isolate"] = errors.New("proxmox is down")
+	if code, _ := a.c.do("DELETE", "/v1/floating-ips/"+itoa(id), nil, a.c.csrfHdr()); code != 202 {
+		t.Fatalf("release = %d", code)
+	}
+	env.run(t, prov) // the job fails and is retried; still failing
+	b := newVMUser(t, env, "b@x.co", 100*nanoDay)
+	for i := 0; i < 3; i++ { // b can take the other two free addresses, never the stuck one
+		if code, out := b.c.do("POST", "/v1/floating-ips", map[string]any{}, b.c.csrfHdr()); code == 201 && out["address"] == f["address"] {
+			t.Fatalf("the address was handed out while the old guest still has it")
+		}
+	}
+	if !contains(g1.Allowed, "198.51.100.10") {
+		t.Fatal("test setup: the old guest should still hold it")
+	}
+	// The monitor's sweep finds it, and once the host answers the cleanup completes.
+	if n, _ := env.st.Q.FloatingDueForCheck(context.Background(), pgtype.Timestamptz{Time: time.Now().Add(-time.Hour), Valid: true}); len(n) != 1 || n[0] != id {
+		t.Fatalf("the sweep should list the stuck address: %v", n)
+	}
+	delete(pve.Fail, "isolate")
+	if _, err := env.st.Pool.Exec(context.Background(), `UPDATE jobs SET run_after = now() WHERE status = 'queued'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := prov.ReconcileFloating(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if contains(g1.Allowed, "198.51.100.10") {
+		t.Fatal("the old guest must lose the address")
+	}
+	if n := count(t, env, `SELECT count(*) FROM floating_ips WHERE id=$1 AND applied_vm_id IS NULL`, id); n != 1 {
+		t.Fatal("the address should now be clean")
+	}
 }

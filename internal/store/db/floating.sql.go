@@ -120,13 +120,18 @@ func (q *Queries) FinishFloatingBilling(ctx context.Context) error {
 }
 
 const floatingDueForCheck = `-- name: FloatingDueForCheck :many
-SELECT f.id FROM floating_ips f JOIN vms v ON v.id = f.vm_id
-WHERE f.vm_id IS NOT NULL AND v.state = 'running' AND (f.applied_vm_id IS DISTINCT FROM f.vm_id OR f.applied_at IS NULL OR f.applied_at < $1)
+SELECT f.id FROM floating_ips f
+WHERE ((
+    f.vm_id IS NOT NULL AND (f.applied_vm_id IS DISTINCT FROM f.vm_id OR f.applied_at IS NULL OR f.applied_at < $1)
+    AND EXISTS (SELECT 1 FROM vms v WHERE v.id = f.vm_id AND v.state = 'running')
+  ) OR (f.vm_id IS NULL AND f.applied_vm_id IS NOT NULL))
   AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'vm.floating' AND j.status IN ('queued', 'running') AND j.payload->>'floating_id' = f.id::text)
 ORDER BY f.id LIMIT 100
 `
 
-// Attached addresses whose VM is running and that have not been confirmed on the guest for an hour.
+// Addresses that need a reconcile: attached ones whose VM is running and not confirmed for an hour (or whose guest
+// moved on), and released or detached ones still configured on a guest (a cleanup that failed must be retried
+// before the address can be handed to anyone else).
 func (q *Queries) FloatingDueForCheck(ctx context.Context, appliedAt pgtype.Timestamptz) ([]int64, error) {
 	rows, err := q.db.Query(ctx, floatingDueForCheck, appliedAt)
 	if err != nil {
@@ -441,6 +446,42 @@ func (q *Queries) ReleaseFloatingIP(ctx context.Context, arg ReleaseFloatingIPPa
 	return result.RowsAffected(), nil
 }
 
+const releaseUserFloatingIPs = `-- name: ReleaseUserFloatingIPs :many
+UPDATE floating_ips SET user_id = NULL, vm_id = NULL, label = '', billing_until = $2
+WHERE user_id = $1 RETURNING id, (applied_vm_id IS NOT NULL)::boolean AS configured
+`
+
+type ReleaseUserFloatingIPsParams struct {
+	UserID       pgtype.Int8        `json:"user_id"`
+	BillingUntil pgtype.Timestamptz `json:"billing_until"`
+}
+
+type ReleaseUserFloatingIPsRow struct {
+	ID         int64 `json:"id"`
+	Configured bool  `json:"configured"`
+}
+
+// An account that ran out of funds past its grace loses its floating IPs (the debt stays collectible through billing_user_id).
+func (q *Queries) ReleaseUserFloatingIPs(ctx context.Context, arg ReleaseUserFloatingIPsParams) ([]ReleaseUserFloatingIPsRow, error) {
+	rows, err := q.db.Query(ctx, releaseUserFloatingIPs, arg.UserID, arg.BillingUntil)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ReleaseUserFloatingIPsRow{}
+	for rows.Next() {
+		var i ReleaseUserFloatingIPsRow
+		if err := rows.Scan(&i.ID, &i.Configured); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setFloatingBillingFrom = `-- name: SetFloatingBillingFrom :exec
 UPDATE floating_ips SET billing_from = $2 WHERE id = $1
 `
@@ -471,6 +512,18 @@ func (q *Queries) SetFloatingTarget(ctx context.Context, arg SetFloatingTargetPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const skipFloatingBilling = `-- name: SkipFloatingBilling :exec
+UPDATE floating_ips SET billing_from = CASE WHEN billing_until IS NULL THEN date_trunc('hour', now()) ELSE NULL END,
+       billing_user_id = CASE WHEN billing_until IS NULL THEN billing_user_id ELSE NULL END
+WHERE billing_from IS NOT NULL
+`
+
+// With a zero price nothing is charged: finish released addresses and keep active ones' cursor at the current hour.
+func (q *Queries) SkipFloatingBilling(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, skipFloatingBilling)
+	return err
 }
 
 const statementFloatingCharges = `-- name: StatementFloatingCharges :many

@@ -119,7 +119,7 @@ func (s *Server) placeVM(ctx context.Context, req placeRequest) (string, *apiErr
 			continue
 		}
 		health := s.health.get(ctx, h, now)
-		if !health.ok {
+		if !health.ok || health.memTotal <= 0 {
 			continue
 		}
 		after := float64((committed[h.Name]+req.PlanRAMMB)<<20) / float64(max(health.memTotal, 1))

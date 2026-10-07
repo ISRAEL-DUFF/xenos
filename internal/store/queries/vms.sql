@@ -185,3 +185,6 @@ UPDATE vms SET boot_script_status = $2, boot_script_exit = $3, boot_script_outpu
 -- name: LockUserStatus :one
 -- Takes the row lock that serialises creating VMs, closing the account and converting deposits.
 SELECT status FROM users WHERE id = $1 FOR UPDATE;
+
+-- name: LockUserVMState :one
+SELECT state FROM vms WHERE id = $1 AND user_id = $2 FOR UPDATE;

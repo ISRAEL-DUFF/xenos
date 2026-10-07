@@ -29,6 +29,8 @@ func (p *Provisioner) floating(ctx context.Context, j *jobs.Job) error {
 	if err := json.Unmarshal(j.Payload, &in); err != nil {
 		return fmt.Errorf("bad payload: %w", err)
 	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute) // a hung host must not hold a worker for ever
+	defer cancel()
 	return p.ReconcileFloating(ctx, in.FloatingID)
 }
 
@@ -52,7 +54,11 @@ func (p *Provisioner) ReconcileFloating(ctx context.Context, id int64) error {
 
 		// Take it off the VM it was configured on, when that is no longer where it points.
 		if f.AppliedVmID.Valid && (!f.VmID.Valid || f.AppliedVmID.Int64 != f.VmID.Int64) {
-			p.unconfigure(ctx, q, f.AppliedVmID.Int64, addr)
+			// A failed cleanup fails the job (it retries, and the monitor re-queues it): the address must not be
+			// handed to anyone while an old guest can still send from it.
+			if err := p.unconfigure(ctx, q, f.AppliedVmID.Int64, addr); err != nil {
+				return err
+			}
 			if err := q.MarkFloatingApplied(ctx, db.MarkFloatingAppliedParams{ID: id}); err != nil {
 				return err
 			}
@@ -93,28 +99,37 @@ func (p *Provisioner) ReconcileFloating(ctx context.Context, id int64) error {
 	})
 }
 
-// unconfigure removes the address from a VM it no longer points at. The old VM may be dead or gone (that is the
-// failover case), so nothing here is allowed to block the move.
-func (p *Provisioner) unconfigure(ctx context.Context, q *db.Queries, vmID int64, addr netip.Addr) {
+// unconfigure removes the address from a VM it no longer points at. A VM that is gone (deleted, destroyed on the
+// host) has nothing to clean. Taking the address out of the VM's firewall set is mandatory: once it is gone the
+// address is filtered even if the guest still holds it, so a guest that cannot be reached is tolerated after that.
+func (p *Provisioner) unconfigure(ctx context.Context, q *db.Queries, vmID int64, addr netip.Addr) error {
 	w, err := q.GetVMForWork(ctx, vmID)
-	if err != nil || w.State == "deleted" || !w.ProxmoxVmid.Valid {
-		return
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (w.State == "deleted" || !w.ProxmoxVmid.Valid)) {
+		return nil
+	} else if err != nil {
+		return err
 	}
 	vmid := int(w.ProxmoxVmid.Int32)
 	st, err := p.PVE.Status(ctx, vmid)
-	if err != nil || !st.Exists {
-		return
+	if err != nil {
+		return fmt.Errorf("check vm %d before removing %s: %w", vmID, addr, err)
 	}
-	if allowed, err := p.allowedFor(ctx, q, w); err == nil {
-		if err := p.PVE.Isolate(ctx, vmid, allowed); err != nil {
-			p.Log.Warn("floating ip: could not update the old vm's firewall", "vm_id", vmID, "err", err)
-		}
+	if !st.Exists {
+		return nil
+	}
+	allowed, err := p.allowedFor(ctx, q, w)
+	if err != nil {
+		return err
+	}
+	if err := p.PVE.Isolate(ctx, vmid, allowed); err != nil {
+		return fmt.Errorf("remove %s from vm %d's firewall set: %w", addr, vmID, err)
 	}
 	if st.Running {
 		if out, err := p.execShell(ctx, vmid, floatingScript(addr, false)); err != nil {
-			p.Log.Warn("floating ip: could not remove the address from the old vm", "vm_id", vmID, "err", err, "output", out)
+			p.Log.Warn("floating ip: could not remove the address from the old vm's interface (it is filtered)", "vm_id", vmID, "err", err, "output", out)
 		}
 	}
+	return nil
 }
 
 // allowedFor is every address the VM may send from: its own, plus the floating IPs that point at it.
@@ -217,5 +232,21 @@ func (p *Provisioner) execShell(ctx context.Context, vmid int, script string) (s
 			return "", fmt.Errorf("the command did not finish: %w", ctx.Err())
 		case <-time.After(p.Cfg.PollInterval):
 		}
+	}
+}
+
+// reisolate puts the guest's anti-spoof set back after a snapshot rollback (the rollback restores the VM's
+// configuration from when the snapshot was taken).
+func (p *Provisioner) reisolate(ctx context.Context, vmID int64) {
+	w, err := p.work(ctx, vmID)
+	if err != nil || !w.ProxmoxVmid.Valid {
+		return
+	}
+	allowed, err := p.allowedFor(ctx, p.Store.Q, w)
+	if err == nil {
+		err = p.PVE.Isolate(ctx, int(w.ProxmoxVmid.Int32), allowed)
+	}
+	if err != nil {
+		p.Log.Warn("could not re-apply the guest firewall after a restore", "vm_id", vmID, "err", err)
 	}
 }

@@ -161,6 +161,12 @@ func (s *Server) allocateFloatingIP(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if in.VMID != nil {
+			if st, err := q.LockUserVMState(ctx, db.LockUserVMStateParams{ID: target.ID, UserID: user.ID}); err != nil {
+				return err
+			} else if st != "running" && st != "stopped" {
+				apiErr = &apiError{http.StatusConflict, "the VM must be running or stopped to take a floating IP"}
+				return errAbort
+			}
 			if _, err := q.SetFloatingTarget(ctx, db.SetFloatingTargetParams{ID: created.ID, UserID: pgtype.Int8{Int64: user.ID, Valid: true}, VmID: pgtype.Int8{Int64: target.ID, Valid: true}}); err != nil {
 				return err
 			}
@@ -230,13 +236,24 @@ func (s *Server) attachFloatingIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := pgtype.Int8{Int64: user.ID, Valid: true}
+	var apiErr *apiError
 	err = s.Store.InTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		// Lock the VM and look again: a delete that began since the check above must win.
+		if st, err := q.LockUserVMState(ctx, db.LockUserVMStateParams{ID: v.ID, UserID: user.ID}); err != nil {
+			return err
+		} else if st != "running" && st != "stopped" {
+			apiErr = &apiError{http.StatusConflict, "the VM must be running or stopped to take a floating IP"}
+			return errAbort
+		}
 		if _, err := q.SetFloatingTarget(ctx, db.SetFloatingTargetParams{ID: f.ID, UserID: owner, VmID: pgtype.Int8{Int64: v.ID, Valid: true}}); err != nil {
 			return err
 		}
 		return enqueueFloating(ctx, tx, f.ID)
 	})
-	if err != nil {
+	if errors.Is(err, errAbort) && apiErr != nil {
+		writeErr(w, apiErr.status, apiErr.msg)
+		return
+	} else if err != nil {
 		s.fail(w, r, err)
 		return
 	}

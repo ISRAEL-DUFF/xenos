@@ -352,7 +352,7 @@ func (t *tick) record(ctx context.Context, v db.ListBillingVMsRow, h time.Time) 
 // released, attached or not. It follows the same cursor scheme as VMs, so a crash never skips or repeats an hour.
 func (t *tick) chargeFloating(ctx context.Context) error {
 	if t.m.FloatingIPPriceUUSDT <= 0 {
-		return nil
+		return t.m.Store.Q.SkipFloatingBilling(ctx)
 	}
 	rows, err := t.m.Store.Q.ListBillingFloating(ctx)
 	if err != nil {
@@ -433,13 +433,31 @@ func (t *tick) enforce(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !live { // everything is gone (deleted by the customer or by expiry): the debt no longer needs a countdown
+		held, err := q.CountUserFloatingIPs(ctx, pgtype.Int8{Int64: u.ID, Valid: true})
+		if err != nil {
+			return err
+		}
+		if !live && held == 0 { // everything is gone (deleted by the customer or by expiry): the debt no longer needs a countdown
 			if err := q.ClearGrace(ctx, u.ID); err != nil {
 				return err
 			}
 			continue
 		}
 		if !t.now.Before(u.GraceStartedAt.Time.Add(t.m.Grace)) {
+			if held > 0 {
+				t.m.Log.Info("grace expired: releasing floating ips", "user_id", u.ID, "count", held)
+				rel, err := q.ReleaseUserFloatingIPs(ctx, db.ReleaseUserFloatingIPsParams{UserID: pgtype.Int8{Int64: u.ID, Valid: true}, BillingUntil: tsOf(t.now)})
+				if err != nil {
+					return err
+				}
+				for _, r := range rel {
+					if r.Configured {
+						if err := t.m.Jobs.Enqueue(ctx, vm.JobFloating, vm.Payload{FloatingID: r.ID}); err != nil {
+							return err
+						}
+					}
+				}
+			}
 			ids, err := q.ListUserVMsToDelete(ctx, u.ID)
 			if err != nil {
 				return err

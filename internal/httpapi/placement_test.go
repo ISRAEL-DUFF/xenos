@@ -211,3 +211,18 @@ func TestFloatingIPsStayOnTheirHost(t *testing.T) {
 		t.Fatalf("cross-host attach = %d %v, want 409", code, out)
 	}
 }
+
+func TestStartupRefusesWhenVMsLiveOnAHostThatIsNotConfigured(t *testing.T) {
+	f := newFleet(t, 2, "a", "b")
+	u := newVMUser(t, f.env, "u@x.co", 100*nanoDay)
+	_, out := u.create(t, nil)
+	h := f.hostOf(t, out)
+	only := "a"
+	if h == "a" {
+		only = "b"
+	}
+	set := hosts.NewSet(&hosts.Host{Name: only, API: proxmox.NewFake()})
+	if err := set.Attach(context.Background(), f.env.st); err == nil {
+		t.Fatalf("a hosts file without %q (which holds a VM) must be refused", h)
+	}
+}

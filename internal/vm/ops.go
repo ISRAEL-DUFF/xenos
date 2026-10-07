@@ -248,6 +248,7 @@ func (p *Provisioner) restore(ctx context.Context, j *jobs.Job, in Payload) erro
 	switch {
 	case err == nil:
 		p.release(ctx, in.VMID)
+		p.reisolate(ctx, in.VMID)
 		_ = p.reapplyFloating(ctx, in.VMID)
 	case finalFailure(ctx, j):
 		p.Log.Error("restore failed permanently; releasing the VM", "vm_id", w.ID, "err", err)

@@ -54,9 +54,14 @@ UPDATE floating_ips SET vm_id = NULL WHERE vm_id = $1;
 UPDATE floating_ips SET applied_vm_id = NULL WHERE applied_vm_id = $1;
 
 -- name: FloatingDueForCheck :many
--- Attached addresses whose VM is running and that have not been confirmed on the guest for an hour.
-SELECT f.id FROM floating_ips f JOIN vms v ON v.id = f.vm_id
-WHERE f.vm_id IS NOT NULL AND v.state = 'running' AND (f.applied_vm_id IS DISTINCT FROM f.vm_id OR f.applied_at IS NULL OR f.applied_at < $1)
+-- Addresses that need a reconcile: attached ones whose VM is running and not confirmed for an hour (or whose guest
+-- moved on), and released or detached ones still configured on a guest (a cleanup that failed must be retried
+-- before the address can be handed to anyone else).
+SELECT f.id FROM floating_ips f
+WHERE ((
+    f.vm_id IS NOT NULL AND (f.applied_vm_id IS DISTINCT FROM f.vm_id OR f.applied_at IS NULL OR f.applied_at < $1)
+    AND EXISTS (SELECT 1 FROM vms v WHERE v.id = f.vm_id AND v.state = 'running')
+  ) OR (f.vm_id IS NULL AND f.applied_vm_id IS NOT NULL))
   AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'vm.floating' AND j.status IN ('queued', 'running') AND j.payload->>'floating_id' = f.id::text)
 ORDER BY f.id LIMIT 100;
 
@@ -83,3 +88,14 @@ SELECT c.floating_ip_id, host(f.address)::text AS address, c.hour, c.amount_uusd
 FROM usage_charges c JOIN floating_ips f ON f.id = c.floating_ip_id
 WHERE c.user_id = $1 AND c.hour >= $2 AND c.hour < $3
 ORDER BY c.floating_ip_id, c.hour;
+
+-- name: SkipFloatingBilling :exec
+-- With a zero price nothing is charged: finish released addresses and keep active ones' cursor at the current hour.
+UPDATE floating_ips SET billing_from = CASE WHEN billing_until IS NULL THEN date_trunc('hour', now()) ELSE NULL END,
+       billing_user_id = CASE WHEN billing_until IS NULL THEN billing_user_id ELSE NULL END
+WHERE billing_from IS NOT NULL;
+
+-- name: ReleaseUserFloatingIPs :many
+-- An account that ran out of funds past its grace loses its floating IPs (the debt stays collectible through billing_user_id).
+UPDATE floating_ips SET user_id = NULL, vm_id = NULL, label = '', billing_until = $2
+WHERE user_id = $1 RETURNING id, (applied_vm_id IS NOT NULL)::boolean AS configured;
