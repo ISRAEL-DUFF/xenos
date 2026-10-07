@@ -1,5 +1,7 @@
 # Xenos
 
+Step-by-step order for standing the host up: [docs/host-setup-runbook.md](docs/host-setup-runbook.md).
+
 Hourly-billed VPS platform: Go control plane + Proxmox + iSpend wallet billing.
 Spec: [VPS V1 Weekend Build Plan.md](<VPS V1 Weekend Build Plan.md>).
 

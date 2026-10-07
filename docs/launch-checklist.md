@@ -52,7 +52,7 @@ Run `xenosctl preflight` on the server first (add `--send-test you@example.com` 
 - [ ] **manual** Prometheus scrapes both processes and `promtool check rules deploy/prometheus/alerts.yml` passes (see `deploy/prometheus/README.md`; note Prometheus's own default port 9090 collides with the API's)
 - [ ] **host** Take two snapshots, change a file, restore the first: the file change is gone and the VM comes back. Check the API token role has the snapshot privileges
 - [ ] **host** The browser console shows the login prompt of a running VM and accepts typing (the host's VNC password handshake and `vncwebsocket` authentication with the API token are only proven against the real host)
-- [ ] **host** The `root` login works over SSH with the injected key (Ubuntu cloud images may refuse direct root login; confirm and adjust `templates.ci_user`)
+- [ ] **host** (see docs/host-setup-runbook.md for the whole host order) The `root` login works over SSH with the injected key (Ubuntu cloud images may refuse direct root login; confirm and adjust `templates.ci_user`)
 
 ## Billing
 
