@@ -212,6 +212,10 @@ Walk these in order; each corresponds to an item in `docs/launch-checklist.md` (
 8. **Port 25:** on the control plane `xenosctl firewall nft vmbr0 > xenos_mail.nft`, copy to the VPS `/etc/nftables.d/`, load it, and from a VM check `timeout 5 bash -c '</dev/tcp/smtp.gmail.com/25'` fails while `…/587` connects.
 9. **Two hosts (optional):** a second small VPS the same way as steps 1-7 (node name `pvetest2`, subnet `10.78.0.0/24`), then follow **More than one host** in `deploy/proxmox/README.md`. Create two VMs with the same `spread_group`: they land on different hosts.
 
+## Record everything
+
+The whole rehearsal is logged in `docs/rehearsal/` (see its README): every step, every problem and fix, with no secrets. Keep it up to date as you go, and fix this runbook whenever a step turns out to be wrong.
+
 ## What this does not prove
 
 Speed (the under-2-minutes target), your provider's real routed subnet and the `/29` versus `/32` prefix question, IPv6 routing, real outbound IP and port-25 behaviour, RAID, and the Storage Box backups. Those are the short session on the real server.
